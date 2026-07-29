@@ -166,6 +166,11 @@ batch tools can read the complete table directly. For example, a tool can
 select one signal's two columns, drop trailing empty rows, and obtain an
 `N × 2` array without parsing custom blocks or mixed record types.
 
+The repository's default `scenario.csv` contains 81 samples at 10 Hz over 8
+seconds. It uses a 0.25 Hz sine wave with ±25% amplitude: sidestick pitch
+completes one cycle from 0 to 4 seconds while roll remains neutral, then roll
+completes one cycle from 4 to 8 seconds while pitch remains neutral.
+
 For each configured signal:
 
 - configured time and value columns must exist exactly once;
@@ -299,15 +304,24 @@ changes from exactly `0` to exactly `1`. On that transition, the gauge reads
 independent `scenario.csv` reader per injection, and logs the cursor count. The
 arm frame reads only each reader's CSV header. Each subsequent `PreUpdate`
 consumes at most one data row per cursor until all cursors have two samples,
-then logs `REPLAYER: scenario cursors ready`. A file or parsing failure resets
+then logs `REPLAYER: scenario cursors ready` and captures
+`E:SIMULATION TIME` as scenario time zero. On every subsequent `PreUpdate`, each
+cursor advances by at most one row when elapsed scenario time passes its next
+sample timestamp. The gauge prints elapsed simulator seconds, each injection's
+logical name and simulator variable, the previous and next `(time, value)` rows,
+the interpolated source value, and its affine-converted simulator value. A file
+or parsing failure resets
 the armed LVAR to `0` and terminates the gauge task without panicking. No
 full-file scenario validation runs in the MVP, and disarm transitions have no
 behavior.
 
 To validate incremental loading, run the installer, load the A32NX, and set
 `L:REPLAYER_ARMED` to `1` with an LVAR or calculator-code tool. Verify the
-console reports the cursor count followed by the ready message. This does not
-yet inject controls or record telemetry.
+console reports the cursor count followed by elapsed simulator seconds, the
+ready message, and one time-varying interpolation-row pair per configured
+injection on every frame. The diagnostic proves cursor scheduling,
+interpolation, and range conversion; it does not yet write the values to MSFS or
+record telemetry.
 
 ## A32NX MVP mappings
 

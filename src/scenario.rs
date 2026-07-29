@@ -12,7 +12,7 @@ use std::path::Path;
 use anyhow::Context;
 
 use crate::config::{InjectionConfig, ReplayConfig};
-use crate::playback::Sample;
+use crate::playback::{AffineRange, Sample};
 
 pub use crate::error::ScenarioError;
 
@@ -49,6 +49,58 @@ struct ValidationState {
     ended: bool,
 }
 
+/// Two scenario rows currently bounding interpolation for one injection.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InterpolationRows<'a> {
+    /// Logical injection name.
+    pub signal: &'a str,
+    /// Prefixed simulator destination from the replay configuration.
+    pub variable: &'a str,
+    /// Earlier sample in the interpolation interval.
+    pub previous: Sample,
+    /// Later sample in the interpolation interval.
+    pub next: Sample,
+    /// Configured conversion from source scale to simulator scale.
+    pub conversion: AffineRange,
+}
+
+/// Progress reported by one incremental scenario update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScenarioProgress {
+    /// At least one cursor does not yet have two samples.
+    Loading,
+    /// Every cursor has two rows that bracket interpolation.
+    Running,
+    /// Every cursor has advanced beyond its final row.
+    Completed,
+}
+
+/// Result of advancing every scenario cursor for one simulator frame.
+pub struct ScenarioStep<'a> {
+    progress: ScenarioProgress,
+    cursors: &'a [SignalCursor],
+}
+
+impl ScenarioStep<'_> {
+    /// Returns the aggregate cursor progress for this frame.
+    pub const fn progress(&self) -> ScenarioProgress {
+        self.progress
+    }
+
+    /// Returns the rows available for interpolation on this frame.
+    pub fn interpolation_rows(&self) -> impl Iterator<Item = InterpolationRows<'_>> {
+        self.cursors.iter().filter_map(|cursor| {
+            Some(InterpolationRows {
+                signal: &cursor.signal,
+                variable: &cursor.variable,
+                previous: cursor.previous?,
+                next: cursor.next?,
+                conversion: cursor.conversion,
+            })
+        })
+    }
+}
+
 /// Incremental, read-only scenario loader with one file cursor per injection.
 pub struct ScenarioPlayback {
     cursors: Vec<SignalCursor>,
@@ -56,12 +108,15 @@ pub struct ScenarioPlayback {
 
 struct SignalCursor {
     signal: String,
+    variable: String,
     time_column: String,
     value_column: String,
     columns: ColumnPair,
     reader: csv::Reader<File>,
     previous: Option<Sample>,
     next: Option<Sample>,
+    conversion: AffineRange,
+    ended: bool,
 }
 
 impl ScenarioPlayback {
@@ -105,34 +160,45 @@ impl ScenarioPlayback {
 
             cursors.push(SignalCursor {
                 signal: injection.name.clone(),
+                variable: injection.variable.clone(),
                 time_column: injection.time_column.clone(),
                 value_column: injection.value_column.clone(),
                 columns,
                 reader,
                 previous: None,
                 next: None,
+                conversion: AffineRange::new(injection.source_range, injection.simulator_range)
+                    .with_context(|| {
+                        format!("invalid range conversion for signal `{}`", injection.name)
+                    })?,
+                ended: false,
             });
         }
 
         Ok(Self { cursors })
     }
 
-    /// Reads at most one data row from each cursor.
+    /// Advances every signal cursor for the current elapsed scenario time.
     ///
-    /// Cursors that already contain two samples are not advanced. The method
-    /// returns `true` only on the frame that every cursor becomes ready for
-    /// interpolation. Calls made after that transition return `false`.
-    pub fn read_frame(&mut self) -> anyhow::Result<bool> {
-        if self.cursors.iter().all(SignalCursor::is_ready) {
-            return Ok(false);
+    /// Each cursor consumes at most one data row. Before playback starts,
+    /// repeated calls with `0` prime the two interpolation rows. During
+    /// playback, a cursor advances when `elapsed_seconds` passes its next row.
+    pub fn next(&mut self, elapsed_seconds: f64) -> anyhow::Result<ScenarioStep<'_>> {
+        for cursor in &mut self.cursors {
+            cursor.next(elapsed_seconds)?;
         }
 
-        for cursor in &mut self.cursors {
-            if cursor.next.is_none() {
-                cursor.read_one()?;
-            }
-        }
-        Ok(self.cursors.iter().all(SignalCursor::is_ready))
+        let progress = if self.cursors.iter().all(|cursor| cursor.ended) {
+            ScenarioProgress::Completed
+        } else if self.cursors.iter().all(SignalCursor::is_ready) {
+            ScenarioProgress::Running
+        } else {
+            ScenarioProgress::Loading
+        };
+        Ok(ScenarioStep {
+            progress,
+            cursors: &self.cursors,
+        })
     }
 
     /// Returns the number of independently opened signal cursors.
@@ -142,7 +208,46 @@ impl ScenarioPlayback {
 }
 
 impl SignalCursor {
-    fn read_one(&mut self) -> anyhow::Result<()> {
+    fn next(&mut self, elapsed_seconds: f64) -> anyhow::Result<()> {
+        if self.ended {
+            return Ok(());
+        }
+        if self.previous.is_none() {
+            self.previous = Some(self.required_sample()?);
+            return Ok(());
+        }
+        if self.next.is_none() {
+            self.next = Some(self.required_sample()?);
+            return Ok(());
+        }
+
+        let next = self.next.ok_or_else(|| {
+            anyhow::anyhow!("signal `{}` has no next interpolation row", self.signal)
+        })?;
+        if elapsed_seconds <= next.time_seconds {
+            return Ok(());
+        }
+
+        self.previous = Some(next);
+        match self.read_sample()? {
+            Some(sample) => self.next = Some(sample),
+            None => {
+                self.next = None;
+                self.ended = true;
+            }
+        }
+        Ok(())
+    }
+
+    fn required_sample(&mut self) -> anyhow::Result<Sample> {
+        self.read_sample()?
+            .ok_or_else(|| ScenarioError::MissingSamples {
+                signal: self.signal.clone(),
+            })
+            .map_err(Into::into)
+    }
+
+    fn read_sample(&mut self) -> anyhow::Result<Option<Sample>> {
         let mut record = csv::StringRecord::new();
         let has_record = self
             .reader
@@ -150,10 +255,7 @@ impl SignalCursor {
             .map_err(ScenarioError::Csv)
             .with_context(|| format!("failed to read scenario row for signal `{}`", self.signal))?;
         if !has_record {
-            return Err(ScenarioError::MissingSamples {
-                signal: self.signal.clone(),
-            })
-            .with_context(|| format!("failed to prime signal `{}`", self.signal));
+            return Ok(None);
         }
 
         let line = record.position().map(csv::Position::line);
@@ -164,26 +266,17 @@ impl SignalCursor {
                 signal: self.signal.clone(),
                 line,
             })
-            .with_context(|| format!("failed to prime signal `{}`", self.signal));
+            .with_context(|| format!("failed to read signal `{}`", self.signal));
         }
         if time_text.is_empty() {
-            return Err(ScenarioError::MissingSamples {
-                signal: self.signal.clone(),
-            })
-            .with_context(|| format!("failed to prime signal `{}`", self.signal));
+            return Ok(None);
         }
 
         let time = parse_number(time_text, &self.signal, &self.time_column, line)?;
         let value = parse_number(value_text, &self.signal, &self.value_column, line)?;
-        let sample = Sample::new(time, value)
-            .with_context(|| format!("invalid sample for signal `{}`", self.signal))?;
-
-        if self.previous.is_none() {
-            self.previous = Some(sample);
-        } else {
-            self.next = Some(sample);
-        }
-        Ok(())
+        Sample::new(time, value)
+            .map(Some)
+            .with_context(|| format!("invalid sample for signal `{}`", self.signal))
     }
 
     fn is_ready(&self) -> bool {
@@ -415,6 +508,7 @@ fn summarize(
 #[cfg(test)]
 mod tests {
     use crate::config::parse_config;
+    use crate::playback::LinearSegment;
 
     use super::*;
 
@@ -453,6 +547,16 @@ range = [-180.0, 180.0]
 
     fn validate(body: &str) -> Result<ScenarioSummary, ScenarioError> {
         validate_scenario(format!("{HEADER}{body}").as_bytes(), &config())
+    }
+
+    #[test]
+    fn validates_default_sine_wave_scenario() {
+        let summary = validate_scenario(include_bytes!("../scenario.csv").as_slice(), &config())
+            .unwrap_or_else(|error| panic!("default scenario rejected: {error}"));
+
+        assert_eq!(summary.duration_seconds, 8.0);
+        assert_eq!(summary.signals[0].sample_count, 81);
+        assert_eq!(summary.signals[1].sample_count, 81);
     }
 
     #[test]
@@ -568,11 +672,10 @@ range = [-180.0, 180.0]
         };
         assert_eq!(playback.signal_count(), 2);
 
-        assert!(
-            !playback
-                .read_frame()
-                .unwrap_or_else(|error| { panic!("first incremental read failed: {error:#}") })
-        );
+        let step = playback
+            .next(0.0)
+            .unwrap_or_else(|error| panic!("first incremental read failed: {error:#}"));
+        assert_eq!(step.progress(), ScenarioProgress::Loading);
         assert!(
             playback
                 .cursors
@@ -580,19 +683,65 @@ range = [-180.0, 180.0]
                 .all(|cursor| cursor.previous.is_some() && cursor.next.is_none())
         );
 
-        assert!(
-            playback
-                .read_frame()
-                .unwrap_or_else(|error| { panic!("second incremental read failed: {error:#}") })
-        );
-        assert!(playback.cursors.iter().all(SignalCursor::is_ready));
-        assert!(
-            !playback
-                .read_frame()
-                .unwrap_or_else(|error| { panic!("ready cursor read failed: {error:#}") })
-        );
+        let step = playback
+            .next(0.0)
+            .unwrap_or_else(|error| panic!("second incremental read failed: {error:#}"));
+        assert_eq!(step.progress(), ScenarioProgress::Running);
+        let rows = step.interpolation_rows().collect::<Vec<_>>();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].signal, "sidestick_pitch_position");
+        assert_eq!(rows[0].variable, "K:AXIS_ELEVATOR_SET");
+        assert_eq!(rows[0].previous, Sample::new(0.0, 1.0).unwrap());
+        assert_eq!(rows[0].next, Sample::new(0.5, 3.0).unwrap());
+        assert_eq!(rows[1].signal, "sidestick_roll_position");
+        assert_eq!(rows[1].variable, "K:AXIS_AILERONS_SET");
+        assert_eq!(rows[1].previous, Sample::new(0.0, 2.0).unwrap());
+        assert_eq!(rows[1].next, Sample::new(0.75, 4.0).unwrap());
+
+        let step = playback
+            .next(0.0)
+            .unwrap_or_else(|error| panic!("ready cursor read failed: {error:#}"));
+        assert_eq!(step.progress(), ScenarioProgress::Running);
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn advances_default_scenario_with_elapsed_time() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("scenario.csv");
+        let mut playback = ScenarioPlayback::open(path, &config())
+            .unwrap_or_else(|error| panic!("failed to open default scenario: {error:#}"));
+        let step = playback
+            .next(0.0)
+            .unwrap_or_else(|error| panic!("first prime frame failed: {error:#}"));
+        assert_eq!(step.progress(), ScenarioProgress::Loading);
+        let step = playback
+            .next(0.0)
+            .unwrap_or_else(|error| panic!("second prime frame failed: {error:#}"));
+        assert_eq!(step.progress(), ScenarioProgress::Running);
+
+        for frame in 0..=240 {
+            let elapsed_seconds = f64::from(frame) / 30.0;
+            let step = playback
+                .next(elapsed_seconds)
+                .unwrap_or_else(|error| panic!("advance failed at {elapsed_seconds}: {error:#}"));
+            assert_eq!(step.progress(), ScenarioProgress::Running);
+            for rows in step.interpolation_rows() {
+                assert!(rows.previous.time_seconds <= elapsed_seconds);
+                assert!(elapsed_seconds <= rows.next.time_seconds);
+                LinearSegment::new(rows.previous, rows.next)
+                    .and_then(|segment| segment.value_at(elapsed_seconds))
+                    .unwrap_or_else(|error| {
+                        panic!("interpolation failed at {elapsed_seconds}: {error}")
+                    });
+            }
+        }
+
+        let step = playback
+            .next(8.1)
+            .unwrap_or_else(|error| panic!("completion advance failed: {error:#}"));
+        assert_eq!(step.progress(), ScenarioProgress::Completed);
+        assert_eq!(step.interpolation_rows().count(), 0);
     }
 
     #[test]
