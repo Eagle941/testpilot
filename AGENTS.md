@@ -107,7 +107,7 @@ Use an explicit, documented text format such as CSV unless the existing code est
 - fixed time unit and time origin;
 - signal/parameter names and column order;
 - value types;
-- engineering units;
+- numeric scales and supported ranges;
 - how each parameter's `(time, value)` tuples are represented and associated with that parameter;
 - optional metadata needed to reproduce the test.
 
@@ -115,26 +115,15 @@ Every data point must carry an explicit time value in scenario-relative seconds.
 
 For independently sampled series, use a standard rectangular CSV with adjacent `<signal>.time` and `<signal>.value` columns for each parameter. Values in different pairs on the same row are associated by sample ordinal only and need not have the same timestamp. Keep each pair densely populated from the first data row and permit only trailing empty pairs when series lengths differ. Require both fields of a pair to be present or both empty. Do not introduce custom blocks or mixed row types that make ordinary batch reads difficult.
 
-Do not impose a fixed duration, row-count, or file-size limit. Design parsing and playback so scenarios can use the available disk capacity without requiring proportional RAM. A streaming preflight validation pass followed by a streaming playback pass is acceptable when supported by the MSFS WASM file APIs.
+Do not impose a fixed duration, row-count, or file-size limit. Design parsing and playback so scenarios can use the available disk capacity without requiring proportional RAM. The MVP skips a full-file preflight pass and assumes the scenario is correctly formatted.
 
-Validation must detect and report:
-
-- malformed rows or unsupported format versions;
-- missing, duplicate, reused, half-populated, or internally sparse time/value columns;
-- non-finite numeric values;
-- non-finite, negative, out-of-range, duplicate, or non-increasing timestamps within a parameter's series;
-- arithmetic overflow when parsing timestamps or calculating durations;
-- unknown parameters;
-- invalid units;
-- values outside safe or supported ranges.
-
-Errors should include useful context such as the file, line, column, timestamp, or signal name. Do not silently clamp, skip, or reinterpret invalid data unless that behavior is explicitly part of the format and is reported.
+Open the scenario independently once per configured injection so each signal has its own sequential file position and bounded two-sample lookahead. On the arm frame, read only each cursor's CSV header. On each subsequent MSFS frame, read at most one data row per cursor until every signal has two samples and playback can begin. Never load the complete scenario into memory. File access, CSV parsing, or numeric parsing errors encountered during playback must include useful file, line, column, or signal context and terminate safely without panicking.
 
 ## Input Injection and Safety
 
-- Represent each configured injection through its logical scenario name, prefixed simulator `variable`, value type, units, and valid ranges. The simulator adapter selects the appropriate `msfs-rs` operation from the identifier prefix.
+- Represent each configured injection through its logical scenario name, prefixed simulator `variable`, value type, and valid ranges. The simulator adapter selects the appropriate `msfs-rs` operation from the identifier prefix.
 - Keep conversions at the simulator boundary and test them independently.
-- For each continuous injected signal, linearly interpolate in source units, then apply the configured affine range conversion from source range `[x, y]` to simulator range `[a, b]`: `a + (value - x) * (b - a) / (y - x)`.
+- For each continuous injected signal, linearly interpolate on its source scale, then apply the configured affine range conversion from source range `[x, y]` to simulator range `[a, b]`: `a + (value - x) * (b - a) / (y - x)`.
 - Require finite, strictly ordered range endpoints. Reject source values outside the configured source range and simulator ranges outside the signal catalog's safe range; do not silently clamp them.
 - Read simulator identifiers only from the trusted replay configuration, never from scenario CSV column names or values.
 - Before playback, verify that required simulator/A32NX interfaces can be resolved where the API permits it.

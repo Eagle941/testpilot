@@ -9,6 +9,7 @@ panel="$aircraft/panel"
 sh scripts/build-wasm.sh
 cp -f target/wasm32-wasip1/release/replay-msfs.wasm "$panel/replay.wasm"
 cp -f replayer_config.toml "$aircraft/replayer_config.toml"
+cp -f scenario.csv "$aircraft/scenario.csv"
 
 python - "$package" <<'PY'
 import json
@@ -18,6 +19,7 @@ from pathlib import Path
 package = Path(sys.argv[1])
 aircraft_relative = "SimObjects/AirPlanes/FlyByWire_A320_NEO"
 config_relative = f"{aircraft_relative}/replayer_config.toml"
+scenario_relative = f"{aircraft_relative}/scenario.csv"
 panel_relative = f"{aircraft_relative}/panel/panel.cfg"
 wasm_relative = f"{aircraft_relative}/panel/replay.wasm"
 panel = package / panel_relative
@@ -37,7 +39,7 @@ if gauge not in section.splitlines():
     panel.write_text(text)
 
 layout = json.loads(layout_file.read_text(encoding="utf-8-sig"))
-for relative in (config_relative, panel_relative, wasm_relative):
+for relative in (config_relative, scenario_relative, panel_relative, wasm_relative):
     file = package / relative
     stat = file.stat()
     metadata = {

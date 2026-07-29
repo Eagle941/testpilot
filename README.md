@@ -6,11 +6,11 @@ It replays timestamped flight-control inputs at simulator frame rate and
 streams the configured aircraft response to a telemetry file.
 
 The simulator-independent core currently implements strict replay
-configuration parsing, streaming scenario preflight validation, irregular-time
-linear interpolation, and affine input-range conversion. It also provides an
-MSFS-compatible WASM build and a minimal `replayer` gauge entry point. The
-A32NX adapter, run lifecycle, streaming playback, and telemetry writer remain
-to be implemented.
+configuration parsing, incremental per-signal scenario cursors, optional
+streaming scenario validation, irregular-time linear interpolation, and affine
+input-range conversion. It also provides an MSFS-compatible WASM build and a
+minimal `replayer` gauge entry point. The A32NX adapter, simulator-clock
+playback, and telemetry writer remain to be implemented.
 
 ## MVP scope
 
@@ -115,10 +115,12 @@ that MSFS is never paused during a run and that simulation rate remains `1x`;
 other timing modes are outside the validated MVP behavior.
 
 `L:REPLAYER_ARMED` is the library-owned arming variable. The module initializes
-it to `0` and remains idle. Setting it to `1` loads and validates the configured
-scenario, then starts the run. Setting it back to `0` while running requests an
-abort. The module rejects an overlapping run and resets the variable to `0`
-when the run ends.
+it to `0` and remains idle. Setting it to `1` loads the configuration and opens
+one read-only scenario cursor per injection. The MVP skips a full-file
+preflight pass and assumes the scenario is correctly formatted. Each cursor
+reads at most one row per simulator frame until it has two samples. Setting the
+LVAR back to `0` while running will request an abort once playback is
+implemented.
 
 While running, replay commands take precedence over local pilot controls. The
 simulator adapter must use an A32NX-compatible, verified input-bypass mechanism;
@@ -276,9 +278,10 @@ operations:
 
 1. Runs `scripts/build-wasm.sh`.
 2. Overwrites the aircraft panel's `replay.wasm` with the deployable artifact.
-3. Copies the repository's `replayer_config.toml` into the aircraft directory.
+3. Copies the repository's `replayer_config.toml` and minimal `scenario.csv`
+   into the aircraft directory.
 4. Adds the `htmlgauge04` entry under `[VCockpit17]` if it is absent.
-5. Updates or adds the configuration, `panel.cfg`, and `replay.wasm` entries in
+5. Updates or adds the configuration, scenario, `panel.cfg`, and `replay.wasm` entries in
    package-root `layout.json`, including exact byte sizes and Windows FILETIME
    timestamps.
 
@@ -291,20 +294,20 @@ backups, conflict checks, or rollback, and it does not launch MSFS or modify
 The current smoke test initializes `L:REPLAYER_ARMED` to `0` and reads it on
 every MSFS `PreUpdate` event. The simulator-independent `ArmState` struct owns
 the previous sample, and its `start` method returns `true` only when the value
-changes from exactly `0` to exactly `1`. On that transition, the gauge reads and
-validates
-`SimObjects/AirPlanes/FlyByWire_A320_NEO/replayer_config.toml`, then prints the
-configured injection and recording counts to the MSFS DevMode console. A read
-or validation failure is
-logged with its path, resets the armed LVAR to `0`, and terminates the gauge task
-without panicking. Disarm transitions have no behavior.
+changes from exactly `0` to exactly `1`. On that transition, the gauge reads
+`SimObjects/AirPlanes/FlyByWire_A320_NEO/replayer_config.toml`, opens one
+independent `scenario.csv` reader per injection, and logs the cursor count. The
+arm frame reads only each reader's CSV header. Each subsequent `PreUpdate`
+consumes at most one data row per cursor until all cursors have two samples,
+then logs `REPLAYER: scenario cursors ready`. A file or parsing failure resets
+the armed LVAR to `0` and terminates the gauge task without panicking. No
+full-file scenario validation runs in the MVP, and disarm transitions have no
+behavior.
 
-To validate configuration loading, install the gauge, place a valid configuration
-at `SimObjects/AirPlanes/FlyByWire_A320_NEO/replayer_config.toml`, load the
-A32NX, and set `L:REPLAYER_ARMED` to `1`
-with an LVAR or calculator-code tool. Verify the console reports the loaded
-configuration. This does not yet open the scenario, inject controls, or record
-telemetry.
+To validate incremental loading, run the installer, load the A32NX, and set
+`L:REPLAYER_ARMED` to `1` with an LVAR or calculator-code tool. Verify the
+console reports the cursor count followed by the ready message. This does not
+yet inject controls or record telemetry.
 
 ## A32NX MVP mappings
 

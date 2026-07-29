@@ -1,12 +1,18 @@
-//! Streaming validation for the independently sampled scenario CSV format.
+//! Incremental playback cursors and optional streaming validation for the
+//! independently sampled scenario CSV format.
 //!
-//! Validation retains only per-signal counters and the previous timestamp, so
-//! memory use does not grow with scenario duration.
+//! Playback opens one read-only file cursor per injection and retains two
+//! samples per signal, so memory use does not grow with scenario duration.
 
 use std::collections::HashMap;
+use std::fs::File;
 use std::io::Read;
+use std::path::Path;
+
+use anyhow::Context;
 
 use crate::config::{InjectionConfig, ReplayConfig};
+use crate::playback::Sample;
 
 pub use crate::error::ScenarioError;
 
@@ -41,6 +47,148 @@ struct ValidationState {
     sample_count: u64,
     last_time: Option<f64>,
     ended: bool,
+}
+
+/// Incremental, read-only scenario loader with one file cursor per injection.
+pub struct ScenarioPlayback {
+    cursors: Vec<SignalCursor>,
+}
+
+struct SignalCursor {
+    signal: String,
+    time_column: String,
+    value_column: String,
+    columns: ColumnPair,
+    reader: csv::Reader<File>,
+    previous: Option<Sample>,
+    next: Option<Sample>,
+}
+
+impl ScenarioPlayback {
+    /// Opens the scenario independently for every configured injection.
+    ///
+    /// This reads the CSV header from each cursor but does not consume any data
+    /// rows. The scenario file is never opened for writing.
+    pub fn open(path: impl AsRef<Path>, config: &ReplayConfig) -> anyhow::Result<Self> {
+        let path = path.as_ref();
+        let mut cursors = Vec::with_capacity(config.inject.len());
+
+        for injection in &config.inject {
+            let file = File::open(path).with_context(|| {
+                format!(
+                    "failed to open scenario `{}` for signal `{}`",
+                    path.display(),
+                    injection.name
+                )
+            })?;
+            let mut reader = csv::ReaderBuilder::new()
+                .trim(csv::Trim::All)
+                .from_reader(file);
+            let headers = reader
+                .headers()
+                .map_err(ScenarioError::Csv)
+                .with_context(|| {
+                    format!(
+                        "failed to read scenario header `{}` for signal `{}`",
+                        path.display(),
+                        injection.name
+                    )
+                })?
+                .clone();
+            let columns = find_columns(&headers, injection).with_context(|| {
+                format!(
+                    "invalid scenario header `{}` for signal `{}`",
+                    path.display(),
+                    injection.name
+                )
+            })?;
+
+            cursors.push(SignalCursor {
+                signal: injection.name.clone(),
+                time_column: injection.time_column.clone(),
+                value_column: injection.value_column.clone(),
+                columns,
+                reader,
+                previous: None,
+                next: None,
+            });
+        }
+
+        Ok(Self { cursors })
+    }
+
+    /// Reads at most one data row from each cursor.
+    ///
+    /// Cursors that already contain two samples are not advanced. The method
+    /// returns `true` only on the frame that every cursor becomes ready for
+    /// interpolation. Calls made after that transition return `false`.
+    pub fn read_frame(&mut self) -> anyhow::Result<bool> {
+        if self.cursors.iter().all(SignalCursor::is_ready) {
+            return Ok(false);
+        }
+
+        for cursor in &mut self.cursors {
+            if cursor.next.is_none() {
+                cursor.read_one()?;
+            }
+        }
+        Ok(self.cursors.iter().all(SignalCursor::is_ready))
+    }
+
+    /// Returns the number of independently opened signal cursors.
+    pub fn signal_count(&self) -> usize {
+        self.cursors.len()
+    }
+}
+
+impl SignalCursor {
+    fn read_one(&mut self) -> anyhow::Result<()> {
+        let mut record = csv::StringRecord::new();
+        let has_record = self
+            .reader
+            .read_record(&mut record)
+            .map_err(ScenarioError::Csv)
+            .with_context(|| format!("failed to read scenario row for signal `{}`", self.signal))?;
+        if !has_record {
+            return Err(ScenarioError::MissingSamples {
+                signal: self.signal.clone(),
+            })
+            .with_context(|| format!("failed to prime signal `{}`", self.signal));
+        }
+
+        let line = record.position().map(csv::Position::line);
+        let time_text = record.get(self.columns.time).unwrap_or_default();
+        let value_text = record.get(self.columns.value).unwrap_or_default();
+        if time_text.is_empty() != value_text.is_empty() {
+            return Err(ScenarioError::HalfPopulatedPair {
+                signal: self.signal.clone(),
+                line,
+            })
+            .with_context(|| format!("failed to prime signal `{}`", self.signal));
+        }
+        if time_text.is_empty() {
+            return Err(ScenarioError::MissingSamples {
+                signal: self.signal.clone(),
+            })
+            .with_context(|| format!("failed to prime signal `{}`", self.signal));
+        }
+
+        let time = parse_number(time_text, &self.signal, &self.time_column, line)?;
+        let value = parse_number(value_text, &self.signal, &self.value_column, line)?;
+        let sample = Sample::new(time, value)
+            .with_context(|| format!("invalid sample for signal `{}`", self.signal))?;
+
+        if self.previous.is_none() {
+            self.previous = Some(sample);
+        } else {
+            self.next = Some(sample);
+        }
+        Ok(())
+    }
+
+    fn is_ready(&self) -> bool {
+        self.previous.is_some() && self.next.is_some()
+    }
 }
 
 /// Validates a scenario CSV stream against a replay configuration.
@@ -400,6 +548,51 @@ range = [-180.0, 180.0]
             validate("0,0,0,0\n1,0,2,0\n"),
             Err(ScenarioError::FinalTimestampMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn primes_independent_cursors_one_row_per_frame() {
+        let path = std::env::temp_dir().join(format!(
+            "replay-incremental-scenario-{}.csv",
+            std::process::id()
+        ));
+        let contents = format!("{HEADER}0,1,0,2\n0.5,3,0.75,4\n1,5,1.5,6\n");
+        if let Err(error) = std::fs::write(&path, contents) {
+            panic!("failed to create scenario fixture: {error}");
+        }
+
+        let result = ScenarioPlayback::open(&path, &config());
+        let mut playback = match result {
+            Ok(playback) => playback,
+            Err(error) => panic!("failed to open scenario fixture: {error:#}"),
+        };
+        assert_eq!(playback.signal_count(), 2);
+
+        assert!(
+            !playback
+                .read_frame()
+                .unwrap_or_else(|error| { panic!("first incremental read failed: {error:#}") })
+        );
+        assert!(
+            playback
+                .cursors
+                .iter()
+                .all(|cursor| cursor.previous.is_some() && cursor.next.is_none())
+        );
+
+        assert!(
+            playback
+                .read_frame()
+                .unwrap_or_else(|error| { panic!("second incremental read failed: {error:#}") })
+        );
+        assert!(playback.cursors.iter().all(SignalCursor::is_ready));
+        assert!(
+            !playback
+                .read_frame()
+                .unwrap_or_else(|error| { panic!("ready cursor read failed: {error:#}") })
+        );
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
