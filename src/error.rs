@@ -39,14 +39,6 @@ pub enum ConfigError {
     #[error("unsupported recording signal `{name}` at record.{index}")]
     UnsupportedRecordingSignal { index: usize, name: String },
 
-    #[error(
-        "unsupported source unit `{unit}` at inject.{index}; expected `percent` or `normalized`"
-    )]
-    UnsupportedSourceUnit { index: usize, unit: String },
-
-    #[error("unsupported simulator unit `{unit}` at inject.{index}; expected `normalized`")]
-    UnsupportedSimulatorUnit { index: usize, unit: String },
-
     #[error("invalid {field} at inject.{index}: {reason}")]
     InvalidInjectionRange {
         index: usize,

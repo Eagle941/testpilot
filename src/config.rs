@@ -42,16 +42,14 @@ pub struct ReplayConfig {
 pub struct InjectionConfig {
     /// Logical input signal name from the configuration.
     pub name: String,
+    /// Prefixed simulator destination, such as `K:AXIS_ELEVATOR_SET`.
+    pub variable: String,
     /// CSV column containing scenario-relative timestamps in seconds.
     pub time_column: String,
     /// CSV column containing source values.
     pub value_column: String,
-    /// Engineering unit used by the source values.
-    pub source_unit: SourceUnit,
     /// Inclusive, strictly increasing valid range for source values.
     pub source_range: [f64; 2],
-    /// Engineering unit expected at the simulator boundary.
-    pub simulator_unit: SimulatorUnit,
     /// Inclusive affine-conversion target range within the signal's safe range.
     pub simulator_range: [f64; 2],
 }
@@ -92,39 +90,6 @@ impl RecordingSignal {
     }
 }
 
-/// Engineering units accepted for scenario input values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SourceUnit {
-    /// Percentage values, typically in `[-100, 100]`.
-    Percent,
-    /// Dimensionless normalized values, typically in `[-1, 1]`.
-    Normalized,
-}
-
-impl SourceUnit {
-    /// Returns the stable TOML unit name.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Percent => "percent",
-            Self::Normalized => "normalized",
-        }
-    }
-}
-
-/// Engineering units supported at the simulator input boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SimulatorUnit {
-    /// Dimensionless normalized control position in `[-1, 1]`.
-    Normalized,
-}
-
-impl SimulatorUnit {
-    /// Returns the stable TOML unit name.
-    pub const fn as_str(self) -> &'static str {
-        "normalized"
-    }
-}
-
 /// Native units supported for recorded response signals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordingUnit {
@@ -160,11 +125,10 @@ struct RawReplayConfig {
 #[serde(deny_unknown_fields)]
 struct RawInjectionConfig {
     name: String,
+    variable: String,
     time_column: String,
     value_column: String,
-    source_unit: String,
     source_range: [f64; 2],
-    simulator_unit: String,
     simulator_range: [f64; 2],
 }
 
@@ -254,26 +218,6 @@ fn parse_injections(
         validate_column(index, "time_column", &raw.time_column, &mut columns)?;
         validate_column(index, "value_column", &raw.value_column, &mut columns)?;
 
-        let source_unit = match raw.source_unit.as_str() {
-            "percent" => SourceUnit::Percent,
-            "normalized" => SourceUnit::Normalized,
-            _ => {
-                return Err(ConfigError::UnsupportedSourceUnit {
-                    index,
-                    unit: raw.source_unit,
-                });
-            }
-        };
-        let simulator_unit = match raw.simulator_unit.as_str() {
-            "normalized" => SimulatorUnit::Normalized,
-            _ => {
-                return Err(ConfigError::UnsupportedSimulatorUnit {
-                    index,
-                    unit: raw.simulator_unit,
-                });
-            }
-        };
-
         validate_increasing_range(index, "source_range", raw.source_range)?;
         validate_increasing_range(index, "simulator_range", raw.simulator_range)?;
         if raw.simulator_range[0] < -1.0 || raw.simulator_range[1] > 1.0 {
@@ -282,11 +226,10 @@ fn parse_injections(
 
         result.push(InjectionConfig {
             name: raw.name,
+            variable: raw.variable,
             time_column: raw.time_column,
             value_column: raw.value_column,
-            source_unit,
             source_range: raw.source_range,
-            simulator_unit,
             simulator_range: raw.simulator_range,
         });
     }
@@ -450,20 +393,18 @@ input_file = "scenario.csv"
 
 [inject.0]
 name = "sidestick_pitch_position"
+variable = "K:AXIS_ELEVATOR_SET"
 time_column = "sidestick_pitch_position.time"
 value_column = "sidestick_pitch_position.value"
-source_unit = "percent"
 source_range = [-100.0, 100.0]
-simulator_unit = "normalized"
 simulator_range = [-1.0, 1.0]
 
 [inject.1]
 name = "sidestick_roll_position"
+variable = "K:AXIS_AILERONS_SET"
 time_column = "sidestick_roll_position.time"
 value_column = "sidestick_roll_position.value"
-source_unit = "percent"
 source_range = [-100.0, 100.0]
-simulator_unit = "normalized"
 simulator_range = [-1.0, 1.0]
 
 [record.0]
@@ -517,7 +458,9 @@ range = [-16384.0, 16384.0]
         assert_eq!(config.input_file, PathBuf::from("scenario.csv"));
         assert_eq!(config.inject.len(), 2);
         assert_eq!(config.inject[0].name, "sidestick_pitch_position");
+        assert_eq!(config.inject[0].variable, "K:AXIS_ELEVATOR_SET");
         assert_eq!(config.inject[1].name, "sidestick_roll_position");
+        assert_eq!(config.inject[1].variable, "K:AXIS_AILERONS_SET");
         assert_eq!(config.record.len(), 4);
         assert_eq!(config.record[0].name, RecordingSignal::Pitch);
         assert_eq!(config.record[3].name, RecordingSignal::AileronPosition);
@@ -568,13 +511,29 @@ range = [-16384.0, 16384.0]
     }
 
     #[test]
-    fn accepts_arbitrary_injection_names_and_rejects_unsupported_recordings() {
-        let arbitrary = VALID_CONFIG.replacen("sidestick_pitch_position\"", "custom_input\"", 1);
+    fn accepts_arbitrary_injection_names_and_variables() {
+        let arbitrary = VALID_CONFIG
+            .replacen("sidestick_pitch_position\"", "custom_input\"", 1)
+            .replacen("K:AXIS_ELEVATOR_SET", "L:CUSTOM_INPUT", 1);
         match parse_config(&arbitrary) {
-            Ok(config) => assert_eq!(config.inject[0].name, "custom_input"),
-            Err(error) => panic!("arbitrary injection name should parse: {error}"),
+            Ok(config) => {
+                assert_eq!(config.inject[0].name, "custom_input");
+                assert_eq!(config.inject[0].variable, "L:CUSTOM_INPUT");
+            }
+            Err(error) => panic!("arbitrary injection should parse: {error}"),
         }
+    }
 
+    #[test]
+    fn requires_injection_variable() {
+        assert_error(
+            &VALID_CONFIG.replacen("variable = \"K:AXIS_ELEVATOR_SET\"\n", "", 1),
+            |error| matches!(error, ConfigError::Toml(_)),
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_recordings() {
         assert_error(
             &VALID_CONFIG.replacen("name = \"pitch\"", "name = \"yaw\"", 1),
             |error| matches!(error, ConfigError::UnsupportedRecordingSignal { .. }),
@@ -582,19 +541,7 @@ range = [-16384.0, 16384.0]
     }
 
     #[test]
-    fn rejects_unsupported_units() {
-        assert_error(
-            &VALID_CONFIG.replacen("source_unit = \"percent\"", "source_unit = \"radians\"", 1),
-            |error| matches!(error, ConfigError::UnsupportedSourceUnit { .. }),
-        );
-        assert_error(
-            &VALID_CONFIG.replacen(
-                "simulator_unit = \"normalized\"",
-                "simulator_unit = \"percent\"",
-                1,
-            ),
-            |error| matches!(error, ConfigError::UnsupportedSimulatorUnit { .. }),
-        );
+    fn rejects_unsupported_recording_units() {
         assert_error(
             &VALID_CONFIG.replacen("unit = \"degrees\"", "unit = \"radians\"", 1),
             |error| matches!(error, ConfigError::UnsupportedRecordingUnit { .. }),
@@ -709,8 +656,8 @@ range = [-16384.0, 16384.0]
         );
         assert_error(
             &VALID_CONFIG.replacen(
-                "source_unit = \"percent\"",
-                "source_unit = \"percent\"\ninterpolation = \"linear\"",
+                "source_range = [-100.0, 100.0]",
+                "source_range = [-100.0, 100.0]\ninterpolation = \"linear\"",
                 1,
             ),
             |error| matches!(error, ConfigError::Toml(_)),

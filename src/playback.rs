@@ -7,7 +7,7 @@ pub use crate::error::PlaybackError;
 pub struct Sample {
     /// Scenario-relative timestamp in seconds.
     pub time_seconds: f64,
-    /// Finite value in the signal's configured source unit.
+    /// Finite value in the signal's configured source scale.
     pub value: f64,
 }
 

@@ -40,9 +40,7 @@ Record these aircraft-response signals:
 - elevator position;
 - aileron position.
 
-These are logical scenario and telemetry names, not arbitrary simulator variable names. Before implementing the simulator adapter, determine and document each signal's precise semantics, A32NX/MSFS interface, engineering unit, sign convention, valid range, and update behavior. The `yourcontrols` A32NX mapping is an accepted source for these straightforward MVP mappings; cross-check current FlyByWire A32NX source when the mapping is ambiguous, unavailable through `msfs-rs`, or contradicted by current behavior.
-
-Keep configured injection signal names as strings so the core data model is not restricted to a predefined enum. The MVP simulator adapter maps only the supported signals above and must reject any unmapped name before playback. Do not add speculative simulator mappings before this end-to-end path works.
+These are logical scenario and telemetry names, not simulator variable names. Keep configured injection signal names as strings so the core data model is not restricted to a predefined enum. Each `inject.N` section also contains a `variable` string with its prefixed simulator destination, such as `K:AXIS_ELEVATOR_SET` or `L:SOME_LOCAL_VARIABLE`. Before implementing the simulator adapter, determine and document each signal's precise semantics, A32NX/MSFS interface, engineering unit, sign convention, valid range, and update behavior. The `yourcontrols` A32NX mapping is an accepted source for these straightforward MVP mappings; cross-check current FlyByWire A32NX source when the mapping is ambiguous, unavailable through `msfs-rs`, or contradicted by current behavior. Do not add speculative simulator mappings before this end-to-end path works.
 
 ## Scope and Compatibility
 
@@ -91,7 +89,7 @@ Use an explicit, documented configuration format. The configuration must define:
 - the input time-series file;
 - the parameters and paired time/value columns to inject;
 - the aircraft-response parameters to record;
-- each injected parameter's source engineering unit/range and simulator engineering unit/range;
+- each injected parameter's logical name, prefixed simulator `variable`, paired CSV columns, source range, and simulator range;
 - each recorded parameter's engineering unit and supported range;
 - optional metadata needed to reproduce the test.
 
@@ -134,11 +132,11 @@ Errors should include useful context such as the file, line, column, timestamp, 
 
 ## Input Injection and Safety
 
-- Represent supported signals through an explicit mapping from scenario names to MSFS/A32NX interfaces, value types, units, and valid ranges.
+- Represent each configured injection through its logical scenario name, prefixed simulator `variable`, value type, units, and valid ranges. The simulator adapter selects the appropriate `msfs-rs` operation from the identifier prefix.
 - Keep conversions at the simulator boundary and test them independently.
 - For each continuous injected signal, linearly interpolate in source units, then apply the configured affine range conversion from source range `[x, y]` to simulator range `[a, b]`: `a + (value - x) * (b - a) / (y - x)`.
 - Require finite, strictly ordered range endpoints. Reject source values outside the configured source range and simulator ranges outside the signal catalog's safe range; do not silently clamp them.
-- Do not inject arbitrary variable names directly from an untrusted scenario file.
+- Read simulator identifiers only from the trusted replay configuration, never from scenario CSV column names or values.
 - Before playback, verify that required simulator/A32NX interfaces can be resolved where the API permits it.
 - Stop or fail safely when a required injection fails. Do not continue a test while presenting it as valid.
 - Arm and start a run by setting the library-owned `L:REPLAYER_ARMED` local variable to `1`. Setting it to `0` while running requests an abort. Initialize and reset it to `0` while idle and after any terminal run state. Reject overlapping runs.

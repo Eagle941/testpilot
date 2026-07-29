@@ -27,10 +27,10 @@ It records these responses:
 - `aileron_position`
 
 Injection names are stored as arbitrary logical strings so the core format is
-not coupled to a predefined signal enum. The current MVP simulator adapter will
-map the two names above and must reject any unmapped name before playback.
-Configuration files still cannot supply simulator variable or event identifiers
-directly.
+not coupled to a predefined signal enum. Each injection also provides a
+`variable` string containing its prefixed simulator destination, such as
+`K:AXIS_ELEVATOR_SET` or `L:SOME_LOCAL_VARIABLE`. CSV columns remain logical
+source-data names and do not contain simulator identifiers.
 
 ## MVP configuration
 
@@ -43,20 +43,18 @@ input_file = "scenario.csv"
 
 [inject.0]
 name = "sidestick_pitch_position"
+variable = "K:AXIS_ELEVATOR_SET"
 time_column = "sidestick_pitch_position.time"
 value_column = "sidestick_pitch_position.value"
-source_unit = "percent"
 source_range = [-100.0, 100.0]
-simulator_unit = "normalized"
 simulator_range = [-1.0, 1.0]
 
 [inject.1]
 name = "sidestick_roll_position"
+variable = "K:AXIS_AILERONS_SET"
 time_column = "sidestick_roll_position.time"
 value_column = "sidestick_roll_position.value"
-source_unit = "percent"
 source_range = [-100.0, 100.0]
-simulator_unit = "normalized"
 simulator_range = [-1.0, 1.0]
 
 [record.0]
@@ -85,7 +83,9 @@ script copies it to the hardcoded package-relative configuration path.
 
 `inject` and `record` section indexes are zero-based, contiguous, and define
 stable processing and output-column order. Missing indexes, duplicate signal
-names, and reused time or value columns are invalid.
+names, and reused time or value columns are invalid. The required `variable`
+field preserves its simulator prefix so the adapter can select the appropriate
+`msfs-rs` interface; the parser stores the identifier without interpreting it.
 
 For the MVP, the module reads the package-relative, lowercase filename
 `SimObjects/AirPlanes/FlyByWire_A320_NEO/replayer_config.toml`. Relative
@@ -185,7 +185,7 @@ All range endpoints must be finite and each lower endpoint must be less than
 its upper endpoint. The simulator range must remain within the safe range for
 the supported logical signal. Invalid or out-of-range values are rejected, not
 clamped. Interpolation is performed before conversion so scenario values and
-validation remain in the documented source unit. Logical source signs are
+validation remain in the configured source scale. Logical source signs are
 consistent with the corresponding MSFS/A32NX output signs; low-level event sign
 or axis conversions are handled only by the simulator adapter.
 
@@ -310,8 +310,8 @@ telemetry.
 
 These adapter mappings are based on the YourControls FS2020 A32NX definition,
 version `0.12.3`, from repository tree
-`4e32af561a82f1f998fbe4b0b0db0efe2642cdf2`. The logical configuration never
-contains these low-level identifiers.
+`4e32af561a82f1f998fbe4b0b0db0efe2642cdf2`. The default configuration stores
+these low-level identifiers in each injection's `variable` field.
 
 | Logical signal | Direction | MSFS/A32NX interface | Native unit/conversion |
 | --- | --- | --- | --- |
