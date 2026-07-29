@@ -3,10 +3,12 @@ set -e
 
 cd "$(dirname "$0")/.."
 package='D:/MSFS/Packages/Community/flybywire-aircraft-a320-neo'
-panel="$package/SimObjects/AirPlanes/FlyByWire_A320_NEO/panel"
+aircraft="$package/SimObjects/AirPlanes/FlyByWire_A320_NEO"
+panel="$aircraft/panel"
 
 sh scripts/build-wasm.sh
 cp -f target/wasm32-wasip1/release/replay-msfs.wasm "$panel/replay.wasm"
+cp -f replayer_config.toml "$aircraft/replayer_config.toml"
 
 python - "$package" <<'PY'
 import json
@@ -14,8 +16,10 @@ import sys
 from pathlib import Path
 
 package = Path(sys.argv[1])
-panel_relative = "SimObjects/AirPlanes/FlyByWire_A320_NEO/panel/panel.cfg"
-wasm_relative = "SimObjects/AirPlanes/FlyByWire_A320_NEO/panel/replay.wasm"
+aircraft_relative = "SimObjects/AirPlanes/FlyByWire_A320_NEO"
+config_relative = f"{aircraft_relative}/replayer_config.toml"
+panel_relative = f"{aircraft_relative}/panel/panel.cfg"
+wasm_relative = f"{aircraft_relative}/panel/replay.wasm"
 panel = package / panel_relative
 layout_file = package / "layout.json"
 gauge = (
@@ -33,7 +37,7 @@ if gauge not in section.splitlines():
     panel.write_text(text)
 
 layout = json.loads(layout_file.read_text(encoding="utf-8-sig"))
-for relative in (panel_relative, wasm_relative):
+for relative in (config_relative, panel_relative, wasm_relative):
     file = package / relative
     stat = file.stat()
     metadata = {

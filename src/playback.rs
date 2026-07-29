@@ -1,12 +1,18 @@
-use thiserror::Error;
+//! Validated playback samples, interpolation, and range conversion.
 
+pub use crate::error::PlaybackError;
+
+/// One finite scenario value at an explicit non-negative timestamp.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Sample {
+    /// Scenario-relative timestamp in seconds.
     pub time_seconds: f64,
+    /// Finite value in the signal's configured source unit.
     pub value: f64,
 }
 
 impl Sample {
+    /// Creates a sample after validating its timestamp and value.
     pub fn new(time_seconds: f64, value: f64) -> Result<Self, PlaybackError> {
         if !time_seconds.is_finite() {
             return Err(PlaybackError::NonFiniteTime { time_seconds });
@@ -25,6 +31,7 @@ impl Sample {
     }
 }
 
+/// Two time-ordered samples that bound linear interpolation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LinearSegment {
     start: Sample,
@@ -32,6 +39,7 @@ pub struct LinearSegment {
 }
 
 impl LinearSegment {
+    /// Creates a segment whose end timestamp must be greater than its start.
     pub fn new(start: Sample, end: Sample) -> Result<Self, PlaybackError> {
         if end.time_seconds <= start.time_seconds {
             return Err(PlaybackError::NonIncreasingSegment {
@@ -43,14 +51,20 @@ impl LinearSegment {
         Ok(Self { start, end })
     }
 
+    /// Returns the segment's earlier sample.
     pub const fn start(self) -> Sample {
         self.start
     }
 
+    /// Returns the segment's later sample.
     pub const fn end(self) -> Sample {
         self.end
     }
 
+    /// Interpolates the value at a timestamp within this segment, inclusively.
+    ///
+    /// Exact endpoint timestamps return the corresponding source value without
+    /// performing interpolation arithmetic.
     pub fn value_at(self, time_seconds: f64) -> Result<f64, PlaybackError> {
         if !time_seconds.is_finite() {
             return Err(PlaybackError::NonFiniteTime { time_seconds });
@@ -79,6 +93,7 @@ impl LinearSegment {
     }
 }
 
+/// Affine conversion between strictly increasing source and target ranges.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AffineRange {
     source: [f64; 2],
@@ -86,20 +101,26 @@ pub struct AffineRange {
 }
 
 impl AffineRange {
+    /// Creates a conversion after validating both ranges.
     pub fn new(source: [f64; 2], target: [f64; 2]) -> Result<Self, PlaybackError> {
         validate_range("source", source)?;
         validate_range("target", target)?;
         Ok(Self { source, target })
     }
 
+    /// Returns the inclusive source range.
     pub const fn source(self) -> [f64; 2] {
         self.source
     }
 
+    /// Returns the inclusive target range.
     pub const fn target(self) -> [f64; 2] {
         self.target
     }
 
+    /// Converts a finite source value without clamping it.
+    ///
+    /// Values outside [`Self::source`] are rejected.
     pub fn convert(self, value: f64) -> Result<f64, PlaybackError> {
         if !value.is_finite() {
             return Err(PlaybackError::NonFiniteValue { value });
@@ -136,49 +157,6 @@ fn validate_range(name: &'static str, range: [f64; 2]) -> Result<(), PlaybackErr
         });
     }
     Ok(())
-}
-
-#[derive(Debug, Clone, PartialEq, Error)]
-pub enum PlaybackError {
-    #[error("sample time must be finite, got {time_seconds}")]
-    NonFiniteTime { time_seconds: f64 },
-
-    #[error("sample time must be non-negative, got {time_seconds}")]
-    NegativeTime { time_seconds: f64 },
-
-    #[error("sample value must be finite, got {value}")]
-    NonFiniteValue { value: f64 },
-
-    #[error("segment timestamps must increase, got {start_seconds} then {end_seconds}")]
-    NonIncreasingSegment {
-        start_seconds: f64,
-        end_seconds: f64,
-    },
-
-    #[error(
-        "time {time_seconds} is outside interpolation segment [{start_seconds}, {end_seconds}]"
-    )]
-    TimeOutsideSegment {
-        time_seconds: f64,
-        start_seconds: f64,
-        end_seconds: f64,
-    },
-
-    #[error("invalid {name} range: {reason}")]
-    InvalidRange {
-        name: &'static str,
-        reason: &'static str,
-    },
-
-    #[error("value {value} is outside source range [{minimum}, {maximum}]")]
-    ValueOutsideSourceRange {
-        value: f64,
-        minimum: f64,
-        maximum: f64,
-    },
-
-    #[error("floating-point arithmetic overflowed")]
-    ArithmeticOverflow,
 }
 
 #[cfg(test)]

@@ -42,7 +42,7 @@ Record these aircraft-response signals:
 
 These are logical scenario and telemetry names, not arbitrary simulator variable names. Before implementing the simulator adapter, determine and document each signal's precise semantics, A32NX/MSFS interface, engineering unit, sign convention, valid range, and update behavior. The `yourcontrols` A32NX mapping is an accepted source for these straightforward MVP mappings; cross-check current FlyByWire A32NX source when the mapping is ambiguous, unavailable through `msfs-rs`, or contradicted by current behavior.
 
-The MVP configuration must select from this supported signal set and reject unsupported names. Keep the core data model extensible, but do not add speculative simulator mappings before this end-to-end path works.
+Keep configured injection signal names as strings so the core data model is not restricted to a predefined enum. The MVP simulator adapter maps only the supported signals above and must reject any unmapped name before playback. Do not add speculative simulator mappings before this end-to-end path works.
 
 ## Scope and Compatibility
 
@@ -97,7 +97,7 @@ Use an explicit, documented configuration format. The configuration must define:
 
 Do not add configuration fields for behavior fixed by the format or supported signal catalog. In particular, the MVP configuration does not contain a time unit, time origin, telemetry section, parameter type, or interpolation parameter. Document fixed time-unit, time-origin, signal-type, interpolation, telemetry sampling, and sampling-order semantics in the format specification.
 
-For the MVP, load configuration from the hardcoded `/work/replay/config.toml` path and resolve relative input paths from `/work/replay/`. Treat this location as provisional until validated in the MSFS WASM sandbox with the selected `msfs-rs` revision. The configuration `format_version` governs both the TOML and scenario CSV contract.
+For the MVP, load configuration from the hardcoded package-relative `SimObjects/AirPlanes/FlyByWire_A320_NEO/replayer_config.toml` path and resolve relative input paths from `SimObjects/AirPlanes/FlyByWire_A320_NEO/`. The configuration filename is lowercase. The configuration `format_version` governs both the TOML and scenario CSV contract.
 
 Reject duplicate, unknown, unsupported, or conflicting parameter selections. Do not require every time-series column to be injected or every supported aircraft parameter to be recorded.
 

@@ -26,8 +26,11 @@ It records these responses:
 - `elevator_position`
 - `aileron_position`
 
-Only these logical names are accepted by the MVP. Configuration files cannot
-supply arbitrary simulator variables or events.
+Injection names are stored as arbitrary logical strings so the core format is
+not coupled to a predefined signal enum. The current MVP simulator adapter will
+map the two names above and must reject any unmapped name before playback.
+Configuration files still cannot supply simulator variable or event identifiers
+directly.
 
 ## MVP configuration
 
@@ -77,15 +80,18 @@ unit = "position_16k"
 range = [-16384.0, 16384.0]
 ```
 
+The repository provides this default as `replayer_config.toml`. The installation
+script copies it to the hardcoded package-relative configuration path.
+
 `inject` and `record` section indexes are zero-based, contiguous, and define
 stable processing and output-column order. Missing indexes, duplicate signal
 names, and reused time or value columns are invalid.
 
-For the MVP, the module reads `/work/replay/config.toml`. Relative
-`input_file` paths are resolved from `/work/replay/`. This hardcoded location
-is provisional and must be validated in MSFS with the selected `msfs-rs`
-revision before compatibility is claimed. `format_version` governs both the
-TOML configuration and its scenario CSV contract.
+For the MVP, the module reads the package-relative, lowercase filename
+`SimObjects/AirPlanes/FlyByWire_A320_NEO/replayer_config.toml`. Relative
+`input_file` paths are resolved from the same
+`SimObjects/AirPlanes/FlyByWire_A320_NEO/` directory. `format_version` governs
+both the TOML configuration and its scenario CSV contract.
 
 The MVP fixes behavior that does not need to vary by configuration:
 
@@ -270,9 +276,11 @@ operations:
 
 1. Runs `scripts/build-wasm.sh`.
 2. Overwrites the aircraft panel's `replay.wasm` with the deployable artifact.
-3. Adds the `htmlgauge04` entry under `[VCockpit17]` if it is absent.
-4. Updates or adds the `panel.cfg` and `replay.wasm` entries in package-root
-   `layout.json`, including exact byte sizes and Windows FILETIME timestamps.
+3. Copies the repository's `replayer_config.toml` into the aircraft directory.
+4. Adds the `htmlgauge04` entry under `[VCockpit17]` if it is absent.
+5. Updates or adds the configuration, `panel.cfg`, and `replay.wasm` entries in
+   package-root `layout.json`, including exact byte sizes and Windows FILETIME
+   timestamps.
 
 The operation is idempotent for the expected A32NX package structure: rerunning
 it replaces the module and refreshes the same gauge and layout entries. Python
@@ -280,9 +288,23 @@ must be available on `PATH`. This provisional script intentionally performs no
 backups, conflict checks, or rollback, and it does not launch MSFS or modify
 `manifest.json`.
 
-This smoke-test installation only establishes whether MSFS can load the minimal
-WASM gauge without a DevMode console error. The current gauge has no visible
-output and does not yet read, inject, or record simulator data.
+The current smoke test initializes `L:REPLAYER_ARMED` to `0` and reads it on
+every MSFS `PreUpdate` event. The simulator-independent `ArmState` struct owns
+the previous sample, and its `start` method returns `true` only when the value
+changes from exactly `0` to exactly `1`. On that transition, the gauge reads and
+validates
+`SimObjects/AirPlanes/FlyByWire_A320_NEO/replayer_config.toml`, then prints its
+complete text and the configured injection and recording counts to the MSFS
+DevMode console. A read or validation failure is
+logged with its path, resets the armed LVAR to `0`, and terminates the gauge task
+without panicking. Disarm transitions have no behavior.
+
+To validate configuration loading, install the gauge, place a valid configuration
+at `SimObjects/AirPlanes/FlyByWire_A320_NEO/replayer_config.toml`, load the
+A32NX, and set `L:REPLAYER_ARMED` to `1`
+with an LVAR or calculator-code tool. Verify the console reports the loaded
+configuration. This does not yet open the scenario, inject controls, or record
+telemetry.
 
 ## A32NX MVP mappings
 

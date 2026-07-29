@@ -1,64 +1,87 @@
+//! Replay configuration data types, parsing, and file loading.
+//!
+//! The parser accepts the versioned TOML contract documented in the crate
+//! README and converts supported signal names and units into strongly typed
+//! values used by the simulator-independent replay core.
+
 use std::collections::{BTreeMap, HashSet};
-use std::path::{Component, Path, PathBuf};
+use std::fs;
+use std::path::{Path, PathBuf};
 
+use anyhow::Context;
 use serde::Deserialize;
-use thiserror::Error;
 
+pub use crate::error::ConfigError;
+
+/// Configuration and scenario format version supported by this crate.
 pub const FORMAT_VERSION: u32 = 1;
-pub const AIRCRAFT_TARGET: &str = "flybywire-a32nx";
-pub const CONFIG_PATH: &str = "/work/replay/config.toml";
 
+/// Aircraft target identifier accepted by the MVP configuration parser.
+pub const AIRCRAFT_TARGET: &str = "flybywire-a32nx";
+
+/// Package-relative path read by the MSFS WASM gauge when it is armed.
+pub const CONFIG_PATH: &str = "SimObjects/AirPlanes/FlyByWire_A320_NEO/replayer_config.toml";
+
+/// Validated replay configuration in deterministic processing order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReplayConfig {
+    /// Parsed format version. This is always [`FORMAT_VERSION`].
     pub format_version: u32,
+    /// Parsed aircraft target. This is always [`AIRCRAFT_TARGET`].
     pub aircraft_target: String,
+    /// Scenario CSV path exactly as specified by `input_file`.
     pub input_file: PathBuf,
+    /// Injection definitions ordered by their numeric `inject.N` indexes.
     pub inject: Vec<InjectionConfig>,
+    /// Recording definitions ordered by their numeric `record.N` indexes.
     pub record: Vec<RecordingConfig>,
 }
 
+/// Configuration for one continuous scenario input.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InjectionConfig {
-    pub name: InjectionSignal,
+    /// Logical input signal name from the configuration.
+    pub name: String,
+    /// CSV column containing scenario-relative timestamps in seconds.
     pub time_column: String,
+    /// CSV column containing source values.
     pub value_column: String,
+    /// Engineering unit used by the source values.
     pub source_unit: SourceUnit,
+    /// Inclusive, strictly increasing valid range for source values.
     pub source_range: [f64; 2],
+    /// Engineering unit expected at the simulator boundary.
     pub simulator_unit: SimulatorUnit,
+    /// Inclusive affine-conversion target range within the signal's safe range.
     pub simulator_range: [f64; 2],
 }
 
+/// Configuration for one aircraft-response signal recorded each frame.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecordingConfig {
+    /// Supported logical response signal.
     pub name: RecordingSignal,
+    /// Native engineering unit written to telemetry.
     pub unit: RecordingUnit,
+    /// Exact supported range for the selected signal.
     pub range: [f64; 2],
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum InjectionSignal {
-    SidestickPitchPosition,
-    SidestickRollPosition,
-}
-
-impl InjectionSignal {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::SidestickPitchPosition => "sidestick_pitch_position",
-            Self::SidestickRollPosition => "sidestick_roll_position",
-        }
-    }
-}
-
+/// Aircraft-response signals supported by the MVP.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RecordingSignal {
+    /// Aggregate aircraft pitch attitude.
     Pitch,
+    /// Aggregate aircraft roll attitude.
     Roll,
+    /// Aggregate elevator position.
     ElevatorPosition,
+    /// Aggregate aileron position.
     AileronPosition,
 }
 
 impl RecordingSignal {
+    /// Returns the stable configuration and telemetry column name.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Pitch => "pitch",
@@ -69,13 +92,17 @@ impl RecordingSignal {
     }
 }
 
+/// Engineering units accepted for scenario input values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceUnit {
+    /// Percentage values, typically in `[-100, 100]`.
     Percent,
+    /// Dimensionless normalized values, typically in `[-1, 1]`.
     Normalized,
 }
 
 impl SourceUnit {
+    /// Returns the stable TOML unit name.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Percent => "percent",
@@ -84,120 +111,37 @@ impl SourceUnit {
     }
 }
 
+/// Engineering units supported at the simulator input boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SimulatorUnit {
+    /// Dimensionless normalized control position in `[-1, 1]`.
     Normalized,
 }
 
 impl SimulatorUnit {
+    /// Returns the stable TOML unit name.
     pub const fn as_str(self) -> &'static str {
         "normalized"
     }
 }
 
+/// Native units supported for recorded response signals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordingUnit {
+    /// Angular value in degrees.
     Degrees,
+    /// MSFS `Position 16k` control-surface value.
     Position16k,
 }
 
 impl RecordingUnit {
+    /// Returns the stable TOML unit name.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Degrees => "degrees",
             Self::Position16k => "position_16k",
         }
     }
-}
-
-#[derive(Debug, Error)]
-pub enum ConfigError {
-    #[error("invalid TOML configuration: {0}")]
-    Toml(#[from] toml::de::Error),
-
-    #[error("unsupported format_version {found}; expected {expected}")]
-    UnsupportedFormatVersion { found: u32, expected: u32 },
-
-    #[error("unsupported aircraft_target `{found}`; expected `{expected}`")]
-    UnsupportedAircraftTarget {
-        found: String,
-        expected: &'static str,
-    },
-
-    #[error("invalid input_file `{path}`: {reason}")]
-    InvalidInputFile { path: String, reason: &'static str },
-
-    #[error("{section} section must contain at least one entry")]
-    EmptySection { section: &'static str },
-
-    #[error("invalid {section} index `{index}`: indexes must be canonical non-negative integers")]
-    InvalidIndex {
-        section: &'static str,
-        index: String,
-    },
-
-    #[error("non-contiguous {section} indexes: expected {expected}, found {found}")]
-    NonContiguousIndex {
-        section: &'static str,
-        expected: usize,
-        found: usize,
-    },
-
-    #[error("unsupported injection signal `{name}` at inject.{index}")]
-    UnsupportedInjectionSignal { index: usize, name: String },
-
-    #[error("unsupported recording signal `{name}` at record.{index}")]
-    UnsupportedRecordingSignal { index: usize, name: String },
-
-    #[error(
-        "unsupported source unit `{unit}` at inject.{index}; expected `percent` or `normalized`"
-    )]
-    UnsupportedSourceUnit { index: usize, unit: String },
-
-    #[error("unsupported simulator unit `{unit}` at inject.{index}; expected `normalized`")]
-    UnsupportedSimulatorUnit { index: usize, unit: String },
-
-    #[error("invalid {field} at inject.{index}: {reason}")]
-    InvalidInjectionRange {
-        index: usize,
-        field: &'static str,
-        reason: &'static str,
-    },
-
-    #[error("simulator_range at inject.{index} must remain within [-1, 1]")]
-    UnsafeSimulatorRange { index: usize },
-
-    #[error("duplicate injection signal `{name}` at inject.{index}")]
-    DuplicateInjectionSignal { index: usize, name: String },
-
-    #[error("column `{column}` is reused at inject.{index}; time and value columns must be unique")]
-    ReusedInjectionColumn { index: usize, column: String },
-
-    #[error("{field} at inject.{index} must not be empty")]
-    EmptyInjectionColumn { index: usize, field: &'static str },
-
-    #[error(
-        "unsupported recording unit `{unit}` at record.{index} for `{signal}`; expected `{expected}`"
-    )]
-    UnsupportedRecordingUnit {
-        index: usize,
-        signal: &'static str,
-        unit: String,
-        expected: &'static str,
-    },
-
-    #[error(
-        "invalid range at record.{index} for `{signal}`; expected [{expected_min}, {expected_max}]"
-    )]
-    InvalidRecordingRange {
-        index: usize,
-        signal: &'static str,
-        expected_min: f64,
-        expected_max: f64,
-    },
-
-    #[error("duplicate recording signal `{name}` at record.{index}")]
-    DuplicateRecordingSignal { index: usize, name: String },
 }
 
 #[derive(Debug, Deserialize)]
@@ -232,6 +176,30 @@ struct RawRecordingConfig {
     range: [f64; 2],
 }
 
+/// Reads and parses a replay configuration file.
+///
+/// The returned [`anyhow::Error`] adds the requested file path as context while
+/// preserving the underlying I/O or [`ConfigError`] source.
+pub fn read_config_file(path: impl AsRef<Path>) -> anyhow::Result<ReplayConfig> {
+    read_config_file_with_contents(path).map(|(_, config)| config)
+}
+
+pub(crate) fn read_config_file_with_contents(
+    path: impl AsRef<Path>,
+) -> anyhow::Result<(String, ReplayConfig)> {
+    let path = path.as_ref();
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("failed to read replay configuration `{}`", path.display()))?;
+    let config = parse_config(&contents)
+        .with_context(|| format!("invalid replay configuration `{}`", path.display()))?;
+
+    Ok((contents, config))
+}
+
+/// Parses and validates the versioned replay TOML document.
+///
+/// Numeric `inject.N` and `record.N` tables must be contiguous from zero. Their
+/// indexes define the order of the returned vectors.
 pub fn parse_config(contents: &str) -> Result<ReplayConfig, ConfigError> {
     let raw: RawReplayConfig = toml::from_str(contents)?;
 
@@ -248,7 +216,6 @@ pub fn parse_config(contents: &str) -> Result<ReplayConfig, ConfigError> {
         });
     }
 
-    validate_input_file(&raw.input_file)?;
     let inject = parse_injections(raw.inject)?;
     let record = parse_recordings(raw.record)?;
 
@@ -262,46 +229,10 @@ pub fn parse_config(contents: &str) -> Result<ReplayConfig, ConfigError> {
 }
 
 impl ReplayConfig {
+    /// Parses a replay configuration from TOML text.
     pub fn parse(contents: &str) -> Result<Self, ConfigError> {
         parse_config(contents)
     }
-}
-
-fn validate_input_file(input_file: &str) -> Result<(), ConfigError> {
-    let invalid = |reason| ConfigError::InvalidInputFile {
-        path: input_file.to_owned(),
-        reason,
-    };
-
-    if input_file.trim().is_empty() {
-        return Err(invalid("path must not be empty"));
-    }
-
-    let path = Path::new(input_file);
-    if path.is_absolute() {
-        return Err(invalid("path must be relative"));
-    }
-
-    let mut has_normal_component = false;
-    for component in path.components() {
-        match component {
-            Component::Normal(_) => has_normal_component = true,
-            Component::ParentDir => {
-                return Err(invalid("parent components are not allowed"));
-            }
-            Component::RootDir => return Err(invalid("root components are not allowed")),
-            Component::Prefix(_) => return Err(invalid("path prefixes are not allowed")),
-            Component::CurDir => {
-                return Err(invalid("current-directory components are not allowed"));
-            }
-        }
-    }
-
-    if !has_normal_component {
-        return Err(invalid("path must contain a file name"));
-    }
-
-    Ok(())
 }
 
 fn parse_injections(
@@ -313,8 +244,7 @@ fn parse_injections(
     let mut result = Vec::with_capacity(entries.len());
 
     for (index, raw) in entries {
-        let name = parse_injection_signal(index, &raw.name)?;
-        if !signals.insert(name) {
+        if !signals.insert(raw.name.clone()) {
             return Err(ConfigError::DuplicateInjectionSignal {
                 index,
                 name: raw.name,
@@ -351,7 +281,7 @@ fn parse_injections(
         }
 
         result.push(InjectionConfig {
-            name,
+            name: raw.name,
             time_column: raw.time_column,
             value_column: raw.value_column,
             source_unit,
@@ -445,17 +375,6 @@ fn ordered_entries<T>(
     }
 
     Ok(indexed)
-}
-
-fn parse_injection_signal(index: usize, name: &str) -> Result<InjectionSignal, ConfigError> {
-    match name {
-        "sidestick_pitch_position" => Ok(InjectionSignal::SidestickPitchPosition),
-        "sidestick_roll_position" => Ok(InjectionSignal::SidestickRollPosition),
-        _ => Err(ConfigError::UnsupportedInjectionSignal {
-            index,
-            name: name.to_owned(),
-        }),
-    }
 }
 
 fn parse_recording_signal(index: usize, name: &str) -> Result<RecordingSignal, ConfigError> {
@@ -576,6 +495,17 @@ range = [-16384.0, 16384.0]
     }
 
     #[test]
+    fn parses_default_configuration_file() {
+        match parse_config(include_str!("../replayer_config.toml")) {
+            Ok(config) => {
+                assert_eq!(config.inject.len(), 2);
+                assert_eq!(config.record.len(), 4);
+            }
+            Err(error) => panic!("default configuration should parse: {error}"),
+        }
+    }
+
+    #[test]
     fn parses_readme_configuration() {
         let config = match parse_config(VALID_CONFIG) {
             Ok(config) => config,
@@ -586,17 +516,43 @@ range = [-16384.0, 16384.0]
         assert_eq!(config.aircraft_target, AIRCRAFT_TARGET);
         assert_eq!(config.input_file, PathBuf::from("scenario.csv"));
         assert_eq!(config.inject.len(), 2);
-        assert_eq!(
-            config.inject[0].name,
-            InjectionSignal::SidestickPitchPosition
-        );
-        assert_eq!(
-            config.inject[1].name,
-            InjectionSignal::SidestickRollPosition
-        );
+        assert_eq!(config.inject[0].name, "sidestick_pitch_position");
+        assert_eq!(config.inject[1].name, "sidestick_roll_position");
         assert_eq!(config.record.len(), 4);
         assert_eq!(config.record[0].name, RecordingSignal::Pitch);
         assert_eq!(config.record[3].name, RecordingSignal::AileronPosition);
+    }
+
+    #[test]
+    fn reads_configuration_file() {
+        let path =
+            std::env::temp_dir().join(format!("replay-valid-config-{}.toml", std::process::id()));
+        if let Err(error) = std::fs::write(&path, VALID_CONFIG) {
+            panic!("failed to create test configuration: {error}");
+        }
+
+        let result = read_config_file(&path);
+        let _ = std::fs::remove_file(&path);
+
+        match result {
+            Ok(config) => assert_eq!(config.inject.len(), 2),
+            Err(error) => panic!("configuration file should load: {error}"),
+        }
+    }
+
+    #[test]
+    fn reports_configuration_file_read_path() {
+        let path =
+            std::env::temp_dir().join(format!("replay-missing-config-{}.toml", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        match read_config_file(&path) {
+            Err(error) => assert!(
+                error.to_string().contains(&path.display().to_string()),
+                "read error should contain path: {error:#}"
+            ),
+            Ok(config) => panic!("missing configuration unexpectedly loaded: {config:?}"),
+        }
     }
 
     #[test]
@@ -612,11 +568,13 @@ range = [-16384.0, 16384.0]
     }
 
     #[test]
-    fn rejects_unsupported_signals() {
-        assert_error(
-            &VALID_CONFIG.replacen("sidestick_pitch_position\"", "throttle\"", 1),
-            |error| matches!(error, ConfigError::UnsupportedInjectionSignal { .. }),
-        );
+    fn accepts_arbitrary_injection_names_and_rejects_unsupported_recordings() {
+        let arbitrary = VALID_CONFIG.replacen("sidestick_pitch_position\"", "custom_input\"", 1);
+        match parse_config(&arbitrary) {
+            Ok(config) => assert_eq!(config.inject[0].name, "custom_input"),
+            Err(error) => panic!("arbitrary injection name should parse: {error}"),
+        }
+
         assert_error(
             &VALID_CONFIG.replacen("name = \"pitch\"", "name = \"yaw\"", 1),
             |error| matches!(error, ConfigError::UnsupportedRecordingSignal { .. }),
@@ -740,23 +698,6 @@ range = [-16384.0, 16384.0]
     }
 
     #[test]
-    fn rejects_unsafe_input_paths() {
-        for path in ["", "../scenario.csv", "/scenario.csv", "C:\\\\scenario.csv"] {
-            let config = VALID_CONFIG.replacen(
-                "input_file = \"scenario.csv\"",
-                &format!("input_file = \"{path}\""),
-                1,
-            );
-            assert_error(&config, |error| {
-                matches!(
-                    error,
-                    ConfigError::InvalidInputFile { .. } | ConfigError::Toml(_)
-                )
-            });
-        }
-    }
-
-    #[test]
     fn rejects_unknown_fields() {
         assert_error(
             &VALID_CONFIG.replacen(
@@ -794,12 +735,9 @@ range = [-16384.0, 16384.0]
             config
                 .inject
                 .iter()
-                .map(|item| item.name)
+                .map(|item| item.name.as_str())
                 .collect::<Vec<_>>(),
-            vec![
-                InjectionSignal::SidestickRollPosition,
-                InjectionSignal::SidestickPitchPosition,
-            ]
+            vec!["sidestick_roll_position", "sidestick_pitch_position"]
         );
         assert_eq!(config.record[0].name, RecordingSignal::Roll);
         assert_eq!(config.record[1].name, RecordingSignal::Pitch);

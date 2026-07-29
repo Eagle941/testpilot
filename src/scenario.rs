@@ -1,20 +1,32 @@
+//! Streaming validation for the independently sampled scenario CSV format.
+//!
+//! Validation retains only per-signal counters and the previous timestamp, so
+//! memory use does not grow with scenario duration.
+
 use std::collections::HashMap;
 use std::io::Read;
 
-use thiserror::Error;
+use crate::config::{InjectionConfig, ReplayConfig};
 
-use crate::config::{InjectionConfig, InjectionSignal, ReplayConfig};
+pub use crate::error::ScenarioError;
 
+/// Preflight summary for one configured input signal.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SignalSummary {
-    pub signal: InjectionSignal,
+    /// Logical signal name represented by the paired CSV columns.
+    pub signal: String,
+    /// Number of validated `(time, value)` samples.
     pub sample_count: u64,
+    /// Timestamp of the final sample in scenario-relative seconds.
     pub final_time_seconds: f64,
 }
 
+/// Result of a successful streaming scenario preflight pass.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScenarioSummary {
+    /// Common final timestamp of all configured input series.
     pub duration_seconds: f64,
+    /// Per-signal summaries in configuration injection order.
     pub signals: Vec<SignalSummary>,
 }
 
@@ -31,6 +43,11 @@ struct ValidationState {
     ended: bool,
 }
 
+/// Validates a scenario CSV stream against a replay configuration.
+///
+/// The function checks paired-column structure, finite values, source ranges,
+/// strictly increasing timestamps, dense series, and a common final timestamp.
+/// It consumes the reader without loading the complete CSV into memory.
 pub fn validate_scenario<R: Read>(
     reader: R,
     config: &ReplayConfig,
@@ -84,20 +101,20 @@ fn find_columns(
         .iter()
         .position(|header| header == injection.time_column)
         .ok_or_else(|| ScenarioError::MissingColumn {
-            signal: injection.name,
+            signal: injection.name.clone(),
             column: injection.time_column.clone(),
         })?;
     let value = headers
         .iter()
         .position(|header| header == injection.value_column)
         .ok_or_else(|| ScenarioError::MissingColumn {
-            signal: injection.name,
+            signal: injection.name.clone(),
             column: injection.value_column.clone(),
         })?;
 
     if time.checked_add(1) != Some(value) {
         return Err(ScenarioError::NonAdjacentColumns {
-            signal: injection.name,
+            signal: injection.name.clone(),
             time_column: injection.time_column.clone(),
             value_column: injection.value_column.clone(),
         });
@@ -120,7 +137,7 @@ fn validate_pair(
 
     if time_empty != value_empty {
         return Err(ScenarioError::HalfPopulatedPair {
-            signal: injection.name,
+            signal: injection.name.clone(),
             line,
         });
     }
@@ -130,36 +147,36 @@ fn validate_pair(
     }
     if state.ended {
         return Err(ScenarioError::SparseSeries {
-            signal: injection.name,
+            signal: injection.name.clone(),
             line,
         });
     }
 
-    let time = parse_number(time_text, injection.name, &injection.time_column, line)?;
-    let value = parse_number(value_text, injection.name, &injection.value_column, line)?;
+    let time = parse_number(time_text, &injection.name, &injection.time_column, line)?;
+    let value = parse_number(value_text, &injection.name, &injection.value_column, line)?;
 
     if !time.is_finite() {
         return Err(ScenarioError::NonFiniteTime {
-            signal: injection.name,
+            signal: injection.name.clone(),
             line,
         });
     }
     if time < 0.0 {
         return Err(ScenarioError::NegativeTime {
-            signal: injection.name,
+            signal: injection.name.clone(),
             time_seconds: time,
             line,
         });
     }
     if !value.is_finite() {
         return Err(ScenarioError::NonFiniteValue {
-            signal: injection.name,
+            signal: injection.name.clone(),
             line,
         });
     }
     if state.sample_count == 0 && time != 0.0 {
         return Err(ScenarioError::FirstTimestampNotZero {
-            signal: injection.name,
+            signal: injection.name.clone(),
             time_seconds: time,
             line,
         });
@@ -168,7 +185,7 @@ fn validate_pair(
         && time <= previous
     {
         return Err(ScenarioError::NonIncreasingTime {
-            signal: injection.name,
+            signal: injection.name.clone(),
             previous_seconds: previous,
             time_seconds: time,
             line,
@@ -176,7 +193,7 @@ fn validate_pair(
     }
     if value < injection.source_range[0] || value > injection.source_range[1] {
         return Err(ScenarioError::ValueOutsideSourceRange {
-            signal: injection.name,
+            signal: injection.name.clone(),
             value,
             minimum: injection.source_range[0],
             maximum: injection.source_range[1],
@@ -188,8 +205,8 @@ fn validate_pair(
         state
             .sample_count
             .checked_add(1)
-            .ok_or(ScenarioError::SampleCountOverflow {
-                signal: injection.name,
+            .ok_or_else(|| ScenarioError::SampleCountOverflow {
+                signal: injection.name.clone(),
             })?;
     state.last_time = Some(time);
     Ok(())
@@ -197,13 +214,13 @@ fn validate_pair(
 
 fn parse_number(
     text: &str,
-    signal: InjectionSignal,
+    signal: &str,
     column: &str,
     line: Option<u64>,
 ) -> Result<f64, ScenarioError> {
     text.parse::<f64>()
         .map_err(|source| ScenarioError::InvalidNumber {
-            signal,
+            signal: signal.to_owned(),
             column: column.to_owned(),
             value: text.to_owned(),
             line,
@@ -219,21 +236,23 @@ fn summarize(
     let mut signals = Vec::with_capacity(states.len());
 
     for (injection, state) in config.inject.iter().zip(states) {
-        let final_time = state.last_time.ok_or(ScenarioError::MissingSamples {
-            signal: injection.name,
-        })?;
+        let final_time = state
+            .last_time
+            .ok_or_else(|| ScenarioError::MissingSamples {
+                signal: injection.name.clone(),
+            })?;
         if let Some(expected) = duration
             && final_time != expected
         {
             return Err(ScenarioError::FinalTimestampMismatch {
-                signal: injection.name,
+                signal: injection.name.clone(),
                 expected_seconds: expected,
                 actual_seconds: final_time,
             });
         }
         duration = Some(final_time);
         signals.push(SignalSummary {
-            signal: injection.name,
+            signal: injection.name.clone(),
             sample_count: state.sample_count,
             final_time_seconds: final_time,
         });
@@ -243,117 +262,6 @@ fn summarize(
         duration_seconds: duration.unwrap_or(0.0),
         signals,
     })
-}
-
-#[derive(Debug, Error)]
-pub enum ScenarioError {
-    #[error("invalid scenario CSV: {0}")]
-    Csv(#[source] csv::Error),
-
-    #[error("duplicate CSV header `{column}` at indexes {first_index} and {duplicate_index}")]
-    DuplicateHeader {
-        column: String,
-        first_index: usize,
-        duplicate_index: usize,
-    },
-
-    #[error("missing column `{column}` for signal `{}`", signal.as_str())]
-    MissingColumn {
-        signal: InjectionSignal,
-        column: String,
-    },
-
-    #[error(
-        "time column `{time_column}` and value column `{value_column}` for signal `{}` must be adjacent and ordered time then value",
-        signal.as_str()
-    )]
-    NonAdjacentColumns {
-        signal: InjectionSignal,
-        time_column: String,
-        value_column: String,
-    },
-
-    #[error("half-populated time/value pair for signal `{}`{line_suffix}", signal.as_str(), line_suffix = format_line(*line))]
-    HalfPopulatedPair {
-        signal: InjectionSignal,
-        line: Option<u64>,
-    },
-
-    #[error("internally sparse samples for signal `{}`{line_suffix}", signal.as_str(), line_suffix = format_line(*line))]
-    SparseSeries {
-        signal: InjectionSignal,
-        line: Option<u64>,
-    },
-
-    #[error("invalid number `{value}` in column `{column}` for signal `{}`{line_suffix}: {source}", signal.as_str(), line_suffix = format_line(*line))]
-    InvalidNumber {
-        signal: InjectionSignal,
-        column: String,
-        value: String,
-        line: Option<u64>,
-        #[source]
-        source: std::num::ParseFloatError,
-    },
-
-    #[error("non-finite timestamp for signal `{}`{line_suffix}", signal.as_str(), line_suffix = format_line(*line))]
-    NonFiniteTime {
-        signal: InjectionSignal,
-        line: Option<u64>,
-    },
-
-    #[error("negative timestamp {time_seconds} for signal `{}`{line_suffix}", signal.as_str(), line_suffix = format_line(*line))]
-    NegativeTime {
-        signal: InjectionSignal,
-        time_seconds: f64,
-        line: Option<u64>,
-    },
-
-    #[error("non-finite value for signal `{}`{line_suffix}", signal.as_str(), line_suffix = format_line(*line))]
-    NonFiniteValue {
-        signal: InjectionSignal,
-        line: Option<u64>,
-    },
-
-    #[error("first timestamp for signal `{}` must be 0 seconds, got {time_seconds}{line_suffix}", signal.as_str(), line_suffix = format_line(*line))]
-    FirstTimestampNotZero {
-        signal: InjectionSignal,
-        time_seconds: f64,
-        line: Option<u64>,
-    },
-
-    #[error("timestamp {time_seconds} for signal `{}` must be greater than {previous_seconds}{line_suffix}", signal.as_str(), line_suffix = format_line(*line))]
-    NonIncreasingTime {
-        signal: InjectionSignal,
-        previous_seconds: f64,
-        time_seconds: f64,
-        line: Option<u64>,
-    },
-
-    #[error("value {value} for signal `{}` is outside [{minimum}, {maximum}]{line_suffix}", signal.as_str(), line_suffix = format_line(*line))]
-    ValueOutsideSourceRange {
-        signal: InjectionSignal,
-        value: f64,
-        minimum: f64,
-        maximum: f64,
-        line: Option<u64>,
-    },
-
-    #[error("sample count overflow for signal `{}`", signal.as_str())]
-    SampleCountOverflow { signal: InjectionSignal },
-
-    #[error("signal `{}` contains no samples", signal.as_str())]
-    MissingSamples { signal: InjectionSignal },
-
-    #[error("final timestamp for signal `{}` is {actual_seconds}, expected {expected_seconds}", signal.as_str())]
-    FinalTimestampMismatch {
-        signal: InjectionSignal,
-        expected_seconds: f64,
-        actual_seconds: f64,
-    },
-}
-
-fn format_line(line: Option<u64>) -> String {
-    line.map_or_else(String::new, |line| format!(" at CSV line {line}"))
 }
 
 #[cfg(test)]
