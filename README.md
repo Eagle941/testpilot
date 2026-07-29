@@ -293,9 +293,9 @@ every MSFS `PreUpdate` event. The simulator-independent `ArmState` struct owns
 the previous sample, and its `start` method returns `true` only when the value
 changes from exactly `0` to exactly `1`. On that transition, the gauge reads and
 validates
-`SimObjects/AirPlanes/FlyByWire_A320_NEO/replayer_config.toml`, then prints its
-complete text and the configured injection and recording counts to the MSFS
-DevMode console. A read or validation failure is
+`SimObjects/AirPlanes/FlyByWire_A320_NEO/replayer_config.toml`, then prints the
+configured injection and recording counts to the MSFS DevMode console. A read
+or validation failure is
 logged with its path, resets the armed LVAR to `0`, and terminates the gauge task
 without panicking. Disarm transitions have no behavior.
 

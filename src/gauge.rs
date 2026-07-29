@@ -1,7 +1,7 @@
 use std::error::Error;
 
 use crate::arm::ArmState;
-use crate::config::{CONFIG_PATH, read_config_file_with_contents};
+use crate::config::{CONFIG_PATH, read_config_file};
 use msfs::{MSFSEvent, legacy::NamedVariable};
 
 const ARMED_VARIABLE: &str = "REPLAYER_ARMED";
@@ -18,9 +18,9 @@ async fn replayer(mut gauge: msfs::Gauge) -> Result<(), Box<dyn Error>> {
         match event {
             MSFSEvent::PreUpdate => {
                 if arm_state.start(armed_variable.get_value::<f64>()) {
-                    match read_config_file_with_contents(CONFIG_PATH) {
-                        Ok((contents, config)) => println!(
-                            "REPLAYER: loaded {CONFIG_PATH}\n{contents}\nREPLAYER: {} inject, {} record",
+                    match read_config_file(CONFIG_PATH) {
+                        Ok(config) => println!(
+                            "REPLAYER: loaded {CONFIG_PATH} ({} inject, {} record)",
                             config.inject.len(),
                             config.record.len()
                         ),

@@ -145,19 +145,12 @@ struct RawRecordingConfig {
 /// The returned [`anyhow::Error`] adds the requested file path as context while
 /// preserving the underlying I/O or [`ConfigError`] source.
 pub fn read_config_file(path: impl AsRef<Path>) -> anyhow::Result<ReplayConfig> {
-    read_config_file_with_contents(path).map(|(_, config)| config)
-}
-
-pub(crate) fn read_config_file_with_contents(
-    path: impl AsRef<Path>,
-) -> anyhow::Result<(String, ReplayConfig)> {
     let path = path.as_ref();
     let contents = fs::read_to_string(path)
         .with_context(|| format!("failed to read replay configuration `{}`", path.display()))?;
-    let config = parse_config(&contents)
-        .with_context(|| format!("invalid replay configuration `{}`", path.display()))?;
 
-    Ok((contents, config))
+    parse_config(&contents)
+        .with_context(|| format!("invalid replay configuration `{}`", path.display()))
 }
 
 /// Parses and validates the versioned replay TOML document.
