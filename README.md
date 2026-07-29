@@ -258,49 +258,31 @@ requires an in-simulator test against the referenced A32NX branch/version.
 ## A32NX smoke-test installation
 
 Close MSFS, then build and install the current gauge into the local A32NX
-Community package with Windows PowerShell:
+Community package from Git Bash:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/install-a32nx-smoke-test.ps1
+```sh
+sh scripts/install.sh
 ```
 
-The default package path is
-`D:\MSFS\Packages\Community\flybywire-aircraft-a320-neo`. Override it when
-needed:
+The script uses the hardcoded package path
+`D:\MSFS\Packages\Community\flybywire-aircraft-a320-neo` and performs these
+operations:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/install-a32nx-smoke-test.ps1 `
-  -PackagePath "E:\Community\flybywire-aircraft-a320-neo"
-```
+1. Runs `scripts/build-wasm.sh`.
+2. Overwrites the aircraft panel's `replay.wasm` with the deployable artifact.
+3. Adds the `htmlgauge04` entry under `[VCockpit17]` if it is absent.
+4. Updates or adds the `panel.cfg` and `replay.wasm` entries in package-root
+   `layout.json`, including exact byte sizes and Windows FILETIME timestamps.
 
-The script performs the following guarded integration changes:
-
-1. Builds and post-processes `replay-msfs.wasm`; it does not modify the package
-   if the build fails.
-2. Creates a timestamped backup under
-   `target/a32nx-smoke-test-backups/`.
-3. Copies the module to the aircraft's `panel` directory as `replay.wasm`.
-4. Adds exactly one `htmlgauge04` entry for the `replayer` gauge under
-   `[VCockpit17]` in `panel.cfg`.
-5. Updates the `panel.cfg` and `replay.wasm` records in package-root
-   `layout.json`, including byte sizes and Windows FILETIME timestamps.
-
-The operation is idempotent: rerunning it replaces the module and refreshes the
-same gauge and layout entries without creating duplicates. The script refuses
-to overwrite an unrelated `htmlgauge04`, stops if MSFS is running, restores its
-backup automatically if installation fails, and prints a rollback command after
-a successful installation. A previous state can also be restored explicitly:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/install-a32nx-smoke-test.ps1 `
-  -Action Rollback `
-  -BackupPath "target\a32nx-smoke-test-backups\<timestamp>"
-```
+The operation is idempotent for the expected A32NX package structure: rerunning
+it replaces the module and refreshes the same gauge and layout entries. Python
+must be available on `PATH`. This provisional script intentionally performs no
+backups, conflict checks, or rollback, and it does not launch MSFS or modify
+`manifest.json`.
 
 This smoke-test installation only establishes whether MSFS can load the minimal
 WASM gauge without a DevMode console error. The current gauge has no visible
-output and does not yet read, inject, or record simulator data. The script does
-not launch MSFS or modify `manifest.json`.
+output and does not yet read, inject, or record simulator data.
 
 ## A32NX MVP mappings
 
