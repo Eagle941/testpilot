@@ -205,7 +205,7 @@ Use the commands supported by the repository once configured. Typical checks are
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test
-cargo build --target wasm32-wasip1
+sh scripts/build-wasm.sh
 ```
 
 Do not report simulator or A32NX compatibility based only on a successful host build. WASM compilation verifies the target build; actual compatibility requires an in-simulator test against the stated A32NX version.

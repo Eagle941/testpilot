@@ -5,9 +5,12 @@ Microsoft Flight Simulator 2020, initially targeting the FlyByWire A32NX.
 It replays timestamped flight-control inputs at simulator frame rate and
 streams the configured aircraft response to a telemetry file.
 
-The project is currently at the specification stage. The configuration and
-file formats below define the intended MVP contract; their parsers are not yet
-implemented.
+The simulator-independent core currently implements strict replay
+configuration parsing, streaming scenario preflight validation, irregular-time
+linear interpolation, and affine input-range conversion. It also provides an
+MSFS-compatible WASM build and a minimal `replayer` gauge entry point. The
+A32NX adapter, run lifecycle, streaming playback, and telemetry writer remain
+to be implemented.
 
 ## MVP scope
 
@@ -203,6 +206,101 @@ and `aileron_position` are aggregate MSFS control-surface positions, not
 individual left/right A32NX surfaces. A row is sampled after input injection on
 every MSFS frame and is streamed incrementally with deterministic numeric
 formatting and bounded buffering.
+
+## MSFS WASM build
+
+The build configuration is aligned with the local FlyByWire aircraft repository
+at `C:\Users\Giuseppe\source\repos\a32nx`, branch `fs2020-master`, commit
+`81461a72be047a9e91e1b1d647ef01cae86565ad`. In particular, this project uses:
+
+- Rust `1.93.0` with the `wasm32-wasip1` target;
+- a `cdylib` artifact and release LTO/stripping;
+- the A32NX WASM target features, linker mode, and exported runtime symbols;
+- the locally installed MSFS SDK WASI sysroot at
+  `C:\MSFS SDK\WASM\wasi-sysroot`;
+- `msfs-rs` from its `main` branch, pinned by `Cargo.lock` to
+  `2f697b9aac9fa3c00474f901a7f7ee4218cf534b`.
+
+The crate emits only a `cdylib`, matching the A32NX Rust gauge build. Adding an
+`rlib` crate type to the same WASM build prevents the required dead-code
+elimination and retains unsupported SDK imports, causing MSFS module
+instantiation to fail. Simulator-independent unit tests still run on the host
+with `cargo test`.
+
+The current machine has the MSFS SDK installed at `C:\MSFS SDK`, so the linker
+paths are configured directly in `.cargo/config.toml`; no `build.rs` or Docker
+container is required. Developers with the SDK in another location must update
+the two SDK paths in that file.
+
+Build and package the module natively with:
+
+```sh
+sh scripts/build-wasm.sh
+```
+
+The script first runs `cargo build --release --target wasm32-wasip1`, then
+post-processes the raw module with the same A32NX systems-library flags:
+
+```sh
+wasm-opt -O1 --signext-lowering --enable-bulk-memory \
+  --enable-nontrapping-float-to-int
+```
+
+The raw Cargo artifact remains at
+`target/wasm32-wasip1/release/replay.wasm`. The deployable MVP artifact is
+`target/wasm32-wasip1/release/replay-msfs.wasm`. `wasm-opt` must be available
+on `PATH`. Host-side `cargo test` does not link against the MSFS SDK.
+
+A successful build and post-processing pass verifies the WASM structure, SDK
+linkage, and A32NX-compatible lowering, not A32NX behavior. Compatibility still
+requires an in-simulator test against the referenced A32NX branch/version.
+
+## A32NX smoke-test installation
+
+Close MSFS, then build and install the current gauge into the local A32NX
+Community package with Windows PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/install-a32nx-smoke-test.ps1
+```
+
+The default package path is
+`D:\MSFS\Packages\Community\flybywire-aircraft-a320-neo`. Override it when
+needed:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/install-a32nx-smoke-test.ps1 `
+  -PackagePath "E:\Community\flybywire-aircraft-a320-neo"
+```
+
+The script performs the following guarded integration changes:
+
+1. Builds and post-processes `replay-msfs.wasm`; it does not modify the package
+   if the build fails.
+2. Creates a timestamped backup under
+   `target/a32nx-smoke-test-backups/`.
+3. Copies the module to the aircraft's `panel` directory as `replay.wasm`.
+4. Adds exactly one `htmlgauge04` entry for the `replayer` gauge under
+   `[VCockpit17]` in `panel.cfg`.
+5. Updates the `panel.cfg` and `replay.wasm` records in package-root
+   `layout.json`, including byte sizes and Windows FILETIME timestamps.
+
+The operation is idempotent: rerunning it replaces the module and refreshes the
+same gauge and layout entries without creating duplicates. The script refuses
+to overwrite an unrelated `htmlgauge04`, stops if MSFS is running, restores its
+backup automatically if installation fails, and prints a rollback command after
+a successful installation. A previous state can also be restored explicitly:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/install-a32nx-smoke-test.ps1 `
+  -Action Rollback `
+  -BackupPath "target\a32nx-smoke-test-backups\<timestamp>"
+```
+
+This smoke-test installation only establishes whether MSFS can load the minimal
+WASM gauge without a DevMode console error. The current gauge has no visible
+output and does not yet read, inject, or record simulator data. The script does
+not launch MSFS or modify `manifest.json`.
 
 ## A32NX MVP mappings
 
