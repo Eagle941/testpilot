@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use crate::arm::ArmState;
-use crate::config::{CONFIG_PATH, read_config_file};
+use crate::config::{read_config_file, CONFIG_PATH};
 use crate::error::ReplayerError;
 use crate::scenario::{InterpolationRows, ScenarioPlayback, ScenarioProgress, ScenarioStep};
 
@@ -22,7 +22,15 @@ pub(crate) enum ReplayerEvent {
     Completed,
 }
 
-/// Data points returned for interpolation on one simulator frame.
+/// Data points returned for one running simulator frame.
+///
+/// An `InterpolationFrame` is created only after all scenario cursors have
+/// enough samples to provide an interpolation interval or a final-value hold.
+/// It contains the elapsed scenario time and a borrowed [`ScenarioStep`], so it
+/// does not copy or retain the streamed scenario data. The gauge uses
+/// [`Self::data_points`] to obtain one [`InterpolationRows`] value per
+/// configured injection, then interpolates and converts each value before
+/// writing it to the simulator.
 pub(crate) struct InterpolationFrame<'a> {
     elapsed_seconds: f64,
     step: ScenarioStep<'a>,
@@ -40,7 +48,14 @@ impl InterpolationFrame<'_> {
     }
 }
 
-/// Result of processing one gauge update.
+/// Result of processing one simulator update.
+///
+/// The event describes the replay lifecycle transition or state for this
+/// frame. An interpolation frame is present only while the replay is
+/// [`ReplayerEvent::Running`]; arming, loading, completion, and idle updates do
+/// not contain injection data. The optional frame borrows the scenario state
+/// owned by [`ReplayerGauge`] and is valid only for the lifetime of this
+/// update.
 pub(crate) struct ReplayerUpdate<'a> {
     event: ReplayerEvent,
     interpolation: Option<InterpolationFrame<'a>>,
