@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 
-use anyhow::{Context, bail};
+use crate::error::SimulatorError;
 
 /// Reusable calculator-code buffer for per-frame simulator writes.
 pub(crate) struct VariableWriter {
@@ -19,31 +19,49 @@ impl VariableWriter {
 
     /// Writes a finite value to a prefixed `K:` event or `L:` variable.
     #[cfg(target_arch = "wasm32")]
-    pub(crate) fn write(&mut self, variable: &str, value: f64) -> anyhow::Result<()> {
+    pub(crate) fn write(&mut self, variable: &str, value: f64) -> Result<(), SimulatorError> {
         build_calculator_code(&mut self.calculator_code, variable, value)?;
         msfs::legacy::execute_calculator_code::<()>(&self.calculator_code).ok_or_else(|| {
-            anyhow::anyhow!("calculator code failed while writing {value} to `{variable}`")
+            SimulatorError::CalculatorCodeWriteFailed {
+                variable: variable.to_owned(),
+                value,
+            }
         })
     }
 }
 
-fn build_calculator_code(output: &mut String, variable: &str, value: f64) -> anyhow::Result<()> {
+fn build_calculator_code(
+    output: &mut String,
+    variable: &str,
+    value: f64,
+) -> Result<(), SimulatorError> {
     if !value.is_finite() {
-        bail!("cannot write non-finite value {value} to `{variable}`");
+        return Err(SimulatorError::NonFiniteWrite {
+            variable: variable.to_owned(),
+            value,
+        });
     }
     if !matches!(variable.as_bytes(), [b'K' | b'L', b':', _, ..])
         || variable.as_bytes().contains(&0)
     {
-        bail!("unsupported simulator variable `{variable}`; expected a non-empty K: or L: prefix");
+        return Err(SimulatorError::UnsupportedVariable {
+            variable: variable.to_owned(),
+        });
     }
 
     output.clear();
-    write!(output, "{value} (>{variable})")
-        .with_context(|| format!("failed to build calculator code for `{variable}`"))
+    write!(output, "{value} (>{variable})").map_err(|source| {
+        SimulatorError::CalculatorCodeFormatting {
+            variable: variable.to_owned(),
+            source,
+        }
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::error::SimulatorError;
+
     use super::{VariableWriter, build_calculator_code};
 
     #[test]
@@ -74,10 +92,20 @@ mod tests {
     fn rejects_invalid_destinations_and_values() {
         let mut output = String::new();
 
-        assert!(build_calculator_code(&mut output, "AXIS_ELEVATOR_SET", 0.0).is_err());
-        assert!(build_calculator_code(&mut output, "K:", 0.0).is_err());
-        assert!(build_calculator_code(&mut output, "A:ELEVATOR POSITION", 0.0).is_err());
-        assert!(build_calculator_code(&mut output, "L:TEST", f64::NAN).is_err());
-        assert!(build_calculator_code(&mut output, "L:BAD\0NAME", 0.0).is_err());
+        for variable in [
+            "AXIS_ELEVATOR_SET",
+            "K:",
+            "A:ELEVATOR POSITION",
+            "L:BAD\0NAME",
+        ] {
+            assert!(matches!(
+                build_calculator_code(&mut output, variable, 0.0),
+                Err(SimulatorError::UnsupportedVariable { .. })
+            ));
+        }
+        assert!(matches!(
+            build_calculator_code(&mut output, "L:TEST", f64::NAN),
+            Err(SimulatorError::NonFiniteWrite { .. })
+        ));
     }
 }

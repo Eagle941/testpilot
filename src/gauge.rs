@@ -1,11 +1,12 @@
 use std::error::Error;
 
-use anyhow::{Context, anyhow, bail};
+use anyhow::Context;
 use msfs::{
     MSFSEvent,
     legacy::{NamedVariable, execute_calculator_code},
 };
 
+use crate::error::SimulatorError;
 use crate::replayer::{InterpolationFrame, ReplayerEvent, ReplayerGauge};
 use crate::simulator::VariableWriter;
 
@@ -22,9 +23,12 @@ async fn replayer(mut gauge: msfs::Gauge) -> Result<(), Box<dyn Error>> {
     let mut variable_writer = VariableWriter::new();
     while let Some(event) = gauge.next_event().await {
         let result = match event {
-            MSFSEvent::PreUpdate => {
-                replayer.pre_update(armed_variable.get_value::<f64>(), simulation_time_seconds)
-            }
+            MSFSEvent::PreUpdate => match simulation_time_seconds() {
+                Ok(simulation_time_seconds) => {
+                    replayer.pre_update(armed_variable.get_value::<f64>(), simulation_time_seconds)
+                }
+                Err(error) => Err(error),
+            },
             MSFSEvent::PreKill => {
                 replayer.reset();
                 armed_variable.set_value(0.0);
@@ -104,9 +108,9 @@ fn inject_frame(
 
 fn simulation_time_seconds() -> anyhow::Result<f64> {
     let value = execute_calculator_code::<f64>(SIMULATION_TIME_CODE)
-        .ok_or_else(|| anyhow!("failed to read {SIMULATION_TIME_CODE}"))?;
+        .ok_or(SimulatorError::SimulationTimeUnavailable)?;
     if !value.is_finite() {
-        bail!("invalid simulation time {value}");
+        return Err(SimulatorError::InvalidSimulationTime { value }.into());
     }
     Ok(value)
 }

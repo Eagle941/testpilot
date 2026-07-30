@@ -3,6 +3,8 @@
 //! File-system and simulator-facing call sites add operational context with
 //! `anyhow` while retaining these errors as inspectable sources.
 
+use std::path::PathBuf;
+
 use thiserror::Error;
 
 /// Validation failures for replay TOML contents.
@@ -80,6 +82,51 @@ pub enum ConfigError {
 
     #[error("duplicate recording signal `{name}` at record.{index}")]
     DuplicateRecordingSignal { index: usize, name: String },
+}
+
+/// Replay lifecycle and simulator-clock failures.
+#[derive(Debug, Error)]
+pub enum ReplayerError {
+    #[error("a replay scenario is already loaded")]
+    ScenarioAlreadyLoaded,
+
+    #[error("configuration path `{path}` has no parent directory")]
+    ConfigPathWithoutParent { path: PathBuf },
+
+    #[error("scenario update requested while idle")]
+    UpdateWhileIdle,
+
+    #[error("invalid simulation time {value}")]
+    InvalidSimulationTime { value: f64 },
+
+    #[error("invalid elapsed simulation time {value}")]
+    InvalidElapsedSimulationTime { value: f64 },
+}
+
+/// MSFS calculator-code and simulator-variable failures.
+#[derive(Debug, Error)]
+pub enum SimulatorError {
+    #[error("failed to read simulator time")]
+    SimulationTimeUnavailable,
+
+    #[error("invalid simulator time {value}")]
+    InvalidSimulationTime { value: f64 },
+
+    #[error("cannot write non-finite value {value} to `{variable}`")]
+    NonFiniteWrite { variable: String, value: f64 },
+
+    #[error("unsupported simulator variable `{variable}`; expected a non-empty K: or L: prefix")]
+    UnsupportedVariable { variable: String },
+
+    #[error("failed to build calculator code for `{variable}`: {source}")]
+    CalculatorCodeFormatting {
+        variable: String,
+        #[source]
+        source: std::fmt::Error,
+    },
+
+    #[error("calculator code failed while writing {value} to `{variable}`")]
+    CalculatorCodeWriteFailed { variable: String, value: f64 },
 }
 
 /// Structural and numeric validation failures for scenario CSV input.
@@ -165,6 +212,9 @@ pub enum ScenarioError {
 
     #[error("signal `{signal}` contains no samples")]
     MissingSamples { signal: String },
+
+    #[error("signal `{signal}` has no next interpolation row")]
+    MissingNextInterpolationRow { signal: String },
 }
 
 /// Invalid samples, interpolation requests, and range conversions.

@@ -2,11 +2,11 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, anyhow, bail};
+use anyhow::Context;
 
 use crate::arm::ArmState;
 use crate::config::{CONFIG_PATH, read_config_file};
-
+use crate::error::ReplayerError;
 use crate::scenario::{InterpolationRows, ScenarioPlayback, ScenarioProgress, ScenarioStep};
 
 /// Result of processing one gauge update.
@@ -90,17 +90,13 @@ impl ReplayerGauge {
 
     /// Processes one gauge update.
     ///
-    /// The simulator clock callback is evaluated only while a scenario is
-    /// loaded. The arming frame opens the configured cursor set but consumes no
-    /// scenario data rows.
-    pub(crate) fn pre_update<F>(
+    /// The arming frame opens the configured cursor set but consumes no
+    /// scenario data rows. Simulator time is used once a scenario is loaded.
+    pub(crate) fn pre_update(
         &mut self,
         armed_value: f64,
-        simulation_time_seconds: F,
-    ) -> anyhow::Result<ReplayerUpdate<'_>>
-    where
-        F: FnOnce() -> anyhow::Result<f64>,
-    {
+        simulation_time_seconds: f64,
+    ) -> anyhow::Result<ReplayerUpdate<'_>> {
         if self.arm_state.start(armed_value) {
             self.begin_scenario()?;
             return Ok(ReplayerUpdate::without_interpolation(
@@ -111,7 +107,7 @@ impl ReplayerGauge {
             return Ok(ReplayerUpdate::without_interpolation(ReplayerEvent::Idle));
         }
 
-        self.update_scenario(simulation_time_seconds()?)
+        self.update_scenario(simulation_time_seconds)
     }
 
     /// Releases all replay state. Calling this repeatedly is safe.
@@ -122,16 +118,16 @@ impl ReplayerGauge {
 
     fn begin_scenario(&mut self) -> anyhow::Result<()> {
         if self.scenario.is_some() {
-            bail!("a replay scenario is already loaded");
+            return Err(ReplayerError::ScenarioAlreadyLoaded.into());
         }
 
         let config = read_config_file(&self.config_path)?;
-        let config_directory = self.config_path.parent().ok_or_else(|| {
-            anyhow!(
-                "configuration path `{}` has no parent directory",
-                self.config_path.display()
-            )
-        })?;
+        let config_directory =
+            self.config_path
+                .parent()
+                .ok_or_else(|| ReplayerError::ConfigPathWithoutParent {
+                    path: self.config_path.clone(),
+                })?;
         let scenario_path = config_directory.join(&config.input_file);
         let playback = ScenarioPlayback::open(&scenario_path, &config)
             .with_context(|| format!("failed to open scenario `{}`", scenario_path.display()))?;
@@ -151,20 +147,26 @@ impl ReplayerGauge {
         simulation_time_seconds: f64,
     ) -> anyhow::Result<ReplayerUpdate<'_>> {
         if !simulation_time_seconds.is_finite() {
-            bail!("invalid simulation time {simulation_time_seconds}");
+            return Err(ReplayerError::InvalidSimulationTime {
+                value: simulation_time_seconds,
+            }
+            .into());
         }
 
         let elapsed_seconds = self
             .started_at_seconds
             .map_or(0.0, |started| simulation_time_seconds - started);
         if !elapsed_seconds.is_finite() || elapsed_seconds < 0.0 {
-            bail!("invalid elapsed simulation time {elapsed_seconds}");
+            return Err(ReplayerError::InvalidElapsedSimulationTime {
+                value: elapsed_seconds,
+            }
+            .into());
         }
 
         let playback = self
             .scenario
             .as_mut()
-            .ok_or_else(|| anyhow!("scenario update requested while idle"))?;
+            .ok_or(ReplayerError::UpdateWhileIdle)?;
         let step = playback.next(elapsed_seconds)?;
         match step.progress() {
             ScenarioProgress::Loading => Ok(ReplayerUpdate::without_interpolation(
@@ -197,9 +199,11 @@ impl ReplayerGauge {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+
     use std::fs;
     use std::path::PathBuf;
+
+    use crate::error::ReplayerError;
 
     use super::{ReplayerEvent, ReplayerGauge};
 
@@ -269,20 +273,15 @@ range = [-180.0, 180.0]
     }
 
     #[test]
-    fn remains_idle_without_reading_the_simulator_clock() {
+    fn remains_idle_when_disarmed() {
         let fixture = Fixture::new();
         let mut replayer = ReplayerGauge::with_config_path(fixture.config_path.clone());
-        let clock_read = Cell::new(false);
 
         let event = replayer
-            .pre_update(0.0, || {
-                clock_read.set(true);
-                Ok(42.0)
-            })
+            .pre_update(0.0, 42.0)
             .unwrap_or_else(|error| panic!("idle update failed: {error:#}"));
 
         assert_eq!(event.event(), ReplayerEvent::Idle);
-        assert!(!clock_read.get());
     }
 
     #[test]
@@ -308,7 +307,10 @@ range = [-180.0, 180.0]
             .begin_scenario()
             .expect_err("overlapping replay should fail");
 
-        assert!(error.to_string().contains("already loaded"));
+        assert!(matches!(
+            error.downcast_ref::<ReplayerError>(),
+            Some(ReplayerError::ScenarioAlreadyLoaded)
+        ));
         assert!(replayer.scenario.is_some());
     }
 
@@ -365,7 +367,10 @@ range = [-180.0, 180.0]
             Err(error) => error,
         };
 
-        assert!(error.to_string().contains("while idle"));
+        assert!(matches!(
+            error.downcast_ref::<ReplayerError>(),
+            Some(ReplayerError::UpdateWhileIdle)
+        ));
     }
 
     #[test]
@@ -374,21 +379,21 @@ range = [-180.0, 180.0]
         let mut replayer = ReplayerGauge::with_config_path(fixture.config_path.clone());
 
         assert_eq!(
-            replayer.pre_update(1.0, || Ok(99.0)).unwrap().event(),
+            replayer.pre_update(1.0, 99.0).unwrap().event(),
             ReplayerEvent::Started
         );
         assert_eq!(
-            replayer.pre_update(1.0, || Ok(100.0)).unwrap().event(),
+            replayer.pre_update(1.0, 100.0).unwrap().event(),
             ReplayerEvent::Loading
         );
         assert_eq!(replayer.started_at_seconds, None);
         assert_eq!(
-            replayer.pre_update(1.0, || Ok(101.0)).unwrap().event(),
+            replayer.pre_update(1.0, 101.0).unwrap().event(),
             ReplayerEvent::Running
         );
         assert_eq!(replayer.started_at_seconds, Some(101.0));
         assert_eq!(
-            replayer.pre_update(1.0, || Ok(101.2)).unwrap().event(),
+            replayer.pre_update(1.0, 101.2).unwrap().event(),
             ReplayerEvent::Completed
         );
         assert!(replayer.scenario.is_some());
@@ -407,18 +412,17 @@ range = [-180.0, 180.0]
             Err(error) => error,
         };
 
-        assert!(
-            error
-                .to_string()
-                .contains("invalid elapsed simulation time")
-        );
+        assert!(matches!(
+            error.downcast_ref::<ReplayerError>(),
+            Some(ReplayerError::InvalidElapsedSimulationTime { value }) if *value == -0.5
+        ));
     }
 
     #[test]
     fn reset_is_idempotent() {
         let fixture = Fixture::new();
         let mut replayer = ReplayerGauge::with_config_path(fixture.config_path.clone());
-        replayer.pre_update(1.0, || Ok(0.0)).unwrap();
+        replayer.pre_update(1.0, 0.0).unwrap();
 
         replayer.reset();
         replayer.reset();

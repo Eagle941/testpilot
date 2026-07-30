@@ -234,9 +234,11 @@ impl SignalCursor {
             return Ok(());
         }
 
-        let next = self.next.ok_or_else(|| {
-            anyhow::anyhow!("signal `{}` has no next interpolation row", self.signal)
-        })?;
+        let next = self
+            .next
+            .ok_or_else(|| ScenarioError::MissingNextInterpolationRow {
+                signal: self.signal.clone(),
+            })?;
         if elapsed_seconds <= next.time_seconds {
             return Ok(());
         }
