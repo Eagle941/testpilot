@@ -27,11 +27,12 @@ It records these responses:
 - `elevator_position`
 - `aileron_position`
 
-Injection names are stored as arbitrary logical strings so the core format is
-not coupled to a predefined signal enum. Each injection also provides a
-`variable` string containing its prefixed simulator destination, such as
-`K:AXIS_ELEVATOR_SET` or `L:SOME_LOCAL_VARIABLE`. CSV columns remain logical
-source-data names and do not contain simulator identifiers.
+Injection and recording names are stored as arbitrary logical strings, so the
+core format is not coupled to predefined signal enums. Each entry also provides
+a `variable` string containing its prefixed simulator identifier, such as
+`K:AXIS_ELEVATOR_SET`, `A:PLANE PITCH DEGREES`, or `L:SOME_LOCAL_VARIABLE`.
+CSV columns remain logical source-data names and do not contain simulator
+identifiers.
 
 ## MVP configuration
 
@@ -79,10 +80,11 @@ The repository provides this default as `replayer_config.toml`. The installation
 script copies it to the hardcoded package-relative configuration path.
 
 `inject` and `record` section indexes are zero-based, contiguous, and define
-stable processing and output-column order. Missing indexes, duplicate signal
-names, and reused time or value columns are invalid. The required `variable`
-field preserves its simulator prefix so the adapter can select the appropriate
-`msfs-rs` interface; the parser stores the identifier without interpreting it.
+stable processing and output-column order. Missing indexes, empty or duplicate
+signal names, and reused time or value columns are invalid. The required
+`variable` field preserves its simulator prefix so the adapter can select the
+appropriate `msfs-rs` interface; the parser stores the identifier without
+interpreting it.
 
 For the MVP, the module reads the package-relative, lowercase filename
 `SimObjects/AirPlanes/FlyByWire_A320_NEO/replayer_config.toml`. Relative

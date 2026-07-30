@@ -38,9 +38,6 @@ pub enum ConfigError {
         found: usize,
     },
 
-    #[error("unsupported recording signal `{name}` at record.{index}")]
-    UnsupportedRecordingSignal { index: usize, name: String },
-
     #[error("invalid {field} at inject.{index}: {reason}")]
     InvalidInjectionRange {
         index: usize,
@@ -59,6 +56,9 @@ pub enum ConfigError {
 
     #[error("{field} at inject.{index} must not be empty")]
     EmptyInjectionColumn { index: usize, field: &'static str },
+
+    #[error("name at record.{index} must not be empty")]
+    EmptyRecordingName { index: usize },
 
     #[error("variable at record.{index} must not be empty")]
     EmptyRecordingVariable { index: usize },

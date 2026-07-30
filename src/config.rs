@@ -1,8 +1,8 @@
 //! Replay configuration data types, parsing, and file loading.
 //!
 //! The parser accepts the versioned TOML contract documented in the crate
-//! README and converts supported signal selections into strongly typed values
-//! used by the simulator-independent replay core.
+//! README and validates signal selections for the simulator-independent replay
+//! core.
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
@@ -57,35 +57,10 @@ pub struct InjectionConfig {
 /// Configuration for one aircraft-response signal recorded each frame.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecordingConfig {
-    /// Supported logical response signal.
-    pub name: RecordingSignal,
+    /// Logical telemetry column name from the configuration.
+    pub name: String,
     /// Prefixed simulator source, such as `A:PLANE PITCH DEGREES`.
     pub variable: String,
-}
-
-/// Aircraft-response signals supported by the MVP.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RecordingSignal {
-    /// Aggregate aircraft pitch attitude.
-    Pitch,
-    /// Aggregate aircraft roll attitude.
-    Roll,
-    /// Aggregate elevator position.
-    ElevatorPosition,
-    /// Aggregate aileron position.
-    AileronPosition,
-}
-
-impl RecordingSignal {
-    /// Returns the stable configuration and telemetry column name.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Pitch => "pitch",
-            Self::Roll => "roll",
-            Self::ElevatorPosition => "elevator_position",
-            Self::AileronPosition => "aileron_position",
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -216,8 +191,10 @@ fn parse_recordings(
     let mut result = Vec::with_capacity(entries.len());
 
     for (index, raw) in entries {
-        let name = parse_recording_signal(index, &raw.name)?;
-        if !signals.insert(name) {
+        if raw.name.is_empty() {
+            return Err(ConfigError::EmptyRecordingName { index });
+        }
+        if !signals.insert(raw.name.clone()) {
             return Err(ConfigError::DuplicateRecordingSignal {
                 index,
                 name: raw.name,
@@ -229,7 +206,7 @@ fn parse_recordings(
         }
 
         result.push(RecordingConfig {
-            name,
+            name: raw.name,
             variable: raw.variable,
         });
     }
@@ -274,19 +251,6 @@ fn ordered_entries<T>(
     }
 
     Ok(indexed)
-}
-
-fn parse_recording_signal(index: usize, name: &str) -> Result<RecordingSignal, ConfigError> {
-    match name {
-        "pitch" => Ok(RecordingSignal::Pitch),
-        "roll" => Ok(RecordingSignal::Roll),
-        "elevator_position" => Ok(RecordingSignal::ElevatorPosition),
-        "aileron_position" => Ok(RecordingSignal::AileronPosition),
-        _ => Err(ConfigError::UnsupportedRecordingSignal {
-            index,
-            name: name.to_owned(),
-        }),
-    }
 }
 
 fn validate_column(
@@ -405,9 +369,9 @@ variable = "A:AILERON POSITION"
         assert_eq!(config.inject[1].name, "sidestick_roll_position");
         assert_eq!(config.inject[1].variable, "K:AXIS_AILERONS_SET");
         assert_eq!(config.record.len(), 4);
-        assert_eq!(config.record[0].name, RecordingSignal::Pitch);
+        assert_eq!(config.record[0].name, "pitch");
         assert_eq!(config.record[0].variable, "A:PLANE PITCH DEGREES");
-        assert_eq!(config.record[3].name, RecordingSignal::AileronPosition);
+        assert_eq!(config.record[3].name, "aileron_position");
         assert_eq!(config.record[3].variable, "A:AILERON POSITION");
     }
 
@@ -478,10 +442,24 @@ variable = "A:AILERON POSITION"
     }
 
     #[test]
-    fn rejects_unsupported_recordings() {
+    fn accepts_arbitrary_recording_names_and_variables() {
+        let arbitrary = VALID_CONFIG
+            .replacen("name = \"pitch\"", "name = \"custom_response\"", 1)
+            .replacen("A:PLANE PITCH DEGREES", "L:CUSTOM_RESPONSE", 1);
+        match parse_config(&arbitrary) {
+            Ok(config) => {
+                assert_eq!(config.record[0].name, "custom_response");
+                assert_eq!(config.record[0].variable, "L:CUSTOM_RESPONSE");
+            }
+            Err(error) => panic!("arbitrary recording should parse: {error}"),
+        }
+    }
+
+    #[test]
+    fn requires_non_empty_recording_name() {
         assert_error(
-            &VALID_CONFIG.replacen("name = \"pitch\"", "name = \"yaw\"", 1),
-            |error| matches!(error, ConfigError::UnsupportedRecordingSignal { .. }),
+            &VALID_CONFIG.replacen("name = \"pitch\"", "name = \"\"", 1),
+            |error| matches!(error, ConfigError::EmptyRecordingName { .. }),
         );
     }
 
@@ -631,7 +609,7 @@ variable = "A:AILERON POSITION"
                 .collect::<Vec<_>>(),
             vec!["sidestick_roll_position", "sidestick_pitch_position"]
         );
-        assert_eq!(config.record[0].name, RecordingSignal::Roll);
-        assert_eq!(config.record[1].name, RecordingSignal::Pitch);
+        assert_eq!(config.record[0].name, "roll");
+        assert_eq!(config.record[1].name, "pitch");
     }
 }
