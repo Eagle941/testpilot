@@ -13,6 +13,9 @@ mod gauge;
 #[cfg(any(target_arch = "wasm32", test))]
 mod replayer;
 
+#[cfg(any(target_arch = "wasm32", test))]
+mod simulator;
+
 pub mod config;
 pub mod error;
 pub mod playback;

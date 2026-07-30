@@ -1,6 +1,6 @@
 use std::error::Error;
 
-use anyhow::{anyhow, bail};
+use anyhow::{Context, anyhow, bail};
 use msfs::{
     MSFSEvent,
     legacy::{NamedVariable, execute_calculator_code},
@@ -8,6 +8,7 @@ use msfs::{
 
 use crate::playback::LinearSegment;
 use crate::replayer::{InterpolationFrame, ReplayerEvent, ReplayerGauge};
+use crate::simulator::VariableWriter;
 
 const ARMED_VARIABLE: &str = "REPLAYER_ARMED";
 const SIMULATION_TIME_CODE: &str = "(E:SIMULATION TIME, seconds)";
@@ -19,6 +20,7 @@ async fn replayer(mut gauge: msfs::Gauge) -> Result<(), Box<dyn Error>> {
     println!("REPLAYER: waiting for L:REPLAYER_ARMED = 1");
 
     let mut replayer = ReplayerGauge::new();
+    let mut variable_writer = VariableWriter::new();
     while let Some(event) = gauge.next_event().await {
         let result = match event {
             MSFSEvent::PreUpdate => {
@@ -35,8 +37,13 @@ async fn replayer(mut gauge: msfs::Gauge) -> Result<(), Box<dyn Error>> {
         match result {
             Ok(update) => {
                 let event = update.event();
-                if let Some(frame) = update.interpolation() {
-                    print_interpolation(frame)?;
+                if let Some(frame) = update.interpolation()
+                    && let Err(error) = inject_frame(frame, &mut variable_writer)
+                {
+                    eprintln!("REPLAYER: {error:#}");
+                    replayer.reset();
+                    armed_variable.set_value(0.0);
+                    return Err(error.into());
                 }
                 if event == ReplayerEvent::Completed {
                     println!("REPLAYER: scenario completed");
@@ -58,13 +65,19 @@ async fn replayer(mut gauge: msfs::Gauge) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn print_interpolation(frame: &InterpolationFrame<'_>) -> anyhow::Result<()> {
+fn inject_frame(
+    frame: &InterpolationFrame<'_>,
+    variable_writer: &mut VariableWriter,
+) -> anyhow::Result<()> {
     let elapsed_seconds = frame.elapsed_seconds();
     println!("REPLAYER: elapsed simulation seconds={elapsed_seconds:.6}");
     for data_points in frame.data_points() {
         let source_value = LinearSegment::new(data_points.previous, data_points.next)?
             .value_at(elapsed_seconds)?;
         let simulator_value = data_points.conversion.convert(source_value)?;
+        variable_writer
+            .write(data_points.variable, simulator_value)
+            .with_context(|| format!("failed to inject signal `{}`", data_points.signal))?;
         println!(
             "REPLAYER: {} -> {} previous=({}, {}) next=({}, {}) source={} simulator={}",
             data_points.signal,

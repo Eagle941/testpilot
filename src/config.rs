@@ -213,7 +213,7 @@ fn parse_injections(
 
         validate_increasing_range(index, "source_range", raw.source_range)?;
         validate_increasing_range(index, "simulator_range", raw.simulator_range)?;
-        if raw.simulator_range[0] < -1.0 || raw.simulator_range[1] > 1.0 {
+        if raw.simulator_range[0] < -16_383.0 || raw.simulator_range[1] > 16_384.0 {
             return Err(ConfigError::UnsafeSimulatorRange { index });
         }
 
@@ -616,7 +616,7 @@ range = [-16384.0, 16384.0]
         assert_error(
             &VALID_CONFIG.replacen(
                 "simulator_range = [-1.0, 1.0]",
-                "simulator_range = [-1.1, 1.0]",
+                "simulator_range = [-16384.0, 16384.0]",
                 1,
             ),
             |error| matches!(error, ConfigError::UnsafeSimulatorRange { .. }),

@@ -46,7 +46,7 @@ pub enum ConfigError {
         reason: &'static str,
     },
 
-    #[error("simulator_range at inject.{index} must remain within [-1, 1]")]
+    #[error("simulator_range at inject.{index} must remain within [-16383, 16384]")]
     UnsafeSimulatorRange { index: usize },
 
     #[error("duplicate injection signal `{name}` at inject.{index}")]

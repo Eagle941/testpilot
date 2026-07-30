@@ -9,8 +9,9 @@ The simulator-independent core currently implements strict replay
 configuration parsing, incremental per-signal scenario cursors, optional
 streaming scenario validation, irregular-time linear interpolation, and affine
 input-range conversion. It also provides an MSFS-compatible WASM build and a
-minimal `replayer` gauge entry point. The A32NX adapter, simulator-clock
-playback, and telemetry writer remain to be implemented.
+`replayer` gauge entry point with simulator-clock playback and calculator-code
+input injection. Input interception and telemetry recording remain to be
+implemented.
 
 ## MVP scope
 
@@ -46,16 +47,16 @@ name = "sidestick_pitch_position"
 variable = "K:AXIS_ELEVATOR_SET"
 time_column = "sidestick_pitch_position.time"
 value_column = "sidestick_pitch_position.value"
-source_range = [-100.0, 100.0]
-simulator_range = [-1.0, 1.0]
+source_range = [-25.0, 25.0]
+simulator_range = [-16383.0, 16384.0]
 
 [inject.1]
 name = "sidestick_roll_position"
 variable = "K:AXIS_AILERONS_SET"
 time_column = "sidestick_roll_position.time"
 value_column = "sidestick_roll_position.value"
-source_range = [-100.0, 100.0]
-simulator_range = [-1.0, 1.0]
+source_range = [-25.0, 25.0]
+simulator_range = [-16383.0, 16384.0]
 
 [record.0]
 name = "pitch"
@@ -189,12 +190,12 @@ simulator_value = a + (v - x) * (b - a) / (y - x)
 ```
 
 All range endpoints must be finite and each lower endpoint must be less than
-its upper endpoint. The simulator range must remain within the safe range for
-the supported logical signal. Invalid or out-of-range values are rejected, not
-clamped. Interpolation is performed before conversion so scenario values and
-validation remain in the configured source scale. Logical source signs are
-consistent with the corresponding MSFS/A32NX output signs; low-level event sign
-or axis conversions are handled only by the simulator adapter.
+its upper endpoint. For the MVP axis events, `simulator_range` must remain
+within `[-16383, 16384]` and expresses the raw value written to MSFS. Invalid or
+out-of-range values are rejected, not clamped. Interpolation is performed before
+conversion so scenario values and validation remain in the configured source
+scale. The simulator adapter writes the converted value directly without
+additional scaling or sign conversion.
 
 The final point is injected exactly, then the scenario completes. Source files
 are streamed with bounded lookahead so duration is limited by available
@@ -319,9 +320,9 @@ To validate incremental loading, run the installer, load the A32NX, and set
 `L:REPLAYER_ARMED` to `1` with an LVAR or calculator-code tool. Verify the
 console reports the cursor count followed by elapsed simulator seconds, the
 ready message, and one time-varying interpolation-row pair per configured
-injection on every frame. The diagnostic proves cursor scheduling,
-interpolation, and range conversion; it does not yet write the values to MSFS or
-record telemetry.
+injection on every frame. Each converted simulator value is written through
+legacy calculator code to its configured `K:` event or `L:` variable before it
+is logged. Telemetry recording is not yet implemented.
 
 ## A32NX MVP mappings
 
@@ -332,8 +333,8 @@ these low-level identifiers in each injection's `variable` field.
 
 | Logical signal | Direction | MSFS/A32NX interface | Native unit/conversion |
 | --- | --- | --- | --- |
-| `sidestick_pitch_position` | inject | `K:AXIS_ELEVATOR_SET`; readback `L:A32NX_SIDESTICK_POSITION_Y` | normalized `[-1, 1]`; event value = converted simulator value × `-16384` |
-| `sidestick_roll_position` | inject | `K:AXIS_AILERONS_SET`; readback `L:A32NX_SIDESTICK_POSITION_X` | normalized `[-1, 1]`; event value = converted simulator value × `-16384` |
+| `sidestick_pitch_position` | inject | `K:AXIS_ELEVATOR_SET`; readback `L:A32NX_SIDESTICK_POSITION_Y` | configured raw axis value in `[-16383, 16384]`, written directly to the event |
+| `sidestick_roll_position` | inject | `K:AXIS_AILERONS_SET`; readback `L:A32NX_SIDESTICK_POSITION_X` | configured raw axis value in `[-16383, 16384]`, written directly to the event |
 | `pitch` | record | `A:PLANE PITCH DEGREES` | degrees |
 | `roll` | record | `A:PLANE BANK DEGREES` | degrees |
 | `elevator_position` | record | `A:ELEVATOR POSITION` | `Position 16k` |
