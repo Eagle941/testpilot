@@ -144,7 +144,7 @@ impl ReplayerGauge {
                     path: self.config_path.clone(),
                 })?;
         let scenario_path = config_directory.join(&config.input_file);
-        let playback = ScenarioPlayback::open(&scenario_path, &config)?;
+        let playback = ScenarioPlayback::new(&scenario_path, &config)?;
 
         println!(
             "TESTPILOT: opened {} with {} signal cursors",

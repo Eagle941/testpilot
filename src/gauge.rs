@@ -1,8 +1,8 @@
 use std::error::Error;
 
 use msfs::{
-    legacy::{execute_calculator_code, NamedVariable},
     MSFSEvent,
+    legacy::{NamedVariable, execute_calculator_code},
 };
 
 use crate::error::{GaugeError, SimulatorError};

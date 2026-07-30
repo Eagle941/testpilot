@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::config::{ReplayConfig, parse_config};
+use crate::config::{parse_config, ReplayConfig};
 use crate::playback::Sample;
 
 use super::*;
@@ -124,7 +124,7 @@ fn rejects_invalid_timestamps() {
 fn rejects_invalid_and_out_of_range_values() {
     assert!(matches!(
         validate("0,nope,0,0\n1,0,1,0\n"),
-        Err(ScenarioError::InvalidNumber { .. })
+        Err(ScenarioError::ParseInvalid(_))
     ));
     assert!(matches!(
         validate("0,NaN,0,0\n1,0,1,0\n"),
@@ -155,7 +155,7 @@ fn primes_independent_cursors_one_row_per_frame() {
         panic!("failed to create scenario fixture: {error}");
     }
 
-    let result = ScenarioPlayback::open(&path, &config());
+    let result = ScenarioPlayback::new(&path, &config());
     let mut playback = match result {
         Ok(playback) => playback,
         Err(error) => panic!("failed to open scenario fixture: {error:#}"),
@@ -193,7 +193,7 @@ fn primes_independent_cursors_one_row_per_frame() {
 #[test]
 fn advances_and_holds_unequal_length_series() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("scenario.csv");
-    let mut playback = ScenarioPlayback::open(path, &config())
+    let mut playback = ScenarioPlayback::new(path, &config())
         .unwrap_or_else(|error| panic!("failed to open default scenario: {error:#}"));
     let step = playback
         .next(0.0)

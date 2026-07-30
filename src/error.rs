@@ -4,6 +4,7 @@
 //! inspectable error sources.
 
 use std::io;
+use std::num::ParseFloatError;
 use std::path::PathBuf;
 
 use thiserror::Error;
@@ -55,7 +56,9 @@ pub enum ConfigError {
     #[error("duplicate injection signal `{name}` at inject.{index}")]
     DuplicateInjectionSignal { index: usize, name: String },
 
-    #[error("column `{column}` is reused at inject.{index}; time and value columns must be unique")]
+    #[error(
+        "column `{column}` is reused at inject.{index}; time and value columns must be unique"
+    )]
     ReusedInjectionColumn { index: usize, column: String },
 
     #[error("{field} at inject.{index} must not be empty")]
@@ -119,12 +122,14 @@ pub enum SimulatorError {
 /// Structural and numeric validation failures for scenario CSV input.
 #[derive(Debug, Error)]
 pub enum ScenarioError {
-    #[error("failed to open scenario `{path}` for signal `{signal}`: {source}")]
+    #[error(transparent)]
+    ParseInvalid(#[from] ParseFloatError),
+
+    #[error("failed to open scenario `{path}`: {source}")]
     OpenFile {
         path: PathBuf,
-        signal: String,
         #[source]
-        source: io::Error,
+        source: csv::Error,
     },
 
     #[error("failed to read scenario header `{path}` for signal `{signal}`: {source}")]
@@ -133,14 +138,6 @@ pub enum ScenarioError {
         signal: String,
         #[source]
         source: csv::Error,
-    },
-
-    #[error("invalid scenario header `{path}` for signal `{signal}`: {source}")]
-    InvalidHeader {
-        path: PathBuf,
-        signal: String,
-        #[source]
-        source: Box<ScenarioError>,
     },
 
     #[error("invalid range conversion for signal `{signal}`: {source}")]
@@ -191,16 +188,6 @@ pub enum ScenarioError {
 
     #[error("internally sparse samples for signal `{signal}`{line_suffix}", line_suffix = format_line(*line))]
     SparseSeries { signal: String, line: Option<u64> },
-
-    #[error("invalid number `{value}` in column `{column}` for signal `{signal}`{line_suffix}: {source}", line_suffix = format_line(*line))]
-    InvalidNumber {
-        signal: String,
-        column: String,
-        value: String,
-        line: Option<u64>,
-        #[source]
-        source: std::num::ParseFloatError,
-    },
 
     #[error("non-finite timestamp for signal `{signal}`{line_suffix}", line_suffix = format_line(*line))]
     NonFiniteTime { signal: String, line: Option<u64> },

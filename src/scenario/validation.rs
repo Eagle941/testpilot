@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::io::Read;
 
+use csv::{Position, ReaderBuilder, StringRecord, Trim};
+
 use crate::config::{InjectionConfig, ReplayConfig};
 
 use super::ScenarioError;
@@ -27,8 +29,8 @@ pub struct ScenarioSummary {
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ColumnPair {
-    pub(super) time: usize,
-    pub(super) value: usize,
+    pub(super) time_idx: usize,
+    pub(super) value_idx: usize,
 }
 
 #[derive(Debug, Default)]
@@ -47,16 +49,14 @@ pub fn validate_scenario<R: Read>(
     reader: R,
     config: &ReplayConfig,
 ) -> Result<ScenarioSummary, ScenarioError> {
-    let mut csv = csv::ReaderBuilder::new()
-        .trim(csv::Trim::All)
-        .from_reader(reader);
+    let mut csv = ReaderBuilder::new().trim(Trim::All).from_reader(reader);
     let headers = csv.headers().map_err(ScenarioError::Csv)?.clone();
     validate_unique_headers(&headers)?;
 
     let columns = config
         .inject
         .iter()
-        .map(|injection| find_columns(&headers, injection))
+        .map(|injection| find_column_indices(&headers, injection))
         .collect::<Result<Vec<_>, _>>()?;
     let mut states = (0..config.inject.len())
         .map(|_| ValidationState::default())
@@ -64,7 +64,7 @@ pub fn validate_scenario<R: Read>(
 
     for record in csv.records() {
         let record = record.map_err(ScenarioError::Csv)?;
-        let line = record.position().map(csv::Position::line);
+        let line = record.position().map(Position::line);
 
         for (index, injection) in config.inject.iter().enumerate() {
             validate_pair(&record, columns[index], injection, &mut states[index], line)?;
@@ -74,7 +74,7 @@ pub fn validate_scenario<R: Read>(
     summarize(config, states)
 }
 
-fn validate_unique_headers(headers: &csv::StringRecord) -> Result<(), ScenarioError> {
+fn validate_unique_headers(headers: &StringRecord) -> Result<(), ScenarioError> {
     let mut first_indexes = HashMap::with_capacity(headers.len());
     for (index, header) in headers.iter().enumerate() {
         if let Some(first_index) = first_indexes.insert(header, index) {
@@ -88,8 +88,16 @@ fn validate_unique_headers(headers: &csv::StringRecord) -> Result<(), ScenarioEr
     Ok(())
 }
 
-pub(super) fn find_columns(
-    headers: &csv::StringRecord,
+/// Returns the CSV-header indexes for one configured injection's columns.
+///
+/// The returned [`ColumnPair`] contains the zero-based indexes of the time and
+/// value columns named by `injection.time_column` and `injection.value_column`.
+/// The scenario CSV format requires every `<signal>.time` column to be
+/// immediately followed by its matching `<signal>.value` column. Missing
+/// columns return [`ScenarioError::MissingColumn`]; present but non-adjacent
+/// columns return [`ScenarioError::NonAdjacentColumns`].
+pub(super) fn find_column_indices(
+    headers: &StringRecord,
     injection: &InjectionConfig,
 ) -> Result<ColumnPair, ScenarioError> {
     let time = headers
@@ -115,18 +123,21 @@ pub(super) fn find_columns(
         });
     }
 
-    Ok(ColumnPair { time, value })
+    Ok(ColumnPair {
+        time_idx: time,
+        value_idx: value,
+    })
 }
 
 fn validate_pair(
-    record: &csv::StringRecord,
+    record: &StringRecord,
     columns: ColumnPair,
     injection: &InjectionConfig,
     state: &mut ValidationState,
     line: Option<u64>,
 ) -> Result<(), ScenarioError> {
-    let time_text = record.get(columns.time).unwrap_or_default();
-    let value_text = record.get(columns.value).unwrap_or_default();
+    let time_text = record.get(columns.time_idx).unwrap_or_default();
+    let value_text = record.get(columns.value_idx).unwrap_or_default();
     let time_empty = time_text.is_empty();
     let value_empty = value_text.is_empty();
 
@@ -147,8 +158,8 @@ fn validate_pair(
         });
     }
 
-    let time = parse_number(time_text, &injection.name, &injection.time_column, line)?;
-    let value = parse_number(value_text, &injection.name, &injection.value_column, line)?;
+    let time = time_text.parse::<f64>()?;
+    let value = value_text.parse::<f64>()?;
 
     if !time.is_finite() {
         return Err(ScenarioError::NonFiniteTime {
@@ -205,22 +216,6 @@ fn validate_pair(
             })?;
     state.last_time = Some(time);
     Ok(())
-}
-
-pub(super) fn parse_number(
-    text: &str,
-    signal: &str,
-    column: &str,
-    line: Option<u64>,
-) -> Result<f64, ScenarioError> {
-    text.parse::<f64>()
-        .map_err(|source| ScenarioError::InvalidNumber {
-            signal: signal.to_owned(),
-            column: column.to_owned(),
-            value: text.to_owned(),
-            line,
-            source,
-        })
 }
 
 fn summarize(
