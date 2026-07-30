@@ -62,7 +62,7 @@ fn build_calculator_code(
 mod tests {
     use crate::error::SimulatorError;
 
-    use super::{VariableWriter, build_calculator_code};
+    use super::{build_calculator_code, VariableWriter};
 
     #[test]
     fn builds_key_event_and_local_variable_writes() {

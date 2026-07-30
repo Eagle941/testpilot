@@ -31,7 +31,18 @@ impl Sample {
     }
 }
 
-/// Two time-ordered samples that bound linear interpolation.
+/// Two time-ordered samples that bound time-based linear interpolation.
+///
+/// A [`LinearSegment`] converts two scenario samples, `(t0, v0)` and
+/// `(t1, v1)`, into a value at a requested time `t` using:
+///
+/// ```text
+/// v0 + (t - t0) * (v1 - v0) / (t1 - t0)
+/// ```
+///
+/// The requested time must be between the two sample timestamps, inclusive.
+/// This type interpolates along the time series; it does not convert the
+/// resulting value between engineering or simulator ranges.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LinearSegment {
     start: Sample,
@@ -93,7 +104,21 @@ impl LinearSegment {
     }
 }
 
-/// Affine conversion between strictly increasing source and target ranges.
+/// Converts values from a configured source range to a simulator range.
+///
+/// [`AffineRange`] applies an affine, or linear-with-offset, mapping after a
+/// time-series value has been interpolated. For source range `[x0, x1]`, target
+/// range `[y0, y1]`, and source value `x`, the converted value is:
+///
+/// ```text
+/// y0 + (x - x0) * (y1 - y0) / (x1 - x0)
+/// ```
+///
+/// For example, a source range of `[-25.0, 25.0]` can be mapped to the
+/// simulator range `[-16383.0, 16384.0]`. Values outside the source range are
+/// rejected rather than clamped. This type converts value scales; it does not
+/// interpolate between time-series samples. In the playback pipeline,
+/// [`LinearSegment`] runs first and [`AffineRange`] runs second.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AffineRange {
     source: [f64; 2],
@@ -103,8 +128,8 @@ pub struct AffineRange {
 impl AffineRange {
     /// Creates a conversion after validating both ranges.
     pub fn new(source: [f64; 2], target: [f64; 2]) -> Result<AffineRange, PlaybackError> {
-        validate_range("source", source)?;
-        validate_range("target", target)?;
+        AffineRange::validate_range("source", source)?;
+        AffineRange::validate_range("target", target)?;
         Ok(AffineRange { source, target })
     }
 
@@ -141,22 +166,22 @@ impl AffineRange {
         }
         Ok(converted)
     }
-}
 
-fn validate_range(name: &'static str, range: [f64; 2]) -> Result<(), PlaybackError> {
-    if !range.iter().all(|endpoint| endpoint.is_finite()) {
-        return Err(PlaybackError::InvalidRange {
-            name,
-            reason: "endpoints must be finite",
-        });
+    fn validate_range(name: &'static str, range: [f64; 2]) -> Result<(), PlaybackError> {
+        if !range.iter().all(|endpoint| endpoint.is_finite()) {
+            return Err(PlaybackError::InvalidRange {
+                name,
+                reason: "endpoints must be finite",
+            });
+        }
+        if range[0] >= range[1] {
+            return Err(PlaybackError::InvalidRange {
+                name,
+                reason: "lower endpoint must be less than upper endpoint",
+            });
+        }
+        Ok(())
     }
-    if range[0] >= range[1] {
-        return Err(PlaybackError::InvalidRange {
-            name,
-            reason: "lower endpoint must be less than upper endpoint",
-        });
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -168,6 +193,24 @@ mod tests {
             Ok(sample) => sample,
             Err(error) => panic!("valid test sample rejected: {error}"),
         }
+    }
+
+    #[test]
+    fn preserves_sample_and_segment_values() {
+        let start = sample(0.2, -10.0);
+        let end = sample(0.7, 30.0);
+        let segment = LinearSegment::new(start, end)
+            .unwrap_or_else(|error| panic!("valid segment rejected: {error}"));
+
+        assert_eq!(
+            start,
+            Sample {
+                time_seconds: 0.2,
+                value: -10.0
+            }
+        );
+        assert_eq!(segment.start(), start);
+        assert_eq!(segment.end(), end);
     }
 
     #[test]
@@ -203,6 +246,21 @@ mod tests {
     }
 
     #[test]
+    fn rejects_non_finite_time_and_interpolation_overflow() {
+        let segment = LinearSegment::new(sample(0.0, f64::MAX), sample(2.0, -f64::MAX))
+            .unwrap_or_else(|error| panic!("valid segment rejected: {error}"));
+
+        assert!(matches!(
+            segment.value_at(f64::NAN),
+            Err(PlaybackError::NonFiniteTime { .. })
+        ));
+        assert!(matches!(
+            segment.value_at(1.0),
+            Err(PlaybackError::ArithmeticOverflow)
+        ));
+    }
+
+    #[test]
     fn rejects_frame_times_outside_segment() {
         let segment = LinearSegment::new(sample(1.0, 0.0), sample(2.0, 1.0))
             .unwrap_or_else(|error| panic!("valid segment rejected: {error}"));
@@ -224,7 +282,13 @@ mod tests {
 
         assert_eq!(conversion.convert(-100.0), Ok(-1.0));
         assert_eq!(conversion.convert(0.0), Ok(0.0));
+        assert_eq!(conversion.source(), [-100.0, 100.0]);
+        assert_eq!(conversion.target(), [-1.0, 1.0]);
         assert_eq!(conversion.convert(100.0), Ok(1.0));
+        assert!(matches!(
+            conversion.convert(f64::NAN),
+            Err(PlaybackError::NonFiniteValue { .. })
+        ));
         assert!(matches!(
             conversion.convert(100.1),
             Err(PlaybackError::ValueOutsideSourceRange { .. })
@@ -239,7 +303,17 @@ mod tests {
         ));
         assert!(matches!(
             AffineRange::new([0.0, f64::INFINITY], [-1.0, 1.0]),
-            Err(PlaybackError::InvalidRange { .. })
+            Err(PlaybackError::InvalidRange { name: "source", .. })
+        ));
+        assert!(matches!(
+            AffineRange::new([0.0, 1.0], [1.0, 1.0]),
+            Err(PlaybackError::InvalidRange { name: "target", .. })
+        ));
+        let conversion = AffineRange::new([0.0, 1.0], [-f64::MAX, f64::MAX])
+            .unwrap_or_else(|error| panic!("valid conversion rejected: {error}"));
+        assert!(matches!(
+            conversion.convert(0.5),
+            Err(PlaybackError::ArithmeticOverflow)
         ));
     }
 }
