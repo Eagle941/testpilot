@@ -12,7 +12,7 @@ use std::path::Path;
 use anyhow::Context;
 
 use crate::config::{InjectionConfig, ReplayConfig};
-use crate::playback::{AffineRange, Sample};
+use crate::playback::{AffineRange, LinearSegment, Sample};
 
 pub use crate::error::ScenarioError;
 
@@ -30,7 +30,7 @@ pub struct SignalSummary {
 /// Result of a successful streaming scenario preflight pass.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScenarioSummary {
-    /// Common final timestamp of all configured input series.
+    /// Latest final timestamp across all configured input series.
     pub duration_seconds: f64,
     /// Per-signal summaries in configuration injection order.
     pub signals: Vec<SignalSummary>,
@@ -49,7 +49,7 @@ struct ValidationState {
     ended: bool,
 }
 
-/// Two scenario rows currently bounding interpolation for one injection.
+/// Scenario data points used to calculate one injection value.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct InterpolationRows<'a> {
     /// Logical injection name.
@@ -58,10 +58,20 @@ pub struct InterpolationRows<'a> {
     pub variable: &'a str,
     /// Earlier sample in the interpolation interval.
     pub previous: Sample,
-    /// Later sample in the interpolation interval.
-    pub next: Sample,
+    /// Later sample in the interpolation interval, or `None` after the series ends.
+    pub next: Option<Sample>,
     /// Configured conversion from source scale to simulator scale.
     pub conversion: AffineRange,
+}
+
+impl InterpolationRows<'_> {
+    /// Interpolates between two samples or holds the final sample after EOF.
+    pub fn value_at(&self, elapsed_seconds: f64) -> anyhow::Result<f64> {
+        match self.next {
+            Some(next) => Ok(LinearSegment::new(self.previous, next)?.value_at(elapsed_seconds)?),
+            None => Ok(self.previous.value),
+        }
+    }
 }
 
 /// Progress reported by one incremental scenario update.
@@ -69,7 +79,7 @@ pub struct InterpolationRows<'a> {
 pub enum ScenarioProgress {
     /// At least one cursor does not yet have two samples.
     Loading,
-    /// Every cursor has two rows that bracket interpolation.
+    /// Every cursor can interpolate or hold its final sample.
     Running,
     /// Every cursor has advanced beyond its final row.
     Completed,
@@ -90,11 +100,14 @@ impl ScenarioStep<'_> {
     /// Returns the rows available for interpolation on this frame.
     pub fn interpolation_rows(&self) -> impl Iterator<Item = InterpolationRows<'_>> {
         self.cursors.iter().filter_map(|cursor| {
+            if self.progress == ScenarioProgress::Completed {
+                return None;
+            }
             Some(InterpolationRows {
                 signal: &cursor.signal,
                 variable: &cursor.variable,
                 previous: cursor.previous?,
-                next: cursor.next?,
+                next: cursor.next,
                 conversion: cursor.conversion,
             })
         })
@@ -280,7 +293,7 @@ impl SignalCursor {
     }
 
     fn is_ready(&self) -> bool {
-        self.previous.is_some() && self.next.is_some()
+        self.previous.is_some() && (self.next.is_some() || self.ended)
     }
 }
 
@@ -473,7 +486,7 @@ fn summarize(
     config: &ReplayConfig,
     states: Vec<ValidationState>,
 ) -> Result<ScenarioSummary, ScenarioError> {
-    let mut duration = None;
+    let mut duration_seconds: f64 = 0.0;
     let mut signals = Vec::with_capacity(states.len());
 
     for (injection, state) in config.inject.iter().zip(states) {
@@ -482,16 +495,7 @@ fn summarize(
             .ok_or_else(|| ScenarioError::MissingSamples {
                 signal: injection.name.clone(),
             })?;
-        if let Some(expected) = duration
-            && final_time != expected
-        {
-            return Err(ScenarioError::FinalTimestampMismatch {
-                signal: injection.name.clone(),
-                expected_seconds: expected,
-                actual_seconds: final_time,
-            });
-        }
-        duration = Some(final_time);
+        duration_seconds = duration_seconds.max(final_time);
         signals.push(SignalSummary {
             signal: injection.name.clone(),
             sample_count: state.sample_count,
@@ -500,7 +504,7 @@ fn summarize(
     }
 
     Ok(ScenarioSummary {
-        duration_seconds: duration.unwrap_or(0.0),
+        duration_seconds,
         signals,
     })
 }
@@ -508,7 +512,6 @@ fn summarize(
 #[cfg(test)]
 mod tests {
     use crate::config::parse_config;
-    use crate::playback::LinearSegment;
 
     use super::*;
 
@@ -550,13 +553,15 @@ range = [-180.0, 180.0]
     }
 
     #[test]
-    fn validates_default_sine_wave_scenario() {
+    fn validates_default_unequal_length_scenario() {
         let summary = validate_scenario(include_bytes!("../scenario.csv").as_slice(), &config())
             .unwrap_or_else(|error| panic!("default scenario rejected: {error}"));
 
-        assert_eq!(summary.duration_seconds, 8.0);
-        assert_eq!(summary.signals[0].sample_count, 81);
-        assert_eq!(summary.signals[1].sample_count, 81);
+        assert_eq!(summary.duration_seconds, 40.0);
+        assert_eq!(summary.signals[0].sample_count, 4);
+        assert_eq!(summary.signals[0].final_time_seconds, 20.0);
+        assert_eq!(summary.signals[1].sample_count, 5);
+        assert_eq!(summary.signals[1].final_time_seconds, 40.0);
     }
 
     #[test]
@@ -643,14 +648,10 @@ range = [-180.0, 180.0]
     }
 
     #[test]
-    fn rejects_missing_samples_and_mismatched_final_times() {
+    fn rejects_missing_samples() {
         assert!(matches!(
             validate(",,0,0\n,,1,0\n"),
             Err(ScenarioError::MissingSamples { .. })
-        ));
-        assert!(matches!(
-            validate("0,0,0,0\n1,0,2,0\n"),
-            Err(ScenarioError::FinalTimestampMismatch { .. })
         ));
     }
 
@@ -692,11 +693,11 @@ range = [-180.0, 180.0]
         assert_eq!(rows[0].signal, "sidestick_pitch_position");
         assert_eq!(rows[0].variable, "K:AXIS_ELEVATOR_SET");
         assert_eq!(rows[0].previous, Sample::new(0.0, 1.0).unwrap());
-        assert_eq!(rows[0].next, Sample::new(0.5, 3.0).unwrap());
+        assert_eq!(rows[0].next, Some(Sample::new(0.5, 3.0).unwrap()));
         assert_eq!(rows[1].signal, "sidestick_roll_position");
         assert_eq!(rows[1].variable, "K:AXIS_AILERONS_SET");
         assert_eq!(rows[1].previous, Sample::new(0.0, 2.0).unwrap());
-        assert_eq!(rows[1].next, Sample::new(0.75, 4.0).unwrap());
+        assert_eq!(rows[1].next, Some(Sample::new(0.75, 4.0).unwrap()));
 
         let step = playback
             .next(0.0)
@@ -707,7 +708,7 @@ range = [-180.0, 180.0]
     }
 
     #[test]
-    fn advances_default_scenario_with_elapsed_time() {
+    fn advances_and_holds_unequal_length_series() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("scenario.csv");
         let mut playback = ScenarioPlayback::open(path, &config())
             .unwrap_or_else(|error| panic!("failed to open default scenario: {error:#}"));
@@ -720,7 +721,8 @@ range = [-180.0, 180.0]
             .unwrap_or_else(|error| panic!("second prime frame failed: {error:#}"));
         assert_eq!(step.progress(), ScenarioProgress::Running);
 
-        for frame in 0..=240 {
+        let mut held_pitch = false;
+        for frame in 0..=1200 {
             let elapsed_seconds = f64::from(frame) / 30.0;
             let step = playback
                 .next(elapsed_seconds)
@@ -728,17 +730,26 @@ range = [-180.0, 180.0]
             assert_eq!(step.progress(), ScenarioProgress::Running);
             for rows in step.interpolation_rows() {
                 assert!(rows.previous.time_seconds <= elapsed_seconds);
-                assert!(elapsed_seconds <= rows.next.time_seconds);
-                LinearSegment::new(rows.previous, rows.next)
-                    .and_then(|segment| segment.value_at(elapsed_seconds))
-                    .unwrap_or_else(|error| {
-                        panic!("interpolation failed at {elapsed_seconds}: {error}")
-                    });
+                match rows.next {
+                    Some(next) => assert!(elapsed_seconds <= next.time_seconds),
+                    None => {
+                        assert_eq!(rows.value_at(elapsed_seconds).unwrap(), rows.previous.value);
+                        if rows.signal == "sidestick_pitch_position" {
+                            held_pitch = true;
+                            assert_eq!(rows.previous.time_seconds, 20.0);
+                            assert_eq!(rows.previous.value, 0.0);
+                        }
+                    }
+                }
+                rows.value_at(elapsed_seconds).unwrap_or_else(|error| {
+                    panic!("interpolation failed at {elapsed_seconds}: {error}")
+                });
             }
         }
+        assert!(held_pitch);
 
         let step = playback
-            .next(8.1)
+            .next(40.1)
             .unwrap_or_else(|error| panic!("completion advance failed: {error:#}"));
         assert_eq!(step.progress(), ScenarioProgress::Completed);
         assert_eq!(step.interpolation_rows().count(), 0);

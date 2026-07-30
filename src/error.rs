@@ -165,15 +165,6 @@ pub enum ScenarioError {
 
     #[error("signal `{signal}` contains no samples")]
     MissingSamples { signal: String },
-
-    #[error(
-        "final timestamp for signal `{signal}` is {actual_seconds}, expected {expected_seconds}"
-    )]
-    FinalTimestampMismatch {
-        signal: String,
-        expected_seconds: f64,
-        actual_seconds: f64,
-    },
 }
 
 /// Invalid samples, interpolation requests, and range conversions.

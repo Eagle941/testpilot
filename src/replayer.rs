@@ -334,8 +334,10 @@ range = [-180.0, 180.0]
         assert_eq!(data_points[0].signal, "sidestick_pitch_position");
         assert_eq!(data_points[0].previous.time_seconds, 0.0);
         assert_eq!(data_points[0].previous.value, 0.0);
-        assert_eq!(data_points[0].next.time_seconds, 0.1);
-        assert_eq!(data_points[0].next.value, 10.0);
+        assert_eq!(
+            data_points[0].next,
+            Some(crate::playback::Sample::new(0.1, 10.0).unwrap())
+        );
         assert_eq!(replayer.started_at_seconds, Some(101.0));
 
         let update = replayer.update_scenario(101.0625).unwrap();

@@ -6,7 +6,6 @@ use msfs::{
     legacy::{NamedVariable, execute_calculator_code},
 };
 
-use crate::playback::LinearSegment;
 use crate::replayer::{InterpolationFrame, ReplayerEvent, ReplayerGauge};
 use crate::simulator::VariableWriter;
 
@@ -72,23 +71,33 @@ fn inject_frame(
     let elapsed_seconds = frame.elapsed_seconds();
     println!("REPLAYER: elapsed simulation seconds={elapsed_seconds:.6}");
     for data_points in frame.data_points() {
-        let source_value = LinearSegment::new(data_points.previous, data_points.next)?
-            .value_at(elapsed_seconds)?;
+        let source_value = data_points.value_at(elapsed_seconds)?;
         let simulator_value = data_points.conversion.convert(source_value)?;
         variable_writer
             .write(data_points.variable, simulator_value)
             .with_context(|| format!("failed to inject signal `{}`", data_points.signal))?;
-        println!(
-            "REPLAYER: {} -> {} previous=({}, {}) next=({}, {}) source={} simulator={}",
-            data_points.signal,
-            data_points.variable,
-            data_points.previous.time_seconds,
-            data_points.previous.value,
-            data_points.next.time_seconds,
-            data_points.next.value,
-            source_value,
-            simulator_value
-        );
+        match data_points.next {
+            Some(next) => println!(
+                "REPLAYER: {} -> {} previous=({}, {}) next=({}, {}) source={} simulator={}",
+                data_points.signal,
+                data_points.variable,
+                data_points.previous.time_seconds,
+                data_points.previous.value,
+                next.time_seconds,
+                next.value,
+                source_value,
+                simulator_value
+            ),
+            None => println!(
+                "REPLAYER: {} -> {} final=({}, {}) hold source={} simulator={}",
+                data_points.signal,
+                data_points.variable,
+                data_points.previous.time_seconds,
+                data_points.previous.value,
+                source_value,
+                simulator_value
+            ),
+        }
     }
     Ok(())
 }

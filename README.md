@@ -167,21 +167,21 @@ batch tools can read the complete table directly. For example, a tool can
 select one signal's two columns, drop trailing empty rows, and obtain an
 `N × 2` array without parsing custom blocks or mixed record types.
 
-The repository's default `scenario.csv` contains 81 samples at 10 Hz over 8
-seconds. It uses a 0.25 Hz sine wave with ±25% amplitude: sidestick pitch
-completes one cycle from 0 to 4 seconds while roll remains neutral, then roll
-completes one cycle from 4 to 8 seconds while pitch remains neutral.
+The repository's default `scenario.csv` demonstrates unequal series lengths.
+Sidestick pitch has four samples ending at 20 seconds, while sidestick roll has
+five samples ending at 40 seconds. The pitch pair is empty on the final CSV row.
 
 For each configured signal:
 
 - configured time and value columns must exist exactly once;
 - timestamps must be finite, non-negative, and strictly increasing;
 - values must be finite and within the signal's configured `source_range`;
-- the first point must be at `0` seconds;
-- all injected signals must have the same final timestamp for the MVP.
+- the first point must be at `0` seconds.
 
 At every MSFS frame, each signal is linearly interpolated between its two
-surrounding points using their actual timestamps. The interpolated source value
+surrounding points using their actual timestamps. When a shorter series reaches
+its final sample, that value is held while the remaining series continue. The
+replay completes after every configured series reaches its final sample. The interpolated source value
 `v` in `source_range = [x, y]` is then converted to the simulator range
 `[a, b]` with:
 
