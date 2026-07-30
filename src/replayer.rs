@@ -133,7 +133,7 @@ impl ReplayerGauge {
             .with_context(|| format!("failed to open scenario `{}`", scenario_path.display()))?;
 
         println!(
-            "REPLAYER: opened {} with {} signal cursors",
+            "TESTPILOT: opened {} with {} signal cursors",
             scenario_path.display(),
             playback.signal_count()
         );
@@ -180,7 +180,7 @@ impl ReplayerGauge {
                     Some(started) => simulation_time_seconds - started,
                     None => {
                         self.started_at_seconds = Some(simulation_time_seconds);
-                        println!("REPLAYER: scenario cursors ready");
+                        println!("TESTPILOT: scenario cursors ready");
                         0.0
                     }
                 };

@@ -1,8 +1,8 @@
 #!/usr/bin/env sh
 set -eu
 
-raw_artifact="target/wasm32-wasip1/release/replay.wasm"
-msfs_artifact="target/wasm32-wasip1/release/replay-msfs.wasm"
+raw_artifact="target/wasm32-wasip1/release/testpilot.wasm"
+msfs_artifact="target/wasm32-wasip1/release/testpilot-msfs.wasm"
 
 if ! command -v wasm-opt >/dev/null 2>&1; then
     echo "error: wasm-opt is required to package the MSFS module" >&2

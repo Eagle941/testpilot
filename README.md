@@ -1,6 +1,6 @@
-# Replay
+# TestPilot
 
-`replay` is a Rust WebAssembly library for automated flight testing in
+`testpilot` is a Rust WebAssembly library for automated flight testing in
 Microsoft Flight Simulator 2020, initially targeting the FlyByWire A32NX.
 It replays timestamped flight-control inputs at simulator frame rate and
 streams the configured aircraft response to a telemetry file.
@@ -9,7 +9,7 @@ The simulator-independent core currently implements strict replay
 configuration parsing, incremental per-signal scenario cursors, optional
 streaming scenario validation, irregular-time linear interpolation, and affine
 input-range conversion. It also provides an MSFS-compatible WASM build and a
-`replayer` gauge entry point with simulator-clock playback and calculator-code
+`testpilot` gauge entry point with simulator-clock playback and calculator-code
 input injection. Input interception and telemetry recording remain to be
 implemented.
 
@@ -219,15 +219,14 @@ formatting and bounded buffering.
 
 ## MSFS WASM build
 
-The build configuration is aligned with the local FlyByWire aircraft repository
-at `C:\Users\Giuseppe\source\repos\a32nx`, branch `fs2020-master`, commit
+The build configuration is aligned with the FlyByWire aircraft repository
+branch `fs2020-master` at commit
 `81461a72be047a9e91e1b1d647ef01cae86565ad`. In particular, this project uses:
 
 - Rust `1.93.0` with the `wasm32-wasip1` target;
 - a `cdylib` artifact and release LTO/stripping;
 - the A32NX WASM target features, linker mode, and exported runtime symbols;
-- the locally installed MSFS SDK WASI sysroot at
-  `C:\MSFS SDK\WASM\wasi-sysroot`;
+- the MSFS SDK WASI sysroot;
 - `msfs-rs` from its `main` branch, pinned by `Cargo.lock` to
   `2f697b9aac9fa3c00474f901a7f7ee4218cf534b`.
 
@@ -237,10 +236,9 @@ elimination and retains unsupported SDK imports, causing MSFS module
 instantiation to fail. Simulator-independent unit tests still run on the host
 with `cargo test`.
 
-The current machine has the MSFS SDK installed at `C:\MSFS SDK`, so the linker
-paths are configured directly in `.cargo/config.toml`; no `build.rs` or Docker
-container is required. Developers with the SDK in another location must update
-the two SDK paths in that file.
+The linker paths in `.cargo/config.toml` assume the MSFS SDK is installed at
+`C:\MSFS SDK`; no `build.rs` or Docker container is required. Developers with
+the SDK in another location must update the two SDK paths in that file.
 
 Build and package the module natively with:
 
@@ -257,8 +255,8 @@ wasm-opt -O1 --signext-lowering --enable-bulk-memory \
 ```
 
 The raw Cargo artifact remains at
-`target/wasm32-wasip1/release/replay.wasm`. The deployable MVP artifact is
-`target/wasm32-wasip1/release/replay-msfs.wasm`. `wasm-opt` must be available
+`target/wasm32-wasip1/release/testpilot.wasm`. The deployable MVP artifact is
+`target/wasm32-wasip1/release/testpilot-msfs.wasm`. `wasm-opt` must be available
 on `PATH`. Host-side `cargo test` does not link against the MSFS SDK.
 
 A successful build and post-processing pass verifies the WASM structure, SDK
@@ -271,19 +269,18 @@ Close MSFS, then build and install the current gauge into the local A32NX
 Community package from Git Bash:
 
 ```sh
-sh scripts/install.sh
+sh scripts/install.sh /path/to/flybywire-aircraft-a320-neo
 ```
 
-The script uses the hardcoded package path
-`D:\MSFS\Packages\Community\flybywire-aircraft-a320-neo` and performs these
-operations:
+The required argument is the FlyByWire A32NX Community package directory. The
+script performs these operations:
 
 1. Runs `scripts/build-wasm.sh`.
-2. Overwrites the aircraft panel's `replay.wasm` with the deployable artifact.
+2. Overwrites the aircraft panel's `testpilot.wasm` with the deployable artifact.
 3. Copies the repository's `replayer_config.toml` and minimal `scenario.csv`
    into the aircraft directory.
 4. Adds the `htmlgauge04` entry under `[VCockpit17]` if it is absent.
-5. Updates or adds the configuration, scenario, `panel.cfg`, and `replay.wasm` entries in
+5. Updates or adds the configuration, scenario, `panel.cfg`, and `testpilot.wasm` entries in
    package-root `layout.json`, including exact byte sizes and Windows FILETIME
    timestamps.
 
@@ -301,7 +298,7 @@ changes from exactly `0` to exactly `1`. On that transition, the gauge reads
 independent `scenario.csv` reader per injection, and logs the cursor count. The
 arm frame reads only each reader's CSV header. Each subsequent `PreUpdate`
 consumes at most one data row per cursor until all cursors have two samples,
-then logs `REPLAYER: scenario cursors ready` and captures
+then logs `TESTPILOT: scenario cursors ready` and captures
 `E:SIMULATION TIME` as scenario time zero. On every subsequent `PreUpdate`, each
 cursor advances by at most one row when elapsed scenario time passes its next
 sample timestamp. The gauge prints elapsed simulator seconds, each injection's

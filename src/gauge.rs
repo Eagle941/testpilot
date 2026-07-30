@@ -13,11 +13,11 @@ use crate::simulator::VariableWriter;
 const ARMED_VARIABLE: &str = "REPLAYER_ARMED";
 const SIMULATION_TIME_CODE: &str = "(E:SIMULATION TIME, seconds)";
 
-#[msfs::gauge(name=replayer)]
-async fn replayer(mut gauge: msfs::Gauge) -> Result<(), Box<dyn Error>> {
+#[msfs::gauge(name=testpilot)]
+async fn testpilot(mut gauge: msfs::Gauge) -> Result<(), Box<dyn Error>> {
     let armed_variable = NamedVariable::from(ARMED_VARIABLE);
     armed_variable.set_value(0.0);
-    println!("REPLAYER: waiting for L:REPLAYER_ARMED = 1");
+    println!("TESTPILOT: waiting for L:REPLAYER_ARMED = 1");
 
     let mut replayer = ReplayerGauge::new();
     let mut variable_writer = VariableWriter::new();
@@ -43,19 +43,19 @@ async fn replayer(mut gauge: msfs::Gauge) -> Result<(), Box<dyn Error>> {
                 if let Some(frame) = update.interpolation()
                     && let Err(error) = inject_frame(frame, &mut variable_writer)
                 {
-                    eprintln!("REPLAYER: {error:#}");
+                    eprintln!("TESTPILOT: {error:#}");
                     replayer.reset();
                     armed_variable.set_value(0.0);
                     return Err(error.into());
                 }
                 if event == ReplayerEvent::Completed {
-                    println!("REPLAYER: scenario completed");
+                    println!("TESTPILOT: scenario completed");
                     replayer.reset();
                     armed_variable.set_value(0.0);
                 }
             }
             Err(error) => {
-                eprintln!("REPLAYER: {error:#}");
+                eprintln!("TESTPILOT: {error:#}");
                 replayer.reset();
                 armed_variable.set_value(0.0);
                 return Err(error.into());
@@ -73,7 +73,7 @@ fn inject_frame(
     variable_writer: &mut VariableWriter,
 ) -> anyhow::Result<()> {
     let elapsed_seconds = frame.elapsed_seconds();
-    println!("REPLAYER: elapsed simulation seconds={elapsed_seconds:.6}");
+    println!("TESTPILOT: elapsed simulation seconds={elapsed_seconds:.6}");
     for data_points in frame.data_points() {
         let source_value = data_points.value_at(elapsed_seconds)?;
         let simulator_value = data_points.conversion.convert(source_value)?;
@@ -82,7 +82,7 @@ fn inject_frame(
             .with_context(|| format!("failed to inject signal `{}`", data_points.signal))?;
         match data_points.next {
             Some(next) => println!(
-                "REPLAYER: {} -> {} previous=({}, {}) next=({}, {}) source={} simulator={}",
+                "TESTPILOT: {} -> {} previous=({}, {}) next=({}, {}) source={} simulator={}",
                 data_points.signal,
                 data_points.variable,
                 data_points.previous.time_seconds,
@@ -93,7 +93,7 @@ fn inject_frame(
                 simulator_value
             ),
             None => println!(
-                "REPLAYER: {} -> {} final=({}, {}) hold source={} simulator={}",
+                "TESTPILOT: {} -> {} final=({}, {}) hold source={} simulator={}",
                 data_points.signal,
                 data_points.variable,
                 data_points.previous.time_seconds,
