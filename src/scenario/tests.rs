@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::config::{parse_config, ReplayConfig};
+use crate::config::{ReplayConfig, parse_config};
 use crate::playback::Sample;
 
 use super::*;

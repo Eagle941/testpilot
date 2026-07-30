@@ -50,7 +50,7 @@ pub fn validate_scenario<R: Read>(
     config: &ReplayConfig,
 ) -> Result<ScenarioSummary, ScenarioError> {
     let mut csv = ReaderBuilder::new().trim(Trim::All).from_reader(reader);
-    let headers = csv.headers().map_err(ScenarioError::Csv)?.clone();
+    let headers = csv.headers()?.clone();
     validate_unique_headers(&headers)?;
 
     let columns = config
@@ -63,11 +63,11 @@ pub fn validate_scenario<R: Read>(
         .collect::<Vec<_>>();
 
     for record in csv.records() {
-        let record = record.map_err(ScenarioError::Csv)?;
+        let record = record?;
         let line = record.position().map(Position::line);
 
-        for (index, injection) in config.inject.iter().enumerate() {
-            validate_pair(&record, columns[index], injection, &mut states[index], line)?;
+        for ((injection, columns), state) in config.inject.iter().zip(&columns).zip(&mut states) {
+            validate_pair(&record, *columns, injection, state, line)?;
         }
     }
 

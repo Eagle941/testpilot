@@ -56,9 +56,7 @@ pub enum ConfigError {
     #[error("duplicate injection signal `{name}` at inject.{index}")]
     DuplicateInjectionSignal { index: usize, name: String },
 
-    #[error(
-        "column `{column}` is reused at inject.{index}; time and value columns must be unique"
-    )]
+    #[error("column `{column}` is reused at inject.{index}; time and value columns must be unique")]
     ReusedInjectionColumn { index: usize, column: String },
 
     #[error("{field} at inject.{index} must not be empty")]
@@ -125,44 +123,11 @@ pub enum ScenarioError {
     #[error(transparent)]
     ParseInvalid(#[from] ParseFloatError),
 
-    #[error("failed to open scenario `{path}`: {source}")]
-    OpenFile {
-        path: PathBuf,
-        #[source]
-        source: csv::Error,
-    },
+    #[error(transparent)]
+    Csv(#[from] csv::Error),
 
-    #[error("failed to read scenario header `{path}` for signal `{signal}`: {source}")]
-    ReadHeader {
-        path: PathBuf,
-        signal: String,
-        #[source]
-        source: csv::Error,
-    },
-
-    #[error("invalid range conversion for signal `{signal}`: {source}")]
-    InvalidRangeConversion {
-        signal: String,
-        #[source]
-        source: PlaybackError,
-    },
-
-    #[error("failed to read scenario row for signal `{signal}`: {source}")]
-    ReadRow {
-        signal: String,
-        #[source]
-        source: csv::Error,
-    },
-
-    #[error("invalid sample for signal `{signal}`: {source}")]
-    InvalidSample {
-        signal: String,
-        #[source]
-        source: PlaybackError,
-    },
-
-    #[error("invalid scenario CSV: {0}")]
-    Csv(#[source] csv::Error),
+    #[error(transparent)]
+    Playback(#[from] PlaybackError),
 
     #[error("duplicate CSV header `{column}` at indexes {first_index} and {duplicate_index}")]
     DuplicateHeader {
@@ -231,9 +196,6 @@ pub enum ScenarioError {
 
     #[error("signal `{signal}` contains no samples")]
     MissingSamples { signal: String },
-
-    #[error("signal `{signal}` has no next interpolation row")]
-    MissingNextInterpolationRow { signal: String },
 }
 
 /// Per-frame gauge orchestration and injection failures.

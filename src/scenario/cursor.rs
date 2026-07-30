@@ -6,8 +6,8 @@ use csv::{Position, Reader, ReaderBuilder, StringRecord, Trim};
 use crate::config::{InjectionConfig, ReplayConfig};
 use crate::playback::{AffineRange, LinearSegment, PlaybackError, Sample};
 
-use super::validation::{find_column_indices, ColumnPair};
 use super::ScenarioError;
+use super::validation::{ColumnPair, find_column_indices};
 
 /// Scenario data points used to calculate one injection value.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -89,11 +89,11 @@ impl ScenarioPlayback {
         config: &ReplayConfig,
     ) -> Result<ScenarioPlayback, ScenarioError> {
         let path = path.as_ref();
-        let mut cursors = Vec::with_capacity(config.inject.len());
-
-        for injection in &config.inject {
-            cursors.push(SignalCursor::new(path, injection)?);
-        }
+        let cursors = config
+            .inject
+            .iter()
+            .map(|injection| SignalCursor::new(path, injection))
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(ScenarioPlayback { cursors })
     }
@@ -147,26 +147,9 @@ struct SignalCursor {
 
 impl SignalCursor {
     fn new(path: &Path, injection: &InjectionConfig) -> Result<SignalCursor, ScenarioError> {
-        let mut reader = ReaderBuilder::new()
-            .trim(Trim::All)
-            .from_path(path)
-            .map_err(|source| ScenarioError::OpenFile {
-                path: path.to_owned(),
-                source,
-            })?;
-        let headers = reader
-            .headers()
-            .map_err(|source| ScenarioError::ReadHeader {
-                path: path.to_owned(),
-                signal: injection.name.clone(),
-                source,
-            })?;
-        let columns = find_column_indices(headers, injection)?;
-        let conversion = AffineRange::new(injection.source_range, injection.simulator_range)
-            .map_err(|source| ScenarioError::InvalidRangeConversion {
-                signal: injection.name.clone(),
-                source,
-            })?;
+        let mut reader = ReaderBuilder::new().trim(Trim::All).from_path(path)?;
+        let columns = find_column_indices(reader.headers()?, injection)?;
+        let conversion = AffineRange::new(injection.source_range, injection.simulator_range)?;
 
         Ok(SignalCursor {
             signal: injection.name.clone(),
@@ -193,11 +176,9 @@ impl SignalCursor {
             return Ok(());
         }
 
-        let next = self
-            .next
-            .ok_or_else(|| ScenarioError::MissingNextInterpolationRow {
-                signal: self.signal.clone(),
-            })?;
+        let Some(next) = self.next else {
+            return Ok(());
+        };
         if elapsed_seconds <= next.time_seconds {
             return Ok(());
         }
@@ -222,13 +203,7 @@ impl SignalCursor {
 
     fn read_sample(&mut self) -> Result<Option<Sample>, ScenarioError> {
         let mut record = StringRecord::new();
-        let has_record =
-            self.reader
-                .read_record(&mut record)
-                .map_err(|source| ScenarioError::ReadRow {
-                    signal: self.signal.clone(),
-                    source,
-                })?;
+        let has_record = self.reader.read_record(&mut record)?;
         if !has_record {
             return Ok(None);
         }
@@ -248,12 +223,7 @@ impl SignalCursor {
 
         let time = time_text.parse::<f64>()?;
         let value = value_text.parse::<f64>()?;
-        Sample::new(time, value)
-            .map(Some)
-            .map_err(|source| ScenarioError::InvalidSample {
-                signal: self.signal.clone(),
-                source,
-            })
+        Ok(Some(Sample::new(time, value)?))
     }
 
     fn is_ready(&self) -> bool {
