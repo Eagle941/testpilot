@@ -60,23 +60,19 @@ simulator_range = [-16383.0, 16384.0]
 
 [record.0]
 name = "pitch"
-unit = "degrees"
-range = [-180.0, 180.0]
+variable = "A:PLANE PITCH DEGREES"
 
 [record.1]
 name = "roll"
-unit = "degrees"
-range = [-180.0, 180.0]
+variable = "A:PLANE BANK DEGREES"
 
 [record.2]
 name = "elevator_position"
-unit = "position_16k"
-range = [-16384.0, 16384.0]
+variable = "A:ELEVATOR POSITION"
 
 [record.3]
 name = "aileron_position"
-unit = "position_16k"
-range = [-16384.0, 16384.0]
+variable = "A:AILERON POSITION"
 ```
 
 The repository provides this default as `replayer_config.toml`. The installation

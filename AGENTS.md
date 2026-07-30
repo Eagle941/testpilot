@@ -90,7 +90,7 @@ Use an explicit, documented configuration format. The configuration must define:
 - the parameters and paired time/value columns to inject;
 - the aircraft-response parameters to record;
 - each injected parameter's logical name, prefixed simulator `variable`, paired CSV columns, source range, and simulator range;
-- each recorded parameter's engineering unit and supported range;
+- each recorded parameter's logical name and prefixed simulator `variable`;
 - optional metadata needed to reproduce the test.
 
 Do not add configuration fields for behavior fixed by the format or supported signal catalog. In particular, the MVP configuration does not contain a time unit, time origin, telemetry section, parameter type, or interpolation parameter. Document fixed time-unit, time-origin, signal-type, interpolation, telemetry sampling, and sampling-order semantics in the format specification.

@@ -1,8 +1,8 @@
 //! Replay configuration data types, parsing, and file loading.
 //!
 //! The parser accepts the versioned TOML contract documented in the crate
-//! README and converts supported signal names and units into strongly typed
-//! values used by the simulator-independent replay core.
+//! README and converts supported signal selections into strongly typed values
+//! used by the simulator-independent replay core.
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
@@ -59,10 +59,8 @@ pub struct InjectionConfig {
 pub struct RecordingConfig {
     /// Supported logical response signal.
     pub name: RecordingSignal,
-    /// Native engineering unit written to telemetry.
-    pub unit: RecordingUnit,
-    /// Exact supported range for the selected signal.
-    pub range: [f64; 2],
+    /// Prefixed simulator source, such as `A:PLANE PITCH DEGREES`.
+    pub variable: String,
 }
 
 /// Aircraft-response signals supported by the MVP.
@@ -86,25 +84,6 @@ impl RecordingSignal {
             Self::Roll => "roll",
             Self::ElevatorPosition => "elevator_position",
             Self::AileronPosition => "aileron_position",
-        }
-    }
-}
-
-/// Native units supported for recorded response signals.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RecordingUnit {
-    /// Angular value in degrees.
-    Degrees,
-    /// MSFS `Position 16k` control-surface value.
-    Position16k,
-}
-
-impl RecordingUnit {
-    /// Returns the stable TOML unit name.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Degrees => "degrees",
-            Self::Position16k => "position_16k",
         }
     }
 }
@@ -136,8 +115,7 @@ struct RawInjectionConfig {
 #[serde(deny_unknown_fields)]
 struct RawRecordingConfig {
     name: String,
-    unit: String,
-    range: [f64; 2],
+    variable: String,
 }
 
 /// Reads and parses a replay configuration file.
@@ -246,28 +224,13 @@ fn parse_recordings(
             });
         }
 
-        let (unit, expected_range) = recording_catalog(name);
-        if raw.unit != unit.as_str() {
-            return Err(ConfigError::UnsupportedRecordingUnit {
-                index,
-                signal: name.as_str(),
-                unit: raw.unit,
-                expected: unit.as_str(),
-            });
-        }
-        if !raw.range.iter().all(|endpoint| endpoint.is_finite()) || raw.range != expected_range {
-            return Err(ConfigError::InvalidRecordingRange {
-                index,
-                signal: name.as_str(),
-                expected_min: expected_range[0],
-                expected_max: expected_range[1],
-            });
+        if raw.variable.is_empty() {
+            return Err(ConfigError::EmptyRecordingVariable { index });
         }
 
         result.push(RecordingConfig {
             name,
-            unit,
-            range: raw.range,
+            variable: raw.variable,
         });
     }
 
@@ -366,15 +329,6 @@ fn validate_increasing_range(
     Ok(())
 }
 
-const fn recording_catalog(signal: RecordingSignal) -> (RecordingUnit, [f64; 2]) {
-    match signal {
-        RecordingSignal::Pitch | RecordingSignal::Roll => (RecordingUnit::Degrees, [-180.0, 180.0]),
-        RecordingSignal::ElevatorPosition | RecordingSignal::AileronPosition => {
-            (RecordingUnit::Position16k, [-16_384.0, 16_384.0])
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,23 +356,19 @@ simulator_range = [-1.0, 1.0]
 
 [record.0]
 name = "pitch"
-unit = "degrees"
-range = [-180.0, 180.0]
+variable = "A:PLANE PITCH DEGREES"
 
 [record.1]
 name = "roll"
-unit = "degrees"
-range = [-180.0, 180.0]
+variable = "A:PLANE BANK DEGREES"
 
 [record.2]
 name = "elevator_position"
-unit = "position_16k"
-range = [-16384.0, 16384.0]
+variable = "A:ELEVATOR POSITION"
 
 [record.3]
 name = "aileron_position"
-unit = "position_16k"
-range = [-16384.0, 16384.0]
+variable = "A:AILERON POSITION"
 "#;
 
     fn assert_error(config: &str, predicate: impl FnOnce(&ConfigError) -> bool) {
@@ -456,7 +406,9 @@ range = [-16384.0, 16384.0]
         assert_eq!(config.inject[1].variable, "K:AXIS_AILERONS_SET");
         assert_eq!(config.record.len(), 4);
         assert_eq!(config.record[0].name, RecordingSignal::Pitch);
+        assert_eq!(config.record[0].variable, "A:PLANE PITCH DEGREES");
         assert_eq!(config.record[3].name, RecordingSignal::AileronPosition);
+        assert_eq!(config.record[3].variable, "A:AILERON POSITION");
     }
 
     #[test]
@@ -534,10 +486,14 @@ range = [-16384.0, 16384.0]
     }
 
     #[test]
-    fn rejects_unsupported_recording_units() {
+    fn requires_non_empty_recording_variable() {
         assert_error(
-            &VALID_CONFIG.replacen("unit = \"degrees\"", "unit = \"radians\"", 1),
-            |error| matches!(error, ConfigError::UnsupportedRecordingUnit { .. }),
+            &VALID_CONFIG.replacen("variable = \"A:PLANE PITCH DEGREES\"\n", "", 1),
+            |error| matches!(error, ConfigError::Toml(_)),
+        );
+        assert_error(
+            &VALID_CONFIG.replacen("variable = \"A:PLANE PITCH DEGREES\"", "variable = \"\"", 1),
+            |error| matches!(error, ConfigError::EmptyRecordingVariable { .. }),
         );
     }
 
@@ -624,20 +580,6 @@ range = [-16384.0, 16384.0]
     }
 
     #[test]
-    fn rejects_invalid_recording_ranges() {
-        for replacement in [
-            "range = [nan, 180.0]",
-            "range = [180.0, -180.0]",
-            "range = [-90.0, 90.0]",
-        ] {
-            assert_error(
-                &VALID_CONFIG.replacen("range = [-180.0, 180.0]", replacement, 1),
-                |error| matches!(error, ConfigError::InvalidRecordingRange { .. }),
-            );
-        }
-    }
-
-    #[test]
     fn rejects_unknown_fields() {
         assert_error(
             &VALID_CONFIG.replacen(
@@ -655,6 +597,16 @@ range = [-16384.0, 16384.0]
             ),
             |error| matches!(error, ConfigError::Toml(_)),
         );
+        for removed_field in ["unit = \"degrees\"", "range = [-180.0, 180.0]"] {
+            assert_error(
+                &VALID_CONFIG.replacen(
+                    "variable = \"A:PLANE PITCH DEGREES\"",
+                    &format!("variable = \"A:PLANE PITCH DEGREES\"\n{removed_field}"),
+                    1,
+                ),
+                |error| matches!(error, ConfigError::Toml(_)),
+            );
+        }
     }
 
     #[test]

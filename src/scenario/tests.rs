@@ -28,8 +28,7 @@ simulator_range = [-1.0, 1.0]
 
 [record.0]
 name = "pitch"
-unit = "degrees"
-range = [-180.0, 180.0]
+variable = "A:PLANE PITCH DEGREES"
 "#;
 
 const HEADER: &str = "sidestick_pitch_position.time,sidestick_pitch_position.value,sidestick_roll_position.time,sidestick_roll_position.value\n";

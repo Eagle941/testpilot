@@ -60,25 +60,8 @@ pub enum ConfigError {
     #[error("{field} at inject.{index} must not be empty")]
     EmptyInjectionColumn { index: usize, field: &'static str },
 
-    #[error(
-        "unsupported recording unit `{unit}` at record.{index} for `{signal}`; expected `{expected}`"
-    )]
-    UnsupportedRecordingUnit {
-        index: usize,
-        signal: &'static str,
-        unit: String,
-        expected: &'static str,
-    },
-
-    #[error(
-        "invalid range at record.{index} for `{signal}`; expected [{expected_min}, {expected_max}]"
-    )]
-    InvalidRecordingRange {
-        index: usize,
-        signal: &'static str,
-        expected_min: f64,
-        expected_max: f64,
-    },
+    #[error("variable at record.{index} must not be empty")]
+    EmptyRecordingVariable { index: usize },
 
     #[error("duplicate recording signal `{name}` at record.{index}")]
     DuplicateRecordingSignal { index: usize, name: String },
