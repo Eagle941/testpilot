@@ -1,10 +1,8 @@
 use std::fs::File;
 use std::path::Path;
 
-use anyhow::Context;
-
 use crate::config::ReplayConfig;
-use crate::playback::{AffineRange, LinearSegment, Sample};
+use crate::playback::{AffineRange, LinearSegment, PlaybackError, Sample};
 
 use super::ScenarioError;
 use super::validation::{ColumnPair, find_columns, parse_number};
@@ -26,9 +24,9 @@ pub struct InterpolationRows<'a> {
 
 impl InterpolationRows<'_> {
     /// Interpolates between two samples or holds the final sample after EOF.
-    pub fn value_at(&self, elapsed_seconds: f64) -> anyhow::Result<f64> {
+    pub fn value_at(&self, elapsed_seconds: f64) -> Result<f64, PlaybackError> {
         match self.next {
-            Some(next) => Ok(LinearSegment::new(self.previous, next)?.value_at(elapsed_seconds)?),
+            Some(next) => LinearSegment::new(self.previous, next)?.value_at(elapsed_seconds),
             None => Ok(self.previous.value),
         }
     }
@@ -97,38 +95,33 @@ impl ScenarioPlayback {
     ///
     /// This reads the CSV header from each cursor but does not consume any data
     /// rows. The scenario file is never opened for writing.
-    pub fn open(path: impl AsRef<Path>, config: &ReplayConfig) -> anyhow::Result<Self> {
+    pub fn open(path: impl AsRef<Path>, config: &ReplayConfig) -> Result<Self, ScenarioError> {
         let path = path.as_ref();
         let mut cursors = Vec::with_capacity(config.inject.len());
 
         for injection in &config.inject {
-            let file = File::open(path).with_context(|| {
-                format!(
-                    "failed to open scenario `{}` for signal `{}`",
-                    path.display(),
-                    injection.name
-                )
+            let file = File::open(path).map_err(|source| ScenarioError::OpenFile {
+                path: path.to_owned(),
+                signal: injection.name.clone(),
+                source,
             })?;
             let mut reader = csv::ReaderBuilder::new()
                 .trim(csv::Trim::All)
                 .from_reader(file);
             let headers = reader
                 .headers()
-                .map_err(ScenarioError::Csv)
-                .with_context(|| {
-                    format!(
-                        "failed to read scenario header `{}` for signal `{}`",
-                        path.display(),
-                        injection.name
-                    )
+                .map_err(|source| ScenarioError::ReadHeader {
+                    path: path.to_owned(),
+                    signal: injection.name.clone(),
+                    source,
                 })?
                 .clone();
-            let columns = find_columns(&headers, injection).with_context(|| {
-                format!(
-                    "invalid scenario header `{}` for signal `{}`",
-                    path.display(),
-                    injection.name
-                )
+            let columns = find_columns(&headers, injection).map_err(|source| {
+                ScenarioError::InvalidHeader {
+                    path: path.to_owned(),
+                    signal: injection.name.clone(),
+                    source: Box::new(source),
+                }
             })?;
 
             cursors.push(SignalCursor {
@@ -141,8 +134,9 @@ impl ScenarioPlayback {
                 previous: None,
                 next: None,
                 conversion: AffineRange::new(injection.source_range, injection.simulator_range)
-                    .with_context(|| {
-                        format!("invalid range conversion for signal `{}`", injection.name)
+                    .map_err(|source| ScenarioError::InvalidRangeConversion {
+                        signal: injection.name.clone(),
+                        source,
                     })?,
                 ended: false,
             });
@@ -156,7 +150,7 @@ impl ScenarioPlayback {
     /// Each cursor consumes at most one data row. Before playback starts,
     /// repeated calls with `0` prime the two interpolation rows. During
     /// playback, a cursor advances when `elapsed_seconds` passes its next row.
-    pub fn next(&mut self, elapsed_seconds: f64) -> anyhow::Result<ScenarioStep<'_>> {
+    pub fn next(&mut self, elapsed_seconds: f64) -> Result<ScenarioStep<'_>, ScenarioError> {
         for cursor in &mut self.cursors {
             cursor.next(elapsed_seconds)?;
         }
@@ -181,7 +175,7 @@ impl ScenarioPlayback {
 }
 
 impl SignalCursor {
-    fn next(&mut self, elapsed_seconds: f64) -> anyhow::Result<()> {
+    fn next(&mut self, elapsed_seconds: f64) -> Result<(), ScenarioError> {
         if self.ended {
             return Ok(());
         }
@@ -214,21 +208,22 @@ impl SignalCursor {
         Ok(())
     }
 
-    fn required_sample(&mut self) -> anyhow::Result<Sample> {
+    fn required_sample(&mut self) -> Result<Sample, ScenarioError> {
         self.read_sample()?
             .ok_or_else(|| ScenarioError::MissingSamples {
                 signal: self.signal.clone(),
             })
-            .map_err(Into::into)
     }
 
-    fn read_sample(&mut self) -> anyhow::Result<Option<Sample>> {
+    fn read_sample(&mut self) -> Result<Option<Sample>, ScenarioError> {
         let mut record = csv::StringRecord::new();
-        let has_record = self
-            .reader
-            .read_record(&mut record)
-            .map_err(ScenarioError::Csv)
-            .with_context(|| format!("failed to read scenario row for signal `{}`", self.signal))?;
+        let has_record =
+            self.reader
+                .read_record(&mut record)
+                .map_err(|source| ScenarioError::ReadRow {
+                    signal: self.signal.clone(),
+                    source,
+                })?;
         if !has_record {
             return Ok(None);
         }
@@ -240,8 +235,7 @@ impl SignalCursor {
             return Err(ScenarioError::HalfPopulatedPair {
                 signal: self.signal.clone(),
                 line,
-            })
-            .with_context(|| format!("failed to read signal `{}`", self.signal));
+            });
         }
         if time_text.is_empty() {
             return Ok(None);
@@ -251,7 +245,10 @@ impl SignalCursor {
         let value = parse_number(value_text, &self.signal, &self.value_column, line)?;
         Sample::new(time, value)
             .map(Some)
-            .with_context(|| format!("invalid sample for signal `{}`", self.signal))
+            .map_err(|source| ScenarioError::InvalidSample {
+                signal: self.signal.clone(),
+                source,
+            })
     }
 
     fn is_ready(&self) -> bool {

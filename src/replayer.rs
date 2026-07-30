@@ -2,8 +2,6 @@
 
 use std::path::PathBuf;
 
-use anyhow::Context;
-
 use crate::arm::ArmState;
 use crate::config::{CONFIG_PATH, read_config_file};
 use crate::error::ReplayerError;
@@ -129,8 +127,7 @@ impl ReplayerGauge {
                     path: self.config_path.clone(),
                 })?;
         let scenario_path = config_directory.join(&config.input_file);
-        let playback = ScenarioPlayback::open(&scenario_path, &config)
-            .with_context(|| format!("failed to open scenario `{}`", scenario_path.display()))?;
+        let playback = ScenarioPlayback::open(&scenario_path, &config)?;
 
         println!(
             "TESTPILOT: opened {} with {} signal cursors",

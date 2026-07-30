@@ -8,7 +8,6 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::Context;
 use serde::Deserialize;
 
 pub use crate::error::ConfigError;
@@ -95,15 +94,10 @@ struct RawRecordingConfig {
 
 /// Reads and parses a replay configuration file.
 ///
-/// The returned [`anyhow::Error`] adds the requested file path as context while
-/// preserving the underlying I/O or [`ConfigError`] source.
-pub fn read_config_file(path: impl AsRef<Path>) -> anyhow::Result<ReplayConfig> {
-    let path = path.as_ref();
-    let contents = fs::read_to_string(path)
-        .with_context(|| format!("failed to read replay configuration `{}`", path.display()))?;
-
+/// File-system and parse failures retain their typed source error.
+pub fn read_config_file(path: impl AsRef<Path>) -> Result<ReplayConfig, ConfigError> {
+    let contents = fs::read_to_string(path)?;
     parse_config(&contents)
-        .with_context(|| format!("invalid replay configuration `{}`", path.display()))
 }
 
 /// Parses and validates the versioned replay TOML document.
@@ -393,18 +387,15 @@ variable = "A:AILERON POSITION"
     }
 
     #[test]
-    fn reports_configuration_file_read_path() {
+    fn reports_configuration_file_read_error() {
         let path =
             std::env::temp_dir().join(format!("replay-missing-config-{}.toml", std::process::id()));
         let _ = std::fs::remove_file(&path);
 
-        match read_config_file(&path) {
-            Err(error) => assert!(
-                error.to_string().contains(&path.display().to_string()),
-                "read error should contain path: {error:#}"
-            ),
-            Ok(config) => panic!("missing configuration unexpectedly loaded: {config:?}"),
-        }
+        assert!(matches!(
+            read_config_file(&path),
+            Err(ConfigError::FileIo(_))
+        ));
     }
 
     #[test]

@@ -1,8 +1,9 @@
 //! Typed domain errors produced by configuration, scenario, and playback logic.
 //!
-//! File-system and simulator-facing call sites add operational context with
-//! `anyhow` while retaining these errors as inspectable sources.
+//! File-system and simulator-facing variants retain underlying failures as
+//! inspectable error sources.
 
+use std::io;
 use std::path::PathBuf;
 
 use thiserror::Error;
@@ -10,6 +11,9 @@ use thiserror::Error;
 /// Validation failures for replay TOML contents.
 #[derive(Debug, Error)]
 pub enum ConfigError {
+    #[error(transparent)]
+    FileIo(#[from] io::Error),
+
     #[error("invalid TOML configuration: {0}")]
     Toml(#[from] toml::de::Error),
 
@@ -115,6 +119,51 @@ pub enum SimulatorError {
 /// Structural and numeric validation failures for scenario CSV input.
 #[derive(Debug, Error)]
 pub enum ScenarioError {
+    #[error("failed to open scenario `{path}` for signal `{signal}`: {source}")]
+    OpenFile {
+        path: PathBuf,
+        signal: String,
+        #[source]
+        source: io::Error,
+    },
+
+    #[error("failed to read scenario header `{path}` for signal `{signal}`: {source}")]
+    ReadHeader {
+        path: PathBuf,
+        signal: String,
+        #[source]
+        source: csv::Error,
+    },
+
+    #[error("invalid scenario header `{path}` for signal `{signal}`: {source}")]
+    InvalidHeader {
+        path: PathBuf,
+        signal: String,
+        #[source]
+        source: Box<ScenarioError>,
+    },
+
+    #[error("invalid range conversion for signal `{signal}`: {source}")]
+    InvalidRangeConversion {
+        signal: String,
+        #[source]
+        source: PlaybackError,
+    },
+
+    #[error("failed to read scenario row for signal `{signal}`: {source}")]
+    ReadRow {
+        signal: String,
+        #[source]
+        source: csv::Error,
+    },
+
+    #[error("invalid sample for signal `{signal}`: {source}")]
+    InvalidSample {
+        signal: String,
+        #[source]
+        source: PlaybackError,
+    },
+
     #[error("invalid scenario CSV: {0}")]
     Csv(#[source] csv::Error),
 
@@ -198,6 +247,31 @@ pub enum ScenarioError {
 
     #[error("signal `{signal}` has no next interpolation row")]
     MissingNextInterpolationRow { signal: String },
+}
+
+/// Per-frame gauge orchestration and injection failures.
+#[derive(Debug, Error)]
+pub enum GaugeError {
+    #[error("failed to interpolate signal `{signal}`: {source}")]
+    InterpolateSignal {
+        signal: String,
+        #[source]
+        source: PlaybackError,
+    },
+
+    #[error("failed to convert signal `{signal}`: {source}")]
+    ConvertSignal {
+        signal: String,
+        #[source]
+        source: PlaybackError,
+    },
+
+    #[error("failed to inject signal `{signal}`: {source}")]
+    InjectSignal {
+        signal: String,
+        #[source]
+        source: SimulatorError,
+    },
 }
 
 /// Invalid samples, interpolation requests, and range conversions.

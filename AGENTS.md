@@ -154,7 +154,10 @@ Output must be a machine-readable CSV saved in the same directory as the input s
 ## Reliability and Error Handling
 
 - Do not use `unwrap`, `expect`, or panics for recoverable runtime failures in simulator-facing code.
-- Propagate errors with actionable context and report them through the logging/error facilities available in `msfs-rs`.
+- Domain and library functions must return concrete `thiserror` enums. Use `#[from]` and `?` for underlying errors where direct conversion is sufficient, and add structured variants when file, signal, line, column, or operation details are required.
+- Convert typed errors to `anyhow::Error` only at application or orchestration boundaries that combine unrelated error domains. Do not use `anyhow!`, `bail!`, `Context`, or `with_context`; encode actionable context in typed error variants instead.
+- Do not wrap an error inside another variant of the same error enum merely to add context. Use `map_err` only when converting to a different error layer or adding structured domain information.
+- Report terminal errors through the logging/error facilities available in `msfs-rs`.
 - On a terminal failure, perform best-effort control release, flush and close but do not delete partial telemetry, then return from the WASM event loop/module entry point without panicking.
 - Model the run lifecycle explicitly, for example: idle, loading, ready, running, stopping, completed, aborted, and failed.
 - Make start, stop, and cleanup operations idempotent where practical.
