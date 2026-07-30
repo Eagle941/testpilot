@@ -13,7 +13,7 @@ pub struct Sample {
 
 impl Sample {
     /// Creates a sample after validating its timestamp and value.
-    pub fn new(time_seconds: f64, value: f64) -> Result<Self, PlaybackError> {
+    pub fn new(time_seconds: f64, value: f64) -> Result<Sample, PlaybackError> {
         if !time_seconds.is_finite() {
             return Err(PlaybackError::NonFiniteTime { time_seconds });
         }
@@ -24,7 +24,7 @@ impl Sample {
             return Err(PlaybackError::NonFiniteValue { value });
         }
 
-        Ok(Self {
+        Ok(Sample {
             time_seconds,
             value,
         })
@@ -40,7 +40,7 @@ pub struct LinearSegment {
 
 impl LinearSegment {
     /// Creates a segment whose end timestamp must be greater than its start.
-    pub fn new(start: Sample, end: Sample) -> Result<Self, PlaybackError> {
+    pub fn new(start: Sample, end: Sample) -> Result<LinearSegment, PlaybackError> {
         if end.time_seconds <= start.time_seconds {
             return Err(PlaybackError::NonIncreasingSegment {
                 start_seconds: start.time_seconds,
@@ -48,7 +48,7 @@ impl LinearSegment {
             });
         }
 
-        Ok(Self { start, end })
+        Ok(LinearSegment { start, end })
     }
 
     /// Returns the segment's earlier sample.
@@ -102,10 +102,10 @@ pub struct AffineRange {
 
 impl AffineRange {
     /// Creates a conversion after validating both ranges.
-    pub fn new(source: [f64; 2], target: [f64; 2]) -> Result<Self, PlaybackError> {
+    pub fn new(source: [f64; 2], target: [f64; 2]) -> Result<AffineRange, PlaybackError> {
         validate_range("source", source)?;
         validate_range("target", target)?;
-        Ok(Self { source, target })
+        Ok(AffineRange { source, target })
     }
 
     /// Returns the inclusive source range.
@@ -120,7 +120,7 @@ impl AffineRange {
 
     /// Converts a finite source value without clamping it.
     ///
-    /// Values outside [`Self::source`] are rejected.
+    /// Values outside [`AffineRange::source`] are rejected.
     pub fn convert(self, value: f64) -> Result<f64, PlaybackError> {
         if !value.is_finite() {
             return Err(PlaybackError::NonFiniteValue { value });
