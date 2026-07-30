@@ -135,6 +135,8 @@ impl ReplayerGauge {
         }
 
         let config = read_config_file(&self.config_path)?;
+        // Paths need to be joined because the scenario file is in the same
+        // directory as the config file.
         let config_directory =
             self.config_path
                 .parent()
