@@ -36,6 +36,118 @@ pub struct ReplayConfig {
     pub record: Vec<RecordingConfig>,
 }
 
+impl ReplayConfig {
+    /// Creates a replay configuration from TOML text.
+    pub fn new(contents: &str) -> Result<ReplayConfig, ConfigError> {
+        let raw = toml::from_str(contents)?;
+        ReplayConfig::from_raw(raw)
+    }
+
+    fn from_raw(raw: RawReplayConfig) -> Result<ReplayConfig, ConfigError> {
+        if raw.format_version != FORMAT_VERSION {
+            return Err(ConfigError::UnsupportedFormatVersion {
+                found: raw.format_version,
+                expected: FORMAT_VERSION,
+            });
+        }
+        if raw.aircraft_target != AIRCRAFT_TARGET {
+            return Err(ConfigError::UnsupportedAircraftTarget {
+                found: raw.aircraft_target,
+                expected: AIRCRAFT_TARGET,
+            });
+        }
+
+        let inject = ReplayConfig::parse_injections(raw.inject)?;
+        let record = ReplayConfig::parse_recordings(raw.record)?;
+
+        Ok(ReplayConfig {
+            format_version: raw.format_version,
+            aircraft_target: raw.aircraft_target,
+            input_file: PathBuf::from(raw.input_file),
+            inject,
+            record,
+        })
+    }
+
+    fn parse_injections(
+        entries: BTreeMap<String, RawInjectionConfig>,
+    ) -> Result<Vec<InjectionConfig>, ConfigError> {
+        let entries = ReplayConfig::ordered_entries("inject", entries)?;
+        let mut signals = HashSet::with_capacity(entries.len());
+        let mut columns = HashSet::with_capacity(entries.len().saturating_mul(2));
+        let mut result = Vec::with_capacity(entries.len());
+
+        for (index, raw) in entries {
+            result.push(InjectionConfig::new(
+                index,
+                raw,
+                &mut signals,
+                &mut columns,
+            )?);
+        }
+
+        Ok(result)
+    }
+
+    fn parse_recordings(
+        entries: BTreeMap<String, RawRecordingConfig>,
+    ) -> Result<Vec<RecordingConfig>, ConfigError> {
+        let entries = ReplayConfig::ordered_entries("record", entries)?;
+        let mut signals = HashSet::with_capacity(entries.len());
+        let mut result = Vec::with_capacity(entries.len());
+
+        for (index, raw) in entries {
+            result.push(RecordingConfig::new(index, raw, &mut signals)?);
+        }
+
+        Ok(result)
+    }
+
+    /// Converts an indexed TOML section into deterministic numeric order.
+    ///
+    /// Section keys must be canonical non-negative integers and must form a
+    /// contiguous sequence starting at zero. This keeps processing order stable
+    /// and rejects missing or malformed `inject.N`/`record.N` entries.
+    fn ordered_entries<T>(
+        section: &'static str,
+        entries: BTreeMap<String, T>,
+    ) -> Result<Vec<(usize, T)>, ConfigError> {
+        if entries.is_empty() {
+            return Err(ConfigError::EmptySection { section });
+        }
+
+        let mut indexed = Vec::with_capacity(entries.len());
+        for (key, value) in entries {
+            let Ok(index) = key.parse::<usize>() else {
+                return Err(ConfigError::InvalidIndex {
+                    section,
+                    index: key,
+                });
+            };
+            if index.to_string() != key {
+                return Err(ConfigError::InvalidIndex {
+                    section,
+                    index: key,
+                });
+            }
+            indexed.push((index, value));
+        }
+        indexed.sort_unstable_by_key(|(index, _)| *index);
+
+        let highest_index = indexed.last().map_or(0, |(index, _)| *index);
+        let required_length = highest_index.saturating_add(1);
+        if indexed.len() != required_length {
+            return Err(ConfigError::NonContiguousIndex {
+                section,
+                expected: indexed.len(),
+                found: required_length,
+            });
+        }
+
+        Ok(indexed)
+    }
+}
+
 /// Configuration for one continuous scenario input.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InjectionConfig {
@@ -53,6 +165,87 @@ pub struct InjectionConfig {
     pub simulator_range: [f64; 2],
 }
 
+impl InjectionConfig {
+    fn new(
+        index: usize,
+        raw: RawInjectionConfig,
+        signals: &mut HashSet<String>,
+        columns: &mut HashSet<String>,
+    ) -> Result<InjectionConfig, ConfigError> {
+        if !signals.insert(raw.name.clone()) {
+            return Err(ConfigError::DuplicateInjectionSignal {
+                index,
+                name: raw.name,
+            });
+        }
+
+        InjectionConfig::validate_column(index, "time_column", &raw.time_column, columns)?;
+        InjectionConfig::validate_column(index, "value_column", &raw.value_column, columns)?;
+        InjectionConfig::validate_increasing_range(index, "source_range", raw.source_range)?;
+        InjectionConfig::validate_increasing_range(index, "simulator_range", raw.simulator_range)?;
+        if raw.simulator_range[0] < -16_383.0 || raw.simulator_range[1] > 16_384.0 {
+            return Err(ConfigError::UnsafeSimulatorRange { index });
+        }
+
+        Ok(InjectionConfig {
+            name: raw.name,
+            variable: raw.variable,
+            time_column: raw.time_column,
+            value_column: raw.value_column,
+            source_range: raw.source_range,
+            simulator_range: raw.simulator_range,
+        })
+    }
+
+    /// Validates one CSV column and records it to detect reuse.
+    ///
+    /// Empty names and names already used by another injection column are
+    /// rejected with the relevant indexed configuration error.
+    fn validate_column(
+        index: usize,
+        field: &'static str,
+        column: &str,
+        columns: &mut HashSet<String>,
+    ) -> Result<(), ConfigError> {
+        if column.is_empty() {
+            return Err(ConfigError::EmptyInjectionColumn { index, field });
+        }
+        if !columns.insert(column.to_owned()) {
+            return Err(ConfigError::ReusedInjectionColumn {
+                index,
+                column: column.to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Validates that a configured range has finite, strictly increasing endpoints.
+    ///
+    /// The field name and injection index are retained in any returned error so
+    /// invalid source and simulator ranges can be distinguished.
+    fn validate_increasing_range(
+        index: usize,
+        field: &'static str,
+        range: [f64; 2],
+    ) -> Result<(), ConfigError> {
+        if !range.iter().all(|endpoint| endpoint.is_finite()) {
+            return Err(ConfigError::InvalidInjectionRange {
+                index,
+                field,
+                reason: "both endpoints must be finite",
+            });
+        }
+        if range[0] >= range[1] {
+            return Err(ConfigError::InvalidInjectionRange {
+                index,
+                field,
+                reason: "lower endpoint must be less than upper endpoint",
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Configuration for one aircraft-response signal recorded each frame.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecordingConfig {
@@ -60,6 +253,32 @@ pub struct RecordingConfig {
     pub name: String,
     /// Prefixed simulator source, such as `A:PLANE PITCH DEGREES`.
     pub variable: String,
+}
+
+impl RecordingConfig {
+    fn new(
+        index: usize,
+        raw: RawRecordingConfig,
+        signals: &mut HashSet<String>,
+    ) -> Result<RecordingConfig, ConfigError> {
+        if raw.name.is_empty() {
+            return Err(ConfigError::EmptyRecordingName { index });
+        }
+        if !signals.insert(raw.name.clone()) {
+            return Err(ConfigError::DuplicateRecordingSignal {
+                index,
+                name: raw.name,
+            });
+        }
+        if raw.variable.is_empty() {
+            return Err(ConfigError::EmptyRecordingVariable { index });
+        }
+
+        Ok(RecordingConfig {
+            name: raw.name,
+            variable: raw.variable,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,186 +324,7 @@ pub fn read_config_file(path: impl AsRef<Path>) -> Result<ReplayConfig, ConfigEr
 /// Numeric `inject.N` and `record.N` tables must be contiguous from zero. Their
 /// indexes define the order of the returned vectors.
 pub fn parse_config(contents: &str) -> Result<ReplayConfig, ConfigError> {
-    let raw: RawReplayConfig = toml::from_str(contents)?;
-
-    if raw.format_version != FORMAT_VERSION {
-        return Err(ConfigError::UnsupportedFormatVersion {
-            found: raw.format_version,
-            expected: FORMAT_VERSION,
-        });
-    }
-    if raw.aircraft_target != AIRCRAFT_TARGET {
-        return Err(ConfigError::UnsupportedAircraftTarget {
-            found: raw.aircraft_target,
-            expected: AIRCRAFT_TARGET,
-        });
-    }
-
-    let inject = parse_injections(raw.inject)?;
-    let record = parse_recordings(raw.record)?;
-
-    Ok(ReplayConfig {
-        format_version: raw.format_version,
-        aircraft_target: raw.aircraft_target,
-        input_file: PathBuf::from(raw.input_file),
-        inject,
-        record,
-    })
-}
-
-impl ReplayConfig {
-    /// Parses a replay configuration from TOML text.
-    pub fn parse(contents: &str) -> Result<Self, ConfigError> {
-        parse_config(contents)
-    }
-}
-
-fn parse_injections(
-    entries: BTreeMap<String, RawInjectionConfig>,
-) -> Result<Vec<InjectionConfig>, ConfigError> {
-    let entries = ordered_entries("inject", entries)?;
-    let mut signals = HashSet::with_capacity(entries.len());
-    let mut columns = HashSet::with_capacity(entries.len().saturating_mul(2));
-    let mut result = Vec::with_capacity(entries.len());
-
-    for (index, raw) in entries {
-        if !signals.insert(raw.name.clone()) {
-            return Err(ConfigError::DuplicateInjectionSignal {
-                index,
-                name: raw.name,
-            });
-        }
-
-        validate_column(index, "time_column", &raw.time_column, &mut columns)?;
-        validate_column(index, "value_column", &raw.value_column, &mut columns)?;
-
-        validate_increasing_range(index, "source_range", raw.source_range)?;
-        validate_increasing_range(index, "simulator_range", raw.simulator_range)?;
-        if raw.simulator_range[0] < -16_383.0 || raw.simulator_range[1] > 16_384.0 {
-            return Err(ConfigError::UnsafeSimulatorRange { index });
-        }
-
-        result.push(InjectionConfig {
-            name: raw.name,
-            variable: raw.variable,
-            time_column: raw.time_column,
-            value_column: raw.value_column,
-            source_range: raw.source_range,
-            simulator_range: raw.simulator_range,
-        });
-    }
-
-    Ok(result)
-}
-
-fn parse_recordings(
-    entries: BTreeMap<String, RawRecordingConfig>,
-) -> Result<Vec<RecordingConfig>, ConfigError> {
-    let entries = ordered_entries("record", entries)?;
-    let mut signals = HashSet::with_capacity(entries.len());
-    let mut result = Vec::with_capacity(entries.len());
-
-    for (index, raw) in entries {
-        if raw.name.is_empty() {
-            return Err(ConfigError::EmptyRecordingName { index });
-        }
-        if !signals.insert(raw.name.clone()) {
-            return Err(ConfigError::DuplicateRecordingSignal {
-                index,
-                name: raw.name,
-            });
-        }
-
-        if raw.variable.is_empty() {
-            return Err(ConfigError::EmptyRecordingVariable { index });
-        }
-
-        result.push(RecordingConfig {
-            name: raw.name,
-            variable: raw.variable,
-        });
-    }
-
-    Ok(result)
-}
-
-fn ordered_entries<T>(
-    section: &'static str,
-    entries: BTreeMap<String, T>,
-) -> Result<Vec<(usize, T)>, ConfigError> {
-    if entries.is_empty() {
-        return Err(ConfigError::EmptySection { section });
-    }
-
-    let mut indexed = Vec::with_capacity(entries.len());
-    for (key, value) in entries {
-        let Ok(index) = key.parse::<usize>() else {
-            return Err(ConfigError::InvalidIndex {
-                section,
-                index: key,
-            });
-        };
-        if index.to_string() != key {
-            return Err(ConfigError::InvalidIndex {
-                section,
-                index: key,
-            });
-        }
-        indexed.push((index, value));
-    }
-    indexed.sort_unstable_by_key(|(index, _)| *index);
-
-    for (expected, (found, _)) in indexed.iter().enumerate() {
-        if expected != *found {
-            return Err(ConfigError::NonContiguousIndex {
-                section,
-                expected,
-                found: *found,
-            });
-        }
-    }
-
-    Ok(indexed)
-}
-
-fn validate_column(
-    index: usize,
-    field: &'static str,
-    column: &str,
-    columns: &mut HashSet<String>,
-) -> Result<(), ConfigError> {
-    if column.is_empty() {
-        return Err(ConfigError::EmptyInjectionColumn { index, field });
-    }
-    if !columns.insert(column.to_owned()) {
-        return Err(ConfigError::ReusedInjectionColumn {
-            index,
-            column: column.to_owned(),
-        });
-    }
-    Ok(())
-}
-
-fn validate_increasing_range(
-    index: usize,
-    field: &'static str,
-    range: [f64; 2],
-) -> Result<(), ConfigError> {
-    if !range.iter().all(|endpoint| endpoint.is_finite()) {
-        return Err(ConfigError::InvalidInjectionRange {
-            index,
-            field,
-            reason: "both endpoints must be finite",
-        });
-    }
-    if range[0] >= range[1] {
-        return Err(ConfigError::InvalidInjectionRange {
-            index,
-            field,
-            reason: "lower endpoint must be less than upper endpoint",
-        });
-    }
-    Ok(())
+    ReplayConfig::new(contents)
 }
 
 #[cfg(test)]
