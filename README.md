@@ -298,9 +298,9 @@ the previous sample, and its `start` method returns `true` only when the value
 changes from exactly `0` to exactly `1`. On that transition, the gauge reads
 `SimObjects/AirPlanes/FlyByWire_A320_NEO/replayer_config.toml`, opens one
 independent `scenario.csv` reader per injection, reads each header and first
-two samples, and logs the cursor count. The next `PreUpdate` logs
-`TESTPILOT: scenario cursors ready` and captures `E:SIMULATION TIME` as
-scenario time zero. On that and every subsequent `PreUpdate`, each cursor
+two samples, and logs the cursor count. The same `PreUpdate` logs
+`TESTPILOT: scenario cursors ready`, captures `E:SIMULATION TIME` as scenario
+time zero, and injects the first frame. On every subsequent `PreUpdate`, each cursor
 advances by at most one row when elapsed scenario time passes its next
 sample timestamp. The gauge prints elapsed simulator seconds, each injection's
 logical name and simulator variable, the previous and next `(time, value)` rows,

@@ -68,7 +68,6 @@ impl ReplayerGauge {
     ) -> anyhow::Result<Option<ReplayerUpdate<'_>>> {
         if self.arm_state.start(armed_value) {
             self.init_scenario()?;
-            return Ok(None);
         }
         if self.scenario.is_none() {
             return Ok(None);
@@ -319,14 +318,17 @@ variable = "A:PLANE PITCH DEGREES"
         let fixture = Fixture::new();
         let mut replayer = ReplayerGauge::with_config_path(fixture.config_path.clone());
 
-        assert!(replayer.pre_update(1.0, time(99.0)).unwrap().is_none());
         assert!(matches!(
-            replayer.pre_update(1.0, time(100.0)).unwrap(),
+            replayer.pre_update(1.0, time(99.0)).unwrap(),
             Some(ReplayerUpdate::Running(_))
         ));
-        assert_eq!(replayer.started_at, Some(time(100.0)));
+        assert_eq!(replayer.started_at, Some(time(99.0)));
         assert!(matches!(
-            replayer.pre_update(1.0, time(100.2)).unwrap(),
+            replayer.pre_update(1.0, time(99.05)).unwrap(),
+            Some(ReplayerUpdate::Running(_))
+        ));
+        assert!(matches!(
+            replayer.pre_update(1.0, time(99.2)).unwrap(),
             Some(ReplayerUpdate::Completed)
         ));
         assert!(replayer.scenario.is_some());
