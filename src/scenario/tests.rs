@@ -162,16 +162,16 @@ fn primes_independent_cursors_one_row_per_frame() {
     };
     assert_eq!(playback.signal_count(), 2);
 
-    let step = playback
+    let progress = playback
         .next(0.0)
         .unwrap_or_else(|error| panic!("first incremental read failed: {error:#}"));
-    assert_eq!(step.progress(), ScenarioProgress::Loading);
+    assert_eq!(progress, ScenarioProgress::Loading);
 
-    let step = playback
+    let progress = playback
         .next(0.0)
         .unwrap_or_else(|error| panic!("second incremental read failed: {error:#}"));
-    assert_eq!(step.progress(), ScenarioProgress::Running);
-    let rows = step.interpolation_rows().collect::<Vec<_>>();
+    assert_eq!(progress, ScenarioProgress::Running);
+    let rows = playback.interpolation_rows().collect::<Vec<_>>();
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].signal, "sidestick_pitch_position");
     assert_eq!(rows[0].variable, "K:AXIS_ELEVATOR_SET");
@@ -182,10 +182,10 @@ fn primes_independent_cursors_one_row_per_frame() {
     assert_eq!(rows[1].previous, Sample::new(0.0, 2.0).unwrap());
     assert_eq!(rows[1].next, Some(Sample::new(0.75, 4.0).unwrap()));
 
-    let step = playback
+    let progress = playback
         .next(0.0)
         .unwrap_or_else(|error| panic!("ready cursor read failed: {error:#}"));
-    assert_eq!(step.progress(), ScenarioProgress::Running);
+    assert_eq!(progress, ScenarioProgress::Running);
 
     let _ = std::fs::remove_file(path);
 }
@@ -195,23 +195,23 @@ fn advances_and_holds_unequal_length_series() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("scenario.csv");
     let mut playback = ScenarioPlayback::new(path, &config())
         .unwrap_or_else(|error| panic!("failed to open default scenario: {error:#}"));
-    let step = playback
+    let progress = playback
         .next(0.0)
         .unwrap_or_else(|error| panic!("first prime frame failed: {error:#}"));
-    assert_eq!(step.progress(), ScenarioProgress::Loading);
-    let step = playback
+    assert_eq!(progress, ScenarioProgress::Loading);
+    let progress = playback
         .next(0.0)
         .unwrap_or_else(|error| panic!("second prime frame failed: {error:#}"));
-    assert_eq!(step.progress(), ScenarioProgress::Running);
+    assert_eq!(progress, ScenarioProgress::Running);
 
     let mut held_pitch = false;
     for frame in 0..=1200 {
         let elapsed_seconds = f64::from(frame) / 30.0;
-        let step = playback
+        let progress = playback
             .next(elapsed_seconds)
             .unwrap_or_else(|error| panic!("advance failed at {elapsed_seconds}: {error:#}"));
-        assert_eq!(step.progress(), ScenarioProgress::Running);
-        for rows in step.interpolation_rows() {
+        assert_eq!(progress, ScenarioProgress::Running);
+        for rows in playback.interpolation_rows() {
             assert!(rows.previous.time_seconds <= elapsed_seconds);
             match rows.next {
                 Some(next) => assert!(elapsed_seconds <= next.time_seconds),
@@ -231,11 +231,10 @@ fn advances_and_holds_unequal_length_series() {
     }
     assert!(held_pitch);
 
-    let step = playback
+    let progress = playback
         .next(40.1)
         .unwrap_or_else(|error| panic!("completion advance failed: {error:#}"));
-    assert_eq!(step.progress(), ScenarioProgress::Completed);
-    assert_eq!(step.interpolation_rows().count(), 0);
+    assert_eq!(progress, ScenarioProgress::Completed);
 }
 
 #[test]

@@ -191,9 +191,6 @@ pub enum ScenarioError {
         line: Option<u64>,
     },
 
-    #[error("sample count overflow for signal `{signal}`")]
-    SampleCountOverflow { signal: String },
-
     #[error("signal `{signal}` contains no samples")]
     MissingSamples { signal: String },
 }

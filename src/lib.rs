@@ -10,6 +10,9 @@ mod arm;
 #[cfg(target_arch = "wasm32")]
 mod gauge;
 
+#[cfg(target_arch = "wasm32")]
+mod gauge_runtime;
+
 #[cfg(any(target_arch = "wasm32", test))]
 mod replayer;
 

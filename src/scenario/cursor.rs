@@ -7,7 +7,50 @@ use crate::config::{InjectionConfig, ReplayConfig};
 use crate::playback::{AffineRange, LinearSegment, PlaybackError, Sample};
 
 use super::ScenarioError;
-use super::validation::{ColumnPair, find_column_indices};
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ColumnPair {
+    pub(super) time_idx: usize,
+    pub(super) value_idx: usize,
+}
+
+/// Returns the CSV-header indexes for one configured injection's columns.
+///
+/// The returned [`ColumnPair`] contains the zero-based indexes of the time and
+/// value columns named by `injection.time_column` and `injection.value_column`.
+/// The time column must immediately precede its matching value column.
+pub(super) fn find_column_indices(
+    headers: &StringRecord,
+    injection: &InjectionConfig,
+) -> Result<ColumnPair, ScenarioError> {
+    let time_idx = headers
+        .iter()
+        .position(|header| header == injection.time_column)
+        .ok_or_else(|| ScenarioError::MissingColumn {
+            signal: injection.name.clone(),
+            column: injection.time_column.clone(),
+        })?;
+    let value_idx = headers
+        .iter()
+        .position(|header| header == injection.value_column)
+        .ok_or_else(|| ScenarioError::MissingColumn {
+            signal: injection.name.clone(),
+            column: injection.value_column.clone(),
+        })?;
+
+    if time_idx.checked_add(1) != Some(value_idx) {
+        return Err(ScenarioError::NonAdjacentColumns {
+            signal: injection.name.clone(),
+            time_column: injection.time_column.clone(),
+            value_column: injection.value_column.clone(),
+        });
+    }
+
+    Ok(ColumnPair {
+        time_idx,
+        value_idx,
+    })
+}
 
 /// Scenario data points used to calculate one injection value.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -45,35 +88,6 @@ pub enum ScenarioProgress {
     Completed,
 }
 
-/// Result of advancing every scenario cursor for one simulator frame.
-pub struct ScenarioStep<'a> {
-    progress: ScenarioProgress,
-    cursors: &'a [SignalCursor],
-}
-
-impl ScenarioStep<'_> {
-    /// Returns the aggregate cursor progress for this frame.
-    pub const fn progress(&self) -> ScenarioProgress {
-        self.progress
-    }
-
-    /// Returns the rows available for interpolation on this frame.
-    pub fn interpolation_rows(&self) -> impl Iterator<Item = InterpolationRows<'_>> {
-        self.cursors.iter().filter_map(|cursor| {
-            if self.progress == ScenarioProgress::Completed {
-                return None;
-            }
-            Some(InterpolationRows {
-                signal: &cursor.signal,
-                variable: &cursor.variable,
-                previous: cursor.previous?,
-                next: cursor.next,
-                conversion: cursor.conversion,
-            })
-        })
-    }
-}
-
 /// Incremental, read-only scenario loader with one file cursor per injection.
 pub struct ScenarioPlayback {
     cursors: Vec<SignalCursor>,
@@ -103,21 +117,30 @@ impl ScenarioPlayback {
     /// Each cursor consumes at most one data row. Before playback starts,
     /// repeated calls with `0` prime the two interpolation rows. During
     /// playback, a cursor advances when `elapsed_seconds` passes its next row.
-    pub fn next(&mut self, elapsed_seconds: f64) -> Result<ScenarioStep<'_>, ScenarioError> {
+    pub fn next(&mut self, elapsed_seconds: f64) -> Result<ScenarioProgress, ScenarioError> {
         for cursor in &mut self.cursors {
             cursor.next(elapsed_seconds)?;
         }
 
-        let progress = if self.cursors.iter().all(|cursor| cursor.ended) {
-            ScenarioProgress::Completed
+        if self.cursors.iter().all(|cursor| cursor.ended) {
+            Ok(ScenarioProgress::Completed)
         } else if self.cursors.iter().all(SignalCursor::is_ready) {
-            ScenarioProgress::Running
+            Ok(ScenarioProgress::Running)
         } else {
-            ScenarioProgress::Loading
-        };
-        Ok(ScenarioStep {
-            progress,
-            cursors: &self.cursors,
+            Ok(ScenarioProgress::Loading)
+        }
+    }
+
+    /// Returns one bounding data-point pair per configured injection.
+    pub fn interpolation_rows(&self) -> impl Iterator<Item = InterpolationRows<'_>> {
+        self.cursors.iter().filter_map(|cursor| {
+            Some(InterpolationRows {
+                signal: &cursor.signal,
+                variable: &cursor.variable,
+                previous: cursor.previous?,
+                next: cursor.next,
+                conversion: cursor.conversion,
+            })
         })
     }
 
@@ -176,20 +199,12 @@ impl SignalCursor {
             return Ok(());
         }
 
-        let Some(next) = self.next else {
-            return Ok(());
-        };
-        if elapsed_seconds <= next.time_seconds {
-            return Ok(());
-        }
-
-        self.previous = Some(next);
-        match self.read_sample()? {
-            Some(sample) => self.next = Some(sample),
-            None => {
-                self.next = None;
-                self.ended = true;
-            }
+        if let Some(next) = self.next
+            && elapsed_seconds > next.time_seconds
+        {
+            self.previous = Some(next);
+            self.next = self.read_sample()?;
+            self.ended = self.next.is_none();
         }
         Ok(())
     }

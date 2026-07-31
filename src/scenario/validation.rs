@@ -6,6 +6,7 @@ use csv::{Position, ReaderBuilder, StringRecord, Trim};
 use crate::config::{InjectionConfig, ReplayConfig};
 
 use super::ScenarioError;
+use super::cursor::{ColumnPair, find_column_indices};
 
 /// Preflight summary for one configured input signal.
 #[derive(Debug, Clone, PartialEq)]
@@ -27,13 +28,7 @@ pub struct ScenarioSummary {
     pub signals: Vec<SignalSummary>,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(super) struct ColumnPair {
-    pub(super) time_idx: usize,
-    pub(super) value_idx: usize,
-}
-
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct ValidationState {
     sample_count: u64,
     last_time: Option<f64>,
@@ -58,9 +53,7 @@ pub fn validate_scenario<R: Read>(
         .iter()
         .map(|injection| find_column_indices(&headers, injection))
         .collect::<Result<Vec<_>, _>>()?;
-    let mut states = (0..config.inject.len())
-        .map(|_| ValidationState::default())
-        .collect::<Vec<_>>();
+    let mut states = vec![ValidationState::default(); config.inject.len()];
 
     for record in csv.records() {
         let record = record?;
@@ -86,47 +79,6 @@ fn validate_unique_headers(headers: &StringRecord) -> Result<(), ScenarioError> 
         }
     }
     Ok(())
-}
-
-/// Returns the CSV-header indexes for one configured injection's columns.
-///
-/// The returned [`ColumnPair`] contains the zero-based indexes of the time and
-/// value columns named by `injection.time_column` and `injection.value_column`.
-/// The scenario CSV format requires every `<signal>.time` column to be
-/// immediately followed by its matching `<signal>.value` column. Missing
-/// columns return [`ScenarioError::MissingColumn`]; present but non-adjacent
-/// columns return [`ScenarioError::NonAdjacentColumns`].
-pub(super) fn find_column_indices(
-    headers: &StringRecord,
-    injection: &InjectionConfig,
-) -> Result<ColumnPair, ScenarioError> {
-    let time = headers
-        .iter()
-        .position(|header| header == injection.time_column)
-        .ok_or_else(|| ScenarioError::MissingColumn {
-            signal: injection.name.clone(),
-            column: injection.time_column.clone(),
-        })?;
-    let value = headers
-        .iter()
-        .position(|header| header == injection.value_column)
-        .ok_or_else(|| ScenarioError::MissingColumn {
-            signal: injection.name.clone(),
-            column: injection.value_column.clone(),
-        })?;
-
-    if time.checked_add(1) != Some(value) {
-        return Err(ScenarioError::NonAdjacentColumns {
-            signal: injection.name.clone(),
-            time_column: injection.time_column.clone(),
-            value_column: injection.value_column.clone(),
-        });
-    }
-
-    Ok(ColumnPair {
-        time_idx: time,
-        value_idx: value,
-    })
 }
 
 fn validate_pair(
@@ -207,13 +159,7 @@ fn validate_pair(
         });
     }
 
-    state.sample_count =
-        state
-            .sample_count
-            .checked_add(1)
-            .ok_or_else(|| ScenarioError::SampleCountOverflow {
-                signal: injection.name.clone(),
-            })?;
+    state.sample_count += 1;
     state.last_time = Some(time);
     Ok(())
 }
