@@ -6,6 +6,7 @@
 use std::io;
 use std::num::ParseFloatError;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use thiserror::Error;
 
@@ -84,11 +85,11 @@ pub enum ReplayerError {
     #[error("scenario update requested while idle")]
     UpdateWhileIdle,
 
-    #[error("invalid simulation time {value}")]
-    InvalidSimulationTime { value: f64 },
-
-    #[error("invalid elapsed simulation time {value}")]
-    InvalidElapsedSimulationTime { value: f64 },
+    #[error("simulation time moved backwards from {started_at:?} to {current:?}")]
+    SimulationTimeMovedBackwards {
+        started_at: Duration,
+        current: Duration,
+    },
 }
 
 /// MSFS calculator-code and simulator-variable failures.
@@ -164,21 +165,28 @@ pub enum ScenarioError {
         line: Option<u64>,
     },
 
-    #[error("non-finite value for signal `{signal}`{line_suffix}", line_suffix = format_line(*line))]
-    NonFiniteValue { signal: String, line: Option<u64> },
-
-    #[error("first timestamp for signal `{signal}` must be 0 seconds, got {time_seconds}{line_suffix}", line_suffix = format_line(*line))]
-    FirstTimestampNotZero {
+    #[error("timestamp {time_seconds} for signal `{signal}` exceeds Duration's range{line_suffix}", line_suffix = format_line(*line))]
+    TimeOutOfRange {
         signal: String,
         time_seconds: f64,
         line: Option<u64>,
     },
 
-    #[error("timestamp {time_seconds} for signal `{signal}` must be greater than {previous_seconds}{line_suffix}", line_suffix = format_line(*line))]
+    #[error("non-finite value for signal `{signal}`{line_suffix}", line_suffix = format_line(*line))]
+    NonFiniteValue { signal: String, line: Option<u64> },
+
+    #[error("first timestamp for signal `{signal}` must be 0 seconds, got {time:?}{line_suffix}", line_suffix = format_line(*line))]
+    FirstTimestampNotZero {
+        signal: String,
+        time: Duration,
+        line: Option<u64>,
+    },
+
+    #[error("timestamp {time:?} for signal `{signal}` must be greater than {previous:?}{line_suffix}", line_suffix = format_line(*line))]
     NonIncreasingTime {
         signal: String,
-        previous_seconds: f64,
-        time_seconds: f64,
+        previous: Duration,
+        time: Duration,
         line: Option<u64>,
     },
 
@@ -223,28 +231,17 @@ pub enum GaugeError {
 /// Invalid samples, interpolation requests, and range conversions.
 #[derive(Debug, Clone, PartialEq, Error)]
 pub enum PlaybackError {
-    #[error("sample time must be finite, got {time_seconds}")]
-    NonFiniteTime { time_seconds: f64 },
-
-    #[error("sample time must be non-negative, got {time_seconds}")]
-    NegativeTime { time_seconds: f64 },
-
     #[error("sample value must be finite, got {value}")]
     NonFiniteValue { value: f64 },
 
-    #[error("segment timestamps must increase, got {start_seconds} then {end_seconds}")]
-    NonIncreasingSegment {
-        start_seconds: f64,
-        end_seconds: f64,
-    },
+    #[error("segment timestamps must increase, got {start:?} then {end:?}")]
+    NonIncreasingSegment { start: Duration, end: Duration },
 
-    #[error(
-        "time {time_seconds} is outside interpolation segment [{start_seconds}, {end_seconds}]"
-    )]
+    #[error("time {time:?} is outside interpolation segment [{start:?}, {end:?}]")]
     TimeOutsideSegment {
-        time_seconds: f64,
-        start_seconds: f64,
-        end_seconds: f64,
+        time: Duration,
+        start: Duration,
+        end: Duration,
     },
 
     #[error("invalid {name} range: {reason}")]

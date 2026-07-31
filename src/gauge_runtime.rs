@@ -1,5 +1,7 @@
 //! MSFS-specific replay runtime used by the gauge entry point.
 
+use std::time::Duration;
+
 use msfs::legacy::{NamedVariable, execute_calculator_code};
 
 use crate::error::{GaugeError, SimulatorError};
@@ -31,21 +33,20 @@ impl GaugeRuntime {
 
     /// Processes one simulator pre-update event.
     pub(crate) fn pre_update(&mut self) -> anyhow::Result<()> {
-        let simulation_time_seconds = GaugeRuntime::simulation_time_seconds()?;
-        let update = self.replayer.pre_update(
-            self.armed_variable.get_value::<f64>(),
-            simulation_time_seconds,
-        )?;
+        let simulation_time = GaugeRuntime::simulation_time()?;
+        let update = self
+            .replayer
+            .pre_update(self.armed_variable.get_value::<f64>(), simulation_time)?;
 
         match update {
-            ReplayerUpdate::Running(frame) => {
+            Some(ReplayerUpdate::Running(frame)) => {
                 GaugeRuntime::inject_frame(&frame, &mut self.variable_writer)?;
             }
-            ReplayerUpdate::Completed => {
+            Some(ReplayerUpdate::Completed) => {
                 println!("TESTPILOT: scenario completed");
                 self.stop();
             }
-            _ => {}
+            None => {}
         }
         Ok(())
     }
@@ -60,15 +61,19 @@ impl GaugeRuntime {
         frame: &InterpolationFrame<'_>,
         variable_writer: &mut VariableWriter,
     ) -> Result<(), GaugeError> {
-        let elapsed_seconds = frame.elapsed_seconds();
-        println!("TESTPILOT: elapsed simulation seconds={elapsed_seconds:.6}");
+        let elapsed = frame.elapsed();
+        println!(
+            "TESTPILOT: elapsed simulation seconds={:.6}",
+            elapsed.as_secs_f64()
+        );
         for data_points in frame.data_points() {
-            let source_value = data_points.value_at(elapsed_seconds).map_err(|source| {
-                GaugeError::InterpolateSignal {
-                    signal: data_points.signal.to_owned(),
-                    source,
-                }
-            })?;
+            let source_value =
+                data_points
+                    .value_at(elapsed)
+                    .map_err(|source| GaugeError::InterpolateSignal {
+                        signal: data_points.signal.to_owned(),
+                        source,
+                    })?;
             let simulator_value =
                 data_points
                     .conversion
@@ -88,9 +93,9 @@ impl GaugeRuntime {
                     "TESTPILOT: {} -> {} previous=({}, {}) next=({}, {}) source={} simulator={}",
                     data_points.signal,
                     data_points.variable,
-                    data_points.previous.time_seconds,
+                    data_points.previous.time.as_secs_f64(),
                     data_points.previous.value,
-                    next.time_seconds,
+                    next.time.as_secs_f64(),
                     next.value,
                     source_value,
                     simulator_value
@@ -99,7 +104,7 @@ impl GaugeRuntime {
                     "TESTPILOT: {} -> {} final=({}, {}) hold source={} simulator={}",
                     data_points.signal,
                     data_points.variable,
-                    data_points.previous.time_seconds,
+                    data_points.previous.time.as_secs_f64(),
                     data_points.previous.value,
                     source_value,
                     simulator_value
@@ -109,12 +114,10 @@ impl GaugeRuntime {
         Ok(())
     }
 
-    fn simulation_time_seconds() -> Result<f64, SimulatorError> {
+    fn simulation_time() -> Result<Duration, SimulatorError> {
         let value = execute_calculator_code::<f64>(SIMULATION_TIME_CODE)
             .ok_or(SimulatorError::SimulationTimeUnavailable)?;
-        if !value.is_finite() {
-            return Err(SimulatorError::InvalidSimulationTime { value });
-        }
-        Ok(value)
+        Duration::try_from_secs_f64(value)
+            .map_err(|_| SimulatorError::InvalidSimulationTime { value })
     }
 }

@@ -1,22 +1,23 @@
 //! Replay lifecycle orchestration independent of the MSFS gauge API.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use crate::arm::ArmState;
-use crate::config::{read_config_file, CONFIG_PATH};
+use crate::config::{CONFIG_PATH, read_config_file};
 use crate::error::ReplayerError;
 use crate::scenario::{InterpolationRows, ScenarioPlayback, ScenarioProgress};
 
 /// Data available while processing one running simulator frame.
 pub(crate) struct InterpolationFrame<'a> {
-    elapsed_seconds: f64,
+    elapsed: Duration,
     playback: &'a ScenarioPlayback,
 }
 
 impl InterpolationFrame<'_> {
-    /// Returns scenario-relative simulator time in seconds.
-    pub(crate) const fn elapsed_seconds(&self) -> f64 {
-        self.elapsed_seconds
+    /// Returns elapsed scenario-relative simulator time.
+    pub(crate) const fn elapsed(&self) -> Duration {
+        self.elapsed
     }
 
     /// Returns one bounding data-point pair per configured injection.
@@ -25,17 +26,8 @@ impl InterpolationFrame<'_> {
     }
 }
 
-/// Lifecycle result of processing one simulator update.
-///
-/// Only [`ReplayerUpdate::Running`] carries interpolation data, preventing
-/// lifecycle states that contain an invalid or missing frame payload.
+/// Action produced by processing one simulator update.
 pub(crate) enum ReplayerUpdate<'a> {
-    /// No scenario is currently loaded.
-    Idle,
-    /// A rising arming edge loaded a scenario.
-    Started,
-    /// Scenario cursors do not yet all contain two samples.
-    Loading,
     /// Every cursor has data points available for interpolation.
     Running(InterpolationFrame<'a>),
     /// Every scenario cursor reached the end of its input series.
@@ -47,7 +39,7 @@ pub(crate) struct ReplayerGauge {
     config_path: PathBuf,
     arm_state: ArmState,
     scenario: Option<ScenarioPlayback>,
-    started_at_seconds: Option<f64>,
+    started_at: Option<Duration>,
 }
 
 impl ReplayerGauge {
@@ -61,34 +53,34 @@ impl ReplayerGauge {
             config_path: config_path.into(),
             arm_state: ArmState::default(),
             scenario: None,
-            started_at_seconds: None,
+            started_at: None,
         }
     }
 
     /// Processes one gauge update.
     ///
-    /// The arming frame opens the configured cursor set but consumes no
-    /// scenario data rows. Simulator time is used once a scenario is loaded.
+    /// The arming frame opens and initializes the configured cursor set.
+    /// Simulator time is used once a scenario is loaded.
     pub(crate) fn pre_update(
         &mut self,
         armed_value: f64,
-        simulation_time_seconds: f64,
-    ) -> anyhow::Result<ReplayerUpdate<'_>> {
+        simulation_time: Duration,
+    ) -> anyhow::Result<Option<ReplayerUpdate<'_>>> {
         if self.arm_state.start(armed_value) {
             self.init_scenario()?;
-            return Ok(ReplayerUpdate::Started);
+            return Ok(None);
         }
         if self.scenario.is_none() {
-            return Ok(ReplayerUpdate::Idle);
+            return Ok(None);
         }
 
-        self.update_scenario(simulation_time_seconds)
+        Ok(Some(self.update_scenario(simulation_time)?))
     }
 
     /// Releases all replay state. Calling this repeatedly is safe.
     pub(crate) fn reset(&mut self) {
         self.scenario = None;
-        self.started_at_seconds = None;
+        self.started_at = None;
     }
 
     fn init_scenario(&mut self) -> anyhow::Result<()> {
@@ -114,50 +106,35 @@ impl ReplayerGauge {
             playback.signal_count()
         );
         self.scenario = Some(playback);
-        self.started_at_seconds = None;
+        self.started_at = None;
         Ok(())
     }
 
-    fn update_scenario(
-        &mut self,
-        simulation_time_seconds: f64,
-    ) -> anyhow::Result<ReplayerUpdate<'_>> {
-        if !simulation_time_seconds.is_finite() {
-            return Err(ReplayerError::InvalidSimulationTime {
-                value: simulation_time_seconds,
-            }
-            .into());
-        }
-
-        let elapsed_seconds = self
-            .started_at_seconds
-            .map_or(0.0, |started| simulation_time_seconds - started);
-        if !elapsed_seconds.is_finite() || elapsed_seconds < 0.0 {
-            return Err(ReplayerError::InvalidElapsedSimulationTime {
-                value: elapsed_seconds,
-            }
-            .into());
-        }
+    fn update_scenario(&mut self, simulation_time: Duration) -> anyhow::Result<ReplayerUpdate<'_>> {
+        let elapsed = match self.started_at {
+            Some(started_at) => simulation_time.checked_sub(started_at).ok_or(
+                ReplayerError::SimulationTimeMovedBackwards {
+                    started_at,
+                    current: simulation_time,
+                },
+            )?,
+            None => Duration::ZERO,
+        };
 
         let playback = self
             .scenario
             .as_mut()
             .ok_or(ReplayerError::UpdateWhileIdle)?;
-        match playback.next(elapsed_seconds)? {
-            ScenarioProgress::Loading => Ok(ReplayerUpdate::Loading),
+        match playback.next(elapsed)? {
             ScenarioProgress::Completed => Ok(ReplayerUpdate::Completed),
             ScenarioProgress::Running => {
-                let elapsed_seconds = match self.started_at_seconds {
-                    Some(started) => simulation_time_seconds - started,
-                    None => {
-                        self.started_at_seconds = Some(simulation_time_seconds);
-                        println!("TESTPILOT: scenario cursors ready");
-                        0.0
-                    }
-                };
+                if self.started_at.is_none() {
+                    self.started_at = Some(simulation_time);
+                    println!("TESTPILOT: scenario cursors ready");
+                }
 
                 Ok(ReplayerUpdate::Running(InterpolationFrame {
-                    elapsed_seconds,
+                    elapsed,
                     playback,
                 }))
             }
@@ -170,10 +147,15 @@ mod tests {
 
     use std::fs;
     use std::path::PathBuf;
+    use std::time::Duration;
 
     use crate::error::ReplayerError;
 
     use super::{ReplayerGauge, ReplayerUpdate};
+
+    fn time(seconds: f64) -> Duration {
+        Duration::try_from_secs_f64(seconds).unwrap()
+    }
 
     struct Fixture {
         directory: PathBuf,
@@ -245,10 +227,10 @@ variable = "A:PLANE PITCH DEGREES"
         let mut replayer = ReplayerGauge::with_config_path(fixture.config_path.clone());
 
         let update = replayer
-            .pre_update(0.0, 42.0)
+            .pre_update(0.0, time(42.0))
             .unwrap_or_else(|error| panic!("idle update failed: {error:#}"));
 
-        assert!(matches!(update, ReplayerUpdate::Idle));
+        assert!(update.is_none());
     }
 
     #[test]
@@ -261,7 +243,7 @@ variable = "A:PLANE PITCH DEGREES"
             .unwrap_or_else(|error| panic!("failed to begin scenario: {error:#}"));
 
         assert!(replayer.scenario.is_some());
-        assert_eq!(replayer.started_at_seconds, None);
+        assert_eq!(replayer.started_at, None);
     }
 
     #[test]
@@ -282,42 +264,38 @@ variable = "A:PLANE PITCH DEGREES"
     }
 
     #[test]
-    fn update_scenario_loads_starts_and_completes_playback() {
+    fn update_scenario_starts_and_completes_playback() {
         let fixture = Fixture::new();
         let mut replayer = ReplayerGauge::with_config_path(fixture.config_path.clone());
         replayer.init_scenario().unwrap();
 
-        let update = replayer.update_scenario(100.0).unwrap();
-        assert!(matches!(update, ReplayerUpdate::Loading));
-        assert_eq!(replayer.started_at_seconds, None);
-
-        let update = replayer.update_scenario(101.0).unwrap();
+        let update = replayer.update_scenario(time(100.0)).unwrap();
         let ReplayerUpdate::Running(frame) = update else {
             panic!("running update did not return interpolation data");
         };
-        assert_eq!(frame.elapsed_seconds(), 0.0);
+        assert_eq!(frame.elapsed(), Duration::ZERO);
         let data_points = frame.data_points().collect::<Vec<_>>();
         assert_eq!(data_points.len(), 1);
         assert_eq!(data_points[0].signal, "sidestick_pitch_position");
-        assert_eq!(data_points[0].previous.time_seconds, 0.0);
+        assert_eq!(data_points[0].previous.time, Duration::ZERO);
         assert_eq!(data_points[0].previous.value, 0.0);
         assert_eq!(
             data_points[0].next,
-            Some(crate::playback::Sample::new(0.1, 10.0).unwrap())
+            Some(crate::playback::Sample::new(time(0.1), 10.0).unwrap())
         );
-        assert_eq!(replayer.started_at_seconds, Some(101.0));
+        assert_eq!(replayer.started_at, Some(time(100.0)));
 
-        let update = replayer.update_scenario(101.0625).unwrap();
+        let update = replayer.update_scenario(time(100.0625)).unwrap();
         let ReplayerUpdate::Running(frame) = update else {
             panic!("running update did not return interpolation data");
         };
-        assert_eq!(frame.elapsed_seconds(), 0.0625);
+        assert_eq!(frame.elapsed(), time(0.0625));
 
-        let update = replayer.update_scenario(101.2).unwrap();
+        let update = replayer.update_scenario(time(100.2)).unwrap();
         assert!(matches!(update, ReplayerUpdate::Completed));
         assert!(replayer.scenario.is_some());
         replayer.reset();
-        assert_eq!(replayer.started_at_seconds, None);
+        assert_eq!(replayer.started_at, None);
     }
 
     #[test]
@@ -325,7 +303,7 @@ variable = "A:PLANE PITCH DEGREES"
         let fixture = Fixture::new();
         let mut replayer = ReplayerGauge::with_config_path(fixture.config_path.clone());
 
-        let error = match replayer.update_scenario(1.0) {
+        let error = match replayer.update_scenario(time(1.0)) {
             Ok(_) => panic!("idle scenario update should fail"),
             Err(error) => error,
         };
@@ -341,23 +319,15 @@ variable = "A:PLANE PITCH DEGREES"
         let fixture = Fixture::new();
         let mut replayer = ReplayerGauge::with_config_path(fixture.config_path.clone());
 
+        assert!(replayer.pre_update(1.0, time(99.0)).unwrap().is_none());
         assert!(matches!(
-            replayer.pre_update(1.0, 99.0).unwrap(),
-            ReplayerUpdate::Started
+            replayer.pre_update(1.0, time(100.0)).unwrap(),
+            Some(ReplayerUpdate::Running(_))
         ));
+        assert_eq!(replayer.started_at, Some(time(100.0)));
         assert!(matches!(
-            replayer.pre_update(1.0, 100.0).unwrap(),
-            ReplayerUpdate::Loading
-        ));
-        assert_eq!(replayer.started_at_seconds, None);
-        assert!(matches!(
-            replayer.pre_update(1.0, 101.0).unwrap(),
-            ReplayerUpdate::Running(_)
-        ));
-        assert_eq!(replayer.started_at_seconds, Some(101.0));
-        assert!(matches!(
-            replayer.pre_update(1.0, 101.2).unwrap(),
-            ReplayerUpdate::Completed
+            replayer.pre_update(1.0, time(100.2)).unwrap(),
+            Some(ReplayerUpdate::Completed)
         ));
         assert!(replayer.scenario.is_some());
     }
@@ -368,16 +338,18 @@ variable = "A:PLANE PITCH DEGREES"
         let mut replayer = ReplayerGauge::with_config_path(fixture.config_path.clone());
 
         replayer.init_scenario().unwrap();
-        replayer.update_scenario(10.0).unwrap();
-        replayer.update_scenario(11.0).unwrap();
-        let error = match replayer.update_scenario(10.5) {
+        replayer.update_scenario(time(10.0)).unwrap();
+        let error = match replayer.update_scenario(time(9.5)) {
             Ok(_) => panic!("backwards simulator time should fail"),
             Err(error) => error,
         };
 
         assert!(matches!(
             error.downcast_ref::<ReplayerError>(),
-            Some(ReplayerError::InvalidElapsedSimulationTime { value }) if *value == -0.5
+            Some(ReplayerError::SimulationTimeMovedBackwards {
+                started_at,
+                current,
+            }) if *started_at == time(10.0) && *current == time(9.5)
         ));
     }
 
@@ -385,12 +357,12 @@ variable = "A:PLANE PITCH DEGREES"
     fn reset_is_idempotent() {
         let fixture = Fixture::new();
         let mut replayer = ReplayerGauge::with_config_path(fixture.config_path.clone());
-        replayer.pre_update(1.0, 0.0).unwrap();
+        replayer.pre_update(1.0, Duration::ZERO).unwrap();
 
         replayer.reset();
         replayer.reset();
 
         assert!(replayer.scenario.is_none());
-        assert_eq!(replayer.started_at_seconds, None);
+        assert_eq!(replayer.started_at, None);
     }
 }

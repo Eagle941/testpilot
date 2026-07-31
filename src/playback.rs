@@ -1,33 +1,26 @@
 //! Validated playback samples, interpolation, and range conversion.
 
+use std::time::Duration;
+
 pub use crate::error::PlaybackError;
 
-/// One finite scenario value at an explicit non-negative timestamp.
+/// One finite scenario value at an explicit scenario-relative time.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Sample {
-    /// Scenario-relative timestamp in seconds.
-    pub time_seconds: f64,
+    /// Scenario-relative sample time.
+    pub time: Duration,
     /// Finite value in the signal's configured source scale.
     pub value: f64,
 }
 
 impl Sample {
-    /// Creates a sample after validating its timestamp and value.
-    pub fn new(time_seconds: f64, value: f64) -> Result<Sample, PlaybackError> {
-        if !time_seconds.is_finite() {
-            return Err(PlaybackError::NonFiniteTime { time_seconds });
-        }
-        if time_seconds < 0.0 {
-            return Err(PlaybackError::NegativeTime { time_seconds });
-        }
+    /// Creates a sample after validating its value.
+    pub fn new(time: Duration, value: f64) -> Result<Sample, PlaybackError> {
         if !value.is_finite() {
             return Err(PlaybackError::NonFiniteValue { value });
         }
 
-        Ok(Sample {
-            time_seconds,
-            value,
-        })
+        Ok(Sample { time, value })
     }
 }
 
@@ -52,10 +45,10 @@ pub struct LinearSegment {
 impl LinearSegment {
     /// Creates a segment whose end timestamp must be greater than its start.
     pub fn new(start: Sample, end: Sample) -> Result<LinearSegment, PlaybackError> {
-        if end.time_seconds <= start.time_seconds {
+        if end.time <= start.time {
             return Err(PlaybackError::NonIncreasingSegment {
-                start_seconds: start.time_seconds,
-                end_seconds: end.time_seconds,
+                start: start.time,
+                end: end.time,
             });
         }
 
@@ -76,26 +69,23 @@ impl LinearSegment {
     ///
     /// Exact endpoint timestamps return the corresponding source value without
     /// performing interpolation arithmetic.
-    pub fn value_at(self, time_seconds: f64) -> Result<f64, PlaybackError> {
-        if !time_seconds.is_finite() {
-            return Err(PlaybackError::NonFiniteTime { time_seconds });
-        }
-        if time_seconds < self.start.time_seconds || time_seconds > self.end.time_seconds {
+    pub fn value_at(self, time: Duration) -> Result<f64, PlaybackError> {
+        if time < self.start.time || time > self.end.time {
             return Err(PlaybackError::TimeOutsideSegment {
-                time_seconds,
-                start_seconds: self.start.time_seconds,
-                end_seconds: self.end.time_seconds,
+                time,
+                start: self.start.time,
+                end: self.end.time,
             });
         }
-        if time_seconds == self.start.time_seconds {
+        if time == self.start.time {
             return Ok(self.start.value);
         }
-        if time_seconds == self.end.time_seconds {
+        if time == self.end.time {
             return Ok(self.end.value);
         }
 
-        let factor = (time_seconds - self.start.time_seconds)
-            / (self.end.time_seconds - self.start.time_seconds);
+        let factor = (time - self.start.time).as_secs_f64()
+            / (self.end.time - self.start.time).as_secs_f64();
         let value = self.start.value + factor * (self.end.value - self.start.value);
         if !value.is_finite() {
             return Err(PlaybackError::ArithmeticOverflow);
@@ -188,8 +178,12 @@ impl AffineRange {
 mod tests {
     use super::*;
 
-    fn sample(time_seconds: f64, value: f64) -> Sample {
-        match Sample::new(time_seconds, value) {
+    fn time(seconds: f64) -> Duration {
+        Duration::try_from_secs_f64(seconds).unwrap()
+    }
+
+    fn sample(seconds: f64, value: f64) -> Sample {
+        match Sample::new(time(seconds), value) {
             Ok(sample) => sample,
             Err(error) => panic!("valid test sample rejected: {error}"),
         }
@@ -205,7 +199,7 @@ mod tests {
         assert_eq!(
             start,
             Sample {
-                time_seconds: 0.2,
+                time: time(0.2),
                 value: -10.0
             }
         );
@@ -220,23 +214,15 @@ mod tests {
             Err(error) => panic!("valid segment rejected: {error}"),
         };
 
-        assert_eq!(segment.value_at(0.2), Ok(-10.0));
-        assert_eq!(segment.value_at(0.7), Ok(30.0));
-        assert!((segment.value_at(0.45).unwrap_or(f64::NAN) - 10.0).abs() < 1e-12);
+        assert_eq!(segment.value_at(time(0.2)), Ok(-10.0));
+        assert_eq!(segment.value_at(time(0.7)), Ok(30.0));
+        assert!((segment.value_at(time(0.45)).unwrap_or(f64::NAN) - 10.0).abs() < 1e-12);
     }
 
     #[test]
     fn rejects_invalid_samples_and_segments() {
         assert!(matches!(
-            Sample::new(f64::NAN, 0.0),
-            Err(PlaybackError::NonFiniteTime { .. })
-        ));
-        assert!(matches!(
-            Sample::new(-0.1, 0.0),
-            Err(PlaybackError::NegativeTime { .. })
-        ));
-        assert!(matches!(
-            Sample::new(0.0, f64::INFINITY),
+            Sample::new(Duration::ZERO, f64::INFINITY),
             Err(PlaybackError::NonFiniteValue { .. })
         ));
         assert!(matches!(
@@ -246,16 +232,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_finite_time_and_interpolation_overflow() {
+    fn rejects_interpolation_overflow() {
         let segment = LinearSegment::new(sample(0.0, f64::MAX), sample(2.0, -f64::MAX))
             .unwrap_or_else(|error| panic!("valid segment rejected: {error}"));
 
         assert!(matches!(
-            segment.value_at(f64::NAN),
-            Err(PlaybackError::NonFiniteTime { .. })
-        ));
-        assert!(matches!(
-            segment.value_at(1.0),
+            segment.value_at(time(1.0)),
             Err(PlaybackError::ArithmeticOverflow)
         ));
     }
@@ -266,11 +248,11 @@ mod tests {
             .unwrap_or_else(|error| panic!("valid segment rejected: {error}"));
 
         assert!(matches!(
-            segment.value_at(0.99),
+            segment.value_at(time(0.99)),
             Err(PlaybackError::TimeOutsideSegment { .. })
         ));
         assert!(matches!(
-            segment.value_at(2.01),
+            segment.value_at(time(2.01)),
             Err(PlaybackError::TimeOutsideSegment { .. })
         ));
     }

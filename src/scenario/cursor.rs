@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::path::Path;
+use std::time::Duration;
 
 use csv::{Position, Reader, ReaderBuilder, StringRecord, Trim};
 
@@ -12,6 +13,33 @@ use super::ScenarioError;
 pub(super) struct ColumnPair {
     pub(super) time_idx: usize,
     pub(super) value_idx: usize,
+}
+
+/// Parses scenario-relative seconds into a duration.
+pub(super) fn parse_time(
+    text: &str,
+    signal: &str,
+    line: Option<u64>,
+) -> Result<Duration, ScenarioError> {
+    let time_seconds = text.parse::<f64>()?;
+    if !time_seconds.is_finite() {
+        return Err(ScenarioError::NonFiniteTime {
+            signal: signal.to_owned(),
+            line,
+        });
+    }
+    if time_seconds < 0.0 {
+        return Err(ScenarioError::NegativeTime {
+            signal: signal.to_owned(),
+            time_seconds,
+            line,
+        });
+    }
+    Duration::try_from_secs_f64(time_seconds).map_err(|_| ScenarioError::TimeOutOfRange {
+        signal: signal.to_owned(),
+        time_seconds,
+        line,
+    })
 }
 
 /// Returns the CSV-header indexes for one configured injection's columns.
@@ -69,9 +97,9 @@ pub struct InterpolationRows<'a> {
 
 impl InterpolationRows<'_> {
     /// Interpolates between two samples or holds the final sample after EOF.
-    pub fn value_at(&self, elapsed_seconds: f64) -> Result<f64, PlaybackError> {
+    pub fn value_at(&self, elapsed: Duration) -> Result<f64, PlaybackError> {
         match self.next {
-            Some(next) => LinearSegment::new(self.previous, next)?.value_at(elapsed_seconds),
+            Some(next) => LinearSegment::new(self.previous, next)?.value_at(elapsed),
             None => Ok(self.previous.value),
         }
     }
@@ -80,8 +108,6 @@ impl InterpolationRows<'_> {
 /// Progress reported by one incremental scenario update.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScenarioProgress {
-    /// At least one cursor does not yet have two samples.
-    Loading,
     /// Every cursor can interpolate or hold its final sample.
     Running,
     /// Every cursor has advanced beyond its final row.
@@ -96,8 +122,8 @@ pub struct ScenarioPlayback {
 impl ScenarioPlayback {
     /// Opens the scenario independently for every configured injection.
     ///
-    /// This reads the CSV header from each cursor but does not consume any data
-    /// rows. The scenario file is never opened for writing.
+    /// Initialization reads each CSV header and the first two samples needed
+    /// for interpolation. The scenario file is never opened for writing.
     pub fn new(
         path: impl AsRef<Path>,
         config: &ReplayConfig,
@@ -114,20 +140,17 @@ impl ScenarioPlayback {
 
     /// Advances every signal cursor for the current elapsed scenario time.
     ///
-    /// Each cursor consumes at most one data row. Before playback starts,
-    /// repeated calls with `0` prime the two interpolation rows. During
-    /// playback, a cursor advances when `elapsed_seconds` passes its next row.
-    pub fn next(&mut self, elapsed_seconds: f64) -> Result<ScenarioProgress, ScenarioError> {
+    /// Each cursor consumes at most one data row after initialization and
+    /// advances when `elapsed` passes its next row.
+    pub fn next(&mut self, elapsed: Duration) -> Result<ScenarioProgress, ScenarioError> {
         for cursor in &mut self.cursors {
-            cursor.next(elapsed_seconds)?;
+            cursor.next(elapsed)?;
         }
 
         if self.cursors.iter().all(|cursor| cursor.ended) {
             Ok(ScenarioProgress::Completed)
-        } else if self.cursors.iter().all(SignalCursor::is_ready) {
-            Ok(ScenarioProgress::Running)
         } else {
-            Ok(ScenarioProgress::Loading)
+            Ok(ScenarioProgress::Running)
         }
     }
 
@@ -174,7 +197,7 @@ impl SignalCursor {
         let columns = find_column_indices(reader.headers()?, injection)?;
         let conversion = AffineRange::new(injection.source_range, injection.simulator_range)?;
 
-        Ok(SignalCursor {
+        let mut cursor = SignalCursor {
             signal: injection.name.clone(),
             variable: injection.variable.clone(),
             columns,
@@ -183,24 +206,19 @@ impl SignalCursor {
             next: None,
             conversion,
             ended: false,
-        })
+        };
+        cursor.previous = Some(cursor.required_sample()?);
+        cursor.next = Some(cursor.required_sample()?);
+        Ok(cursor)
     }
 
-    fn next(&mut self, elapsed_seconds: f64) -> Result<(), ScenarioError> {
+    fn next(&mut self, elapsed: Duration) -> Result<(), ScenarioError> {
         if self.ended {
-            return Ok(());
-        }
-        if self.previous.is_none() {
-            self.previous = Some(self.required_sample()?);
-            return Ok(());
-        }
-        if self.next.is_none() {
-            self.next = Some(self.required_sample()?);
             return Ok(());
         }
 
         if let Some(next) = self.next
-            && elapsed_seconds > next.time_seconds
+            && elapsed > next.time
         {
             self.previous = Some(next);
             self.next = self.read_sample()?;
@@ -236,12 +254,8 @@ impl SignalCursor {
             return Ok(None);
         }
 
-        let time = time_text.parse::<f64>()?;
+        let time = parse_time(time_text, &self.signal, line)?;
         let value = value_text.parse::<f64>()?;
         Ok(Some(Sample::new(time, value)?))
-    }
-
-    fn is_ready(&self) -> bool {
-        self.previous.is_some() && (self.next.is_some() || self.ended)
     }
 }

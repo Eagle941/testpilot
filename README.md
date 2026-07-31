@@ -116,10 +116,10 @@ other timing modes are outside the validated MVP behavior.
 `L:REPLAYER_ARMED` is the library-owned arming variable. The module initializes
 it to `0` and remains idle. Setting it to `1` loads the configuration and opens
 one read-only scenario cursor per injection. The MVP skips a full-file
-preflight pass and assumes the scenario is correctly formatted. Each cursor
-reads at most one row per simulator frame until it has two samples. Setting the
-LVAR back to `0` while running will request an abort once playback is
-implemented.
+preflight pass and assumes the scenario is correctly formatted. Initialization
+reads the first two samples for every cursor; subsequent simulator frames read
+at most one additional row per cursor. Setting the LVAR back to `0` while
+running will request an abort once playback is implemented.
 
 While running, replay commands take precedence over local pilot controls. The
 simulator adapter must use an A32NX-compatible, verified input-bypass mechanism;
@@ -297,12 +297,11 @@ every MSFS `PreUpdate` event. The simulator-independent `ArmState` struct owns
 the previous sample, and its `start` method returns `true` only when the value
 changes from exactly `0` to exactly `1`. On that transition, the gauge reads
 `SimObjects/AirPlanes/FlyByWire_A320_NEO/replayer_config.toml`, opens one
-independent `scenario.csv` reader per injection, and logs the cursor count. The
-arm frame reads only each reader's CSV header. Each subsequent `PreUpdate`
-consumes at most one data row per cursor until all cursors have two samples,
-then logs `TESTPILOT: scenario cursors ready` and captures
-`E:SIMULATION TIME` as scenario time zero. On every subsequent `PreUpdate`, each
-cursor advances by at most one row when elapsed scenario time passes its next
+independent `scenario.csv` reader per injection, reads each header and first
+two samples, and logs the cursor count. The next `PreUpdate` logs
+`TESTPILOT: scenario cursors ready` and captures `E:SIMULATION TIME` as
+scenario time zero. On that and every subsequent `PreUpdate`, each cursor
+advances by at most one row when elapsed scenario time passes its next
 sample timestamp. The gauge prints elapsed simulator seconds, each injection's
 logical name and simulator variable, the previous and next `(time, value)` rows,
 the interpolated source value, and its affine-converted simulator value. A file
@@ -311,7 +310,7 @@ the armed LVAR to `0` and terminates the gauge task without panicking. No
 full-file scenario validation runs in the MVP, and disarm transitions have no
 behavior.
 
-To validate incremental loading, run the installer, load the A32NX, and set
+To validate incremental playback, run the installer, load the A32NX, and set
 `L:REPLAYER_ARMED` to `1` with an LVAR or calculator-code tool. Verify the
 console reports the cursor count followed by elapsed simulator seconds, the
 ready message, and one time-varying interpolation-row pair per configured

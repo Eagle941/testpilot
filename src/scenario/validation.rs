@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::io::Read;
+use std::time::Duration;
 
 use csv::{Position, ReaderBuilder, StringRecord, Trim};
 
 use crate::config::{InjectionConfig, ReplayConfig};
 
 use super::ScenarioError;
-use super::cursor::{ColumnPair, find_column_indices};
+use super::cursor::{ColumnPair, find_column_indices, parse_time};
 
 /// Preflight summary for one configured input signal.
 #[derive(Debug, Clone, PartialEq)]
@@ -15,15 +16,15 @@ pub struct SignalSummary {
     pub signal: String,
     /// Number of validated `(time, value)` samples.
     pub sample_count: u64,
-    /// Timestamp of the final sample in scenario-relative seconds.
-    pub final_time_seconds: f64,
+    /// Scenario-relative time of the final sample.
+    pub final_time: Duration,
 }
 
 /// Result of a successful streaming scenario preflight pass.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScenarioSummary {
     /// Latest final timestamp across all configured input series.
-    pub duration_seconds: f64,
+    pub duration: Duration,
     /// Per-signal summaries in configuration injection order.
     pub signals: Vec<SignalSummary>,
 }
@@ -31,7 +32,7 @@ pub struct ScenarioSummary {
 #[derive(Debug, Default, Clone)]
 struct ValidationState {
     sample_count: u64,
-    last_time: Option<f64>,
+    last_time: Option<Duration>,
     ended: bool,
 }
 
@@ -110,32 +111,19 @@ fn validate_pair(
         });
     }
 
-    let time = time_text.parse::<f64>()?;
+    let time = parse_time(time_text, &injection.name, line)?;
     let value = value_text.parse::<f64>()?;
 
-    if !time.is_finite() {
-        return Err(ScenarioError::NonFiniteTime {
-            signal: injection.name.clone(),
-            line,
-        });
-    }
-    if time < 0.0 {
-        return Err(ScenarioError::NegativeTime {
-            signal: injection.name.clone(),
-            time_seconds: time,
-            line,
-        });
-    }
     if !value.is_finite() {
         return Err(ScenarioError::NonFiniteValue {
             signal: injection.name.clone(),
             line,
         });
     }
-    if state.sample_count == 0 && time != 0.0 {
+    if state.sample_count == 0 && !time.is_zero() {
         return Err(ScenarioError::FirstTimestampNotZero {
             signal: injection.name.clone(),
-            time_seconds: time,
+            time,
             line,
         });
     }
@@ -144,8 +132,8 @@ fn validate_pair(
     {
         return Err(ScenarioError::NonIncreasingTime {
             signal: injection.name.clone(),
-            previous_seconds: previous,
-            time_seconds: time,
+            previous,
+            time,
             line,
         });
     }
@@ -168,7 +156,7 @@ fn summarize(
     config: &ReplayConfig,
     states: Vec<ValidationState>,
 ) -> Result<ScenarioSummary, ScenarioError> {
-    let mut duration_seconds: f64 = 0.0;
+    let mut duration = Duration::ZERO;
     let mut signals = Vec::with_capacity(states.len());
 
     for (injection, state) in config.inject.iter().zip(states) {
@@ -177,16 +165,13 @@ fn summarize(
             .ok_or_else(|| ScenarioError::MissingSamples {
                 signal: injection.name.clone(),
             })?;
-        duration_seconds = duration_seconds.max(final_time);
+        duration = duration.max(final_time);
         signals.push(SignalSummary {
             signal: injection.name.clone(),
             sample_count: state.sample_count,
-            final_time_seconds: final_time,
+            final_time,
         });
     }
 
-    Ok(ScenarioSummary {
-        duration_seconds,
-        signals,
-    })
+    Ok(ScenarioSummary { duration, signals })
 }
