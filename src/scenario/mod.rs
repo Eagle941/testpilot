@@ -9,7 +9,7 @@ mod validation;
 
 pub use crate::error::ScenarioError;
 pub use cursor::{InterpolationRows, ScenarioPlayback};
-pub use validation::{ScenarioSummary, SignalSummary, validate_scenario};
+pub use validation::{validate_scenario, ScenarioSummary, SignalSummary};
 
 #[cfg(test)]
 mod tests;

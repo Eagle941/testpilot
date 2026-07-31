@@ -1,21 +1,18 @@
 //! MSFS-specific replay runtime used by the gauge entry point.
 
-use std::time::Duration;
+use msfs::legacy::NamedVariable;
 
-use msfs::legacy::{NamedVariable, execute_calculator_code};
-
-use crate::error::{GaugeError, SimulatorError};
-use crate::replayer::{InterpolationFrame, ReplayerGauge, ReplayerUpdate};
-use crate::simulator::VariableWriter;
+use crate::error::GaugeError;
+use crate::replayer::{InterpolationFrame, Replayer, ReplayerUpdate};
+use crate::simulator::{MsfsSimulator, SimulatorAdapter};
 
 const ARMED_VARIABLE: &str = "REPLAYER_ARMED";
-const SIMULATION_TIME_CODE: &str = "(E:SIMULATION TIME, seconds)";
 
 /// Owns the MSFS variables and replay state used by the gauge event loop.
 pub(crate) struct GaugeRuntime {
     armed_variable: NamedVariable,
-    replayer: ReplayerGauge,
-    variable_writer: VariableWriter,
+    replayer: Replayer,
+    simulator: MsfsSimulator,
 }
 
 impl GaugeRuntime {
@@ -26,21 +23,21 @@ impl GaugeRuntime {
 
         GaugeRuntime {
             armed_variable,
-            replayer: ReplayerGauge::new(),
-            variable_writer: VariableWriter::new(),
+            replayer: Replayer::new(),
+            simulator: MsfsSimulator::new(),
         }
     }
 
     /// Processes one simulator pre-update event.
     pub(crate) fn pre_update(&mut self) -> anyhow::Result<()> {
-        let simulation_time = GaugeRuntime::simulation_time()?;
+        let simulation_time = self.simulator.simulation_time()?;
         let update = self
             .replayer
             .pre_update(self.armed_variable.get_value::<f64>(), simulation_time)?;
 
         match update {
             Some(ReplayerUpdate::Running(frame)) => {
-                GaugeRuntime::inject_frame(&frame, &mut self.variable_writer)?;
+                GaugeRuntime::inject_frame(&frame, &mut self.simulator)?;
             }
             Some(ReplayerUpdate::Completed) => {
                 println!("TESTPILOT: scenario completed");
@@ -59,7 +56,7 @@ impl GaugeRuntime {
 
     fn inject_frame(
         frame: &InterpolationFrame<'_>,
-        variable_writer: &mut VariableWriter,
+        simulator: &mut impl SimulatorAdapter,
     ) -> Result<(), GaugeError> {
         let elapsed = frame.elapsed();
         for data_points in frame.data_points() {
@@ -78,7 +75,7 @@ impl GaugeRuntime {
                         signal: data_points.signal.to_owned(),
                         source,
                     })?;
-            variable_writer
+            simulator
                 .write(data_points.variable, simulator_value)
                 .map_err(|source| GaugeError::InjectSignal {
                     signal: data_points.signal.to_owned(),
@@ -86,12 +83,5 @@ impl GaugeRuntime {
                 })?;
         }
         Ok(())
-    }
-
-    fn simulation_time() -> Result<Duration, SimulatorError> {
-        let value = execute_calculator_code::<f64>(SIMULATION_TIME_CODE)
-            .ok_or(SimulatorError::SimulationTimeUnavailable)?;
-        Duration::try_from_secs_f64(value)
-            .map_err(|_| SimulatorError::InvalidSimulationTime { value })
     }
 }
