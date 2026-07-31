@@ -105,15 +105,6 @@ impl InterpolationRows<'_> {
     }
 }
 
-/// Progress reported by one incremental scenario update.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScenarioProgress {
-    /// Every cursor can interpolate or hold its final sample.
-    Running,
-    /// Every cursor has advanced beyond its final row.
-    Completed,
-}
-
 /// Incremental, read-only scenario loader with one file cursor per injection.
 pub struct ScenarioPlayback {
     cursors: Vec<SignalCursor>,
@@ -142,16 +133,16 @@ impl ScenarioPlayback {
     ///
     /// Each cursor consumes at most one data row after initialization and
     /// advances when `elapsed` passes its next row.
-    pub fn next(&mut self, elapsed: Duration) -> Result<ScenarioProgress, ScenarioError> {
+    pub fn advance(&mut self, elapsed: Duration) -> Result<(), ScenarioError> {
         for cursor in &mut self.cursors {
-            cursor.next(elapsed)?;
+            cursor.advance(elapsed)?;
         }
+        Ok(())
+    }
 
-        if self.cursors.iter().all(|cursor| cursor.ended) {
-            Ok(ScenarioProgress::Completed)
-        } else {
-            Ok(ScenarioProgress::Running)
-        }
+    /// Returns whether every signal cursor has passed its final sample.
+    pub fn completed(&self) -> bool {
+        self.cursors.iter().all(|cursor| cursor.ended)
     }
 
     /// Returns one bounding data-point pair per configured injection.
@@ -212,7 +203,7 @@ impl SignalCursor {
         Ok(cursor)
     }
 
-    fn next(&mut self, elapsed: Duration) -> Result<(), ScenarioError> {
+    fn advance(&mut self, elapsed: Duration) -> Result<(), ScenarioError> {
         if self.ended {
             return Ok(());
         }

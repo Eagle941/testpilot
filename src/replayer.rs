@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::arm::ArmState;
 use crate::config::{CONFIG_PATH, read_config_file};
 use crate::error::ReplayerError;
-use crate::scenario::{InterpolationRows, ScenarioPlayback, ScenarioProgress};
+use crate::scenario::{InterpolationRows, ScenarioPlayback};
 
 /// Data available while processing one running simulator frame.
 pub(crate) struct InterpolationFrame<'a> {
@@ -110,34 +110,34 @@ impl ReplayerGauge {
     }
 
     fn update_scenario(&mut self, simulation_time: Duration) -> anyhow::Result<ReplayerUpdate<'_>> {
-        let elapsed = match self.started_at {
-            Some(started_at) => simulation_time.checked_sub(started_at).ok_or(
-                ReplayerError::SimulationTimeMovedBackwards {
-                    started_at,
-                    current: simulation_time,
-                },
-            )?,
-            None => Duration::ZERO,
-        };
-
         let playback = self
             .scenario
             .as_mut()
             .ok_or(ReplayerError::UpdateWhileIdle)?;
-        match playback.next(elapsed)? {
-            ScenarioProgress::Completed => Ok(ReplayerUpdate::Completed),
-            ScenarioProgress::Running => {
-                if self.started_at.is_none() {
-                    self.started_at = Some(simulation_time);
-                    println!("TESTPILOT: scenario cursors ready");
-                }
-
-                Ok(ReplayerUpdate::Running(InterpolationFrame {
-                    elapsed,
-                    playback,
-                }))
+        let started_at = match self.started_at {
+            Some(started_at) => started_at,
+            None => {
+                self.started_at = Some(simulation_time);
+                println!("TESTPILOT: scenario cursors ready");
+                simulation_time
             }
+        };
+        let elapsed = simulation_time.checked_sub(started_at).ok_or(
+            ReplayerError::SimulationTimeMovedBackwards {
+                started_at,
+                current: simulation_time,
+            },
+        )?;
+
+        playback.advance(elapsed)?;
+        if playback.completed() {
+            return Ok(ReplayerUpdate::Completed);
         }
+
+        Ok(ReplayerUpdate::Running(InterpolationFrame {
+            elapsed,
+            playback,
+        }))
     }
 }
 

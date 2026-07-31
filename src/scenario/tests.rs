@@ -180,10 +180,10 @@ fn initializes_interpolation_rows_and_advances_incrementally() {
     assert_eq!(rows[1].previous, Sample::new(Duration::ZERO, 2.0).unwrap());
     assert_eq!(rows[1].next, Some(Sample::new(time(0.75), 4.0).unwrap()));
 
-    let progress = playback
-        .next(time(0.6))
+    playback
+        .advance(time(0.6))
         .unwrap_or_else(|error| panic!("incremental read failed: {error:#}"));
-    assert_eq!(progress, ScenarioProgress::Running);
+    assert!(!playback.completed());
     let rows = playback.interpolation_rows().collect::<Vec<_>>();
     assert_eq!(rows[0].previous, Sample::new(time(0.5), 3.0).unwrap());
     assert_eq!(rows[0].next, Some(Sample::new(time(1.0), 5.0).unwrap()));
@@ -201,10 +201,10 @@ fn advances_and_holds_unequal_length_series() {
     let mut held_pitch = false;
     for frame in 0..=1200 {
         let elapsed = time(f64::from(frame) / 30.0);
-        let progress = playback
-            .next(elapsed)
+        playback
+            .advance(elapsed)
             .unwrap_or_else(|error| panic!("advance failed at {elapsed:?}: {error:#}"));
-        assert_eq!(progress, ScenarioProgress::Running);
+        assert!(!playback.completed());
         for rows in playback.interpolation_rows() {
             assert!(rows.previous.time <= elapsed);
             match rows.next {
@@ -224,10 +224,10 @@ fn advances_and_holds_unequal_length_series() {
     }
     assert!(held_pitch);
 
-    let progress = playback
-        .next(time(40.1))
+    playback
+        .advance(time(40.1))
         .unwrap_or_else(|error| panic!("completion advance failed: {error:#}"));
-    assert_eq!(progress, ScenarioProgress::Completed);
+    assert!(playback.completed());
 }
 
 #[test]

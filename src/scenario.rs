@@ -8,7 +8,7 @@ mod cursor;
 mod validation;
 
 pub use crate::error::ScenarioError;
-pub use cursor::{InterpolationRows, ScenarioPlayback, ScenarioProgress};
+pub use cursor::{InterpolationRows, ScenarioPlayback};
 pub use validation::{ScenarioSummary, SignalSummary, validate_scenario};
 
 #[cfg(test)]
