@@ -117,7 +117,7 @@ For independently sampled series, use a standard rectangular CSV with adjacent `
 
 Do not impose a fixed duration, row-count, or file-size limit. Design parsing and playback so scenarios can use the available disk capacity without requiring proportional RAM. The MVP skips a full-file preflight pass and assumes the scenario is correctly formatted.
 
-Open the scenario independently once per configured injection so each signal has its own sequential file position and bounded two-sample lookahead. During initialization on the arm frame, read each cursor's CSV header and first two data rows, then interpolate and inject the first frame at scenario time zero. After initialization, read at most one additional data row per cursor per frame. Never load the complete scenario into memory. File access, CSV parsing, or numeric parsing errors encountered during playback must include useful file, line, column, or signal context and terminate safely without panicking.
+Open the scenario independently once per configured injection so each signal has its own sequential file position and bounded two-sample lookahead. During initialization on the arm frame, read each cursor's CSV header and first two data rows, then interpolate and inject the first frame at scenario time zero. On each subsequent frame, read each cursor forward until its samples bracket the current scenario time or the series reaches EOF; this may consume multiple rows after a late frame. Never load the complete scenario into memory. File access, CSV parsing, or numeric parsing errors encountered during playback must include useful file, line, column, or signal context and terminate safely without panicking.
 
 ## Input Injection and Safety
 

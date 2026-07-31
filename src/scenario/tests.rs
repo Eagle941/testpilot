@@ -152,12 +152,12 @@ fn rejects_missing_samples() {
 }
 
 #[test]
-fn initializes_interpolation_rows_and_advances_incrementally() {
+fn initializes_rows_and_catches_up_across_multiple_intervals() {
     let path = std::env::temp_dir().join(format!(
         "replay-incremental-scenario-{}.csv",
         std::process::id()
     ));
-    let contents = format!("{HEADER}0,1,0,2\n0.5,3,0.75,4\n1,5,1.5,6\n");
+    let contents = format!("{HEADER}0,1,0,2\n0.1,3,0.75,4\n0.2,5,1.5,6\n0.5,7,,\n");
     if let Err(error) = std::fs::write(&path, contents) {
         panic!("failed to create scenario fixture: {error}");
     }
@@ -174,19 +174,20 @@ fn initializes_interpolation_rows_and_advances_incrementally() {
     assert_eq!(rows[0].signal, "sidestick_pitch_position");
     assert_eq!(rows[0].variable, "K:AXIS_ELEVATOR_SET");
     assert_eq!(rows[0].previous, Sample::new(Duration::ZERO, 1.0).unwrap());
-    assert_eq!(rows[0].next, Some(Sample::new(time(0.5), 3.0).unwrap()));
+    assert_eq!(rows[0].next, Some(Sample::new(time(0.1), 3.0).unwrap()));
     assert_eq!(rows[1].signal, "sidestick_roll_position");
     assert_eq!(rows[1].variable, "K:AXIS_AILERONS_SET");
     assert_eq!(rows[1].previous, Sample::new(Duration::ZERO, 2.0).unwrap());
     assert_eq!(rows[1].next, Some(Sample::new(time(0.75), 4.0).unwrap()));
 
     playback
-        .advance(time(0.6))
-        .unwrap_or_else(|error| panic!("incremental read failed: {error:#}"));
+        .advance(time(0.35))
+        .unwrap_or_else(|error| panic!("catch-up read failed: {error:#}"));
     assert!(!playback.completed());
     let rows = playback.interpolation_rows().collect::<Vec<_>>();
-    assert_eq!(rows[0].previous, Sample::new(time(0.5), 3.0).unwrap());
-    assert_eq!(rows[0].next, Some(Sample::new(time(1.0), 5.0).unwrap()));
+    assert_eq!(rows[0].previous, Sample::new(time(0.2), 5.0).unwrap());
+    assert_eq!(rows[0].next, Some(Sample::new(time(0.5), 7.0).unwrap()));
+    assert_eq!(rows[0].value_at(time(0.35)), Ok(6.0));
     assert_eq!(rows[1].previous, Sample::new(Duration::ZERO, 2.0).unwrap());
 
     let _ = std::fs::remove_file(path);

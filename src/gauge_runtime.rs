@@ -62,10 +62,6 @@ impl GaugeRuntime {
         variable_writer: &mut VariableWriter,
     ) -> Result<(), GaugeError> {
         let elapsed = frame.elapsed();
-        println!(
-            "TESTPILOT: elapsed simulation seconds={:.6}",
-            elapsed.as_secs_f64()
-        );
         for data_points in frame.data_points() {
             let source_value =
                 data_points
@@ -88,28 +84,6 @@ impl GaugeRuntime {
                     signal: data_points.signal.to_owned(),
                     source,
                 })?;
-            match data_points.next {
-                Some(next) => println!(
-                    "TESTPILOT: {} -> {} previous=({}, {}) next=({}, {}) source={} simulator={}",
-                    data_points.signal,
-                    data_points.variable,
-                    data_points.previous.time.as_secs_f64(),
-                    data_points.previous.value,
-                    next.time.as_secs_f64(),
-                    next.value,
-                    source_value,
-                    simulator_value
-                ),
-                None => println!(
-                    "TESTPILOT: {} -> {} final=({}, {}) hold source={} simulator={}",
-                    data_points.signal,
-                    data_points.variable,
-                    data_points.previous.time.as_secs_f64(),
-                    data_points.previous.value,
-                    source_value,
-                    simulator_value
-                ),
-            }
         }
         Ok(())
     }

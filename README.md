@@ -117,9 +117,10 @@ other timing modes are outside the validated MVP behavior.
 it to `0` and remains idle. Setting it to `1` loads the configuration and opens
 one read-only scenario cursor per injection. The MVP skips a full-file
 preflight pass and assumes the scenario is correctly formatted. Initialization
-reads the first two samples for every cursor; subsequent simulator frames read
-at most one additional row per cursor. Setting the LVAR back to `0` while
-running will request an abort once playback is implemented.
+reads the first two samples for every cursor. Subsequent simulator frames read
+forward until every cursor brackets the current scenario time or reaches EOF.
+Setting the LVAR back to `0` while running will request an abort once playback
+is implemented.
 
 While running, replay commands take precedence over local pilot controls. The
 simulator adapter must use an A32NX-compatible, verified input-bypass mechanism;
@@ -300,23 +301,19 @@ changes from exactly `0` to exactly `1`. On that transition, the gauge reads
 independent `scenario.csv` reader per injection, reads each header and first
 two samples, and logs the cursor count. The same `PreUpdate` logs
 `TESTPILOT: scenario cursors ready`, captures `E:SIMULATION TIME` as scenario
-time zero, and injects the first frame. On every subsequent `PreUpdate`, each cursor
-advances by at most one row when elapsed scenario time passes its next
-sample timestamp. The gauge prints elapsed simulator seconds, each injection's
-logical name and simulator variable, the previous and next `(time, value)` rows,
-the interpolated source value, and its affine-converted simulator value. A file
-or parsing failure resets
-the armed LVAR to `0` and terminates the gauge task without panicking. No
+time zero, and injects the first frame. On every subsequent `PreUpdate`, each
+cursor reads forward until it brackets elapsed scenario time or reaches EOF, so
+a late frame may consume multiple rows. A file or parsing failure resets the
+armed LVAR to `0` and terminates the gauge task without panicking. No
 full-file scenario validation runs in the MVP, and disarm transitions have no
 behavior.
 
 To validate incremental playback, run the installer, load the A32NX, and set
 `L:REPLAYER_ARMED` to `1` with an LVAR or calculator-code tool. Verify the
-console reports the cursor count followed by elapsed simulator seconds, the
-ready message, and one time-varying interpolation-row pair per configured
-injection on every frame. Each converted simulator value is written through
-legacy calculator code to its configured `K:` event or `L:` variable before it
-is logged. Telemetry recording is not yet implemented.
+console reports the cursor count and ready message, then verify the configured
+controls follow the scenario. Each converted simulator value is written through
+legacy calculator code to its configured `K:` event or `L:` variable. Telemetry
+recording is not yet implemented.
 
 ## A32NX MVP mappings
 

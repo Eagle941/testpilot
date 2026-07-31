@@ -24,10 +24,6 @@ pub const CONFIG_PATH: &str = "SimObjects/AirPlanes/FlyByWire_A320_NEO/replayer_
 /// Validated replay configuration in deterministic processing order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReplayConfig {
-    /// Parsed format version. This is always [`FORMAT_VERSION`].
-    pub format_version: u32,
-    /// Parsed aircraft target. This is always [`AIRCRAFT_TARGET`].
-    pub aircraft_target: String,
     /// Scenario CSV path exactly as specified by `input_file`.
     pub input_file: PathBuf,
     /// Injection definitions ordered by their numeric `inject.N` indexes.
@@ -61,8 +57,6 @@ impl ReplayConfig {
         let record = ReplayConfig::parse_recordings(raw.record)?;
 
         Ok(ReplayConfig {
-            format_version: raw.format_version,
-            aircraft_target: raw.aircraft_target,
             input_file: PathBuf::from(raw.input_file),
             inject,
             record,
@@ -394,8 +388,6 @@ variable = "A:AILERON POSITION"
             Err(error) => panic!("README configuration should parse: {error}"),
         };
 
-        assert_eq!(config.format_version, FORMAT_VERSION);
-        assert_eq!(config.aircraft_target, AIRCRAFT_TARGET);
         assert_eq!(config.input_file, PathBuf::from("scenario.csv"));
         assert_eq!(config.inject.len(), 2);
         assert_eq!(config.inject[0].name, "sidestick_pitch_position");

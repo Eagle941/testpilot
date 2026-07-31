@@ -131,8 +131,8 @@ impl ScenarioPlayback {
 
     /// Advances every signal cursor for the current elapsed scenario time.
     ///
-    /// Each cursor consumes at most one data row after initialization and
-    /// advances when `elapsed` passes its next row.
+    /// Each cursor reads forward until its samples bracket `elapsed`, or until
+    /// it reaches the end of its series.
     pub fn advance(&mut self, elapsed: Duration) -> Result<(), ScenarioError> {
         for cursor in &mut self.cursors {
             cursor.advance(elapsed)?;
@@ -142,19 +142,17 @@ impl ScenarioPlayback {
 
     /// Returns whether every signal cursor has passed its final sample.
     pub fn completed(&self) -> bool {
-        self.cursors.iter().all(|cursor| cursor.ended)
+        self.cursors.iter().all(|cursor| cursor.next.is_none())
     }
 
     /// Returns one bounding data-point pair per configured injection.
     pub fn interpolation_rows(&self) -> impl Iterator<Item = InterpolationRows<'_>> {
-        self.cursors.iter().filter_map(|cursor| {
-            Some(InterpolationRows {
-                signal: &cursor.signal,
-                variable: &cursor.variable,
-                previous: cursor.previous?,
-                next: cursor.next,
-                conversion: cursor.conversion,
-            })
+        self.cursors.iter().map(|cursor| InterpolationRows {
+            signal: &cursor.signal,
+            variable: &cursor.variable,
+            previous: cursor.previous,
+            next: cursor.next,
+            conversion: cursor.conversion,
         })
     }
 
@@ -170,16 +168,15 @@ impl ScenarioPlayback {
 /// position. It retains only the previous and next samples needed to
 /// interpolate the current simulator frame, keeping memory use independent of
 /// scenario duration. Once the reader reaches the final sample, it holds that
-/// value until every configured cursor has ended.
+/// value until every configured cursor has completed.
 struct SignalCursor {
     signal: String,
     variable: String,
     columns: ColumnPair,
     reader: Reader<File>,
-    previous: Option<Sample>,
+    previous: Sample,
     next: Option<Sample>,
     conversion: AffineRange,
-    ended: bool,
 }
 
 impl SignalCursor {
@@ -187,57 +184,65 @@ impl SignalCursor {
         let mut reader = ReaderBuilder::new().trim(Trim::All).from_path(path)?;
         let columns = find_column_indices(reader.headers()?, injection)?;
         let conversion = AffineRange::new(injection.source_range, injection.simulator_range)?;
+        let signal = injection.name.clone();
+        let previous = SignalCursor::required_sample(&mut reader, columns, &signal)?;
+        let next = Some(SignalCursor::required_sample(
+            &mut reader,
+            columns,
+            &signal,
+        )?);
 
-        let mut cursor = SignalCursor {
-            signal: injection.name.clone(),
+        Ok(SignalCursor {
+            signal,
             variable: injection.variable.clone(),
             columns,
             reader,
-            previous: None,
-            next: None,
+            previous,
+            next,
             conversion,
-            ended: false,
-        };
-        cursor.previous = Some(cursor.required_sample()?);
-        cursor.next = Some(cursor.required_sample()?);
-        Ok(cursor)
+        })
     }
 
     fn advance(&mut self, elapsed: Duration) -> Result<(), ScenarioError> {
-        if self.ended {
-            return Ok(());
-        }
-
-        if let Some(next) = self.next
-            && elapsed > next.time
-        {
-            self.previous = Some(next);
-            self.next = self.read_sample()?;
-            self.ended = self.next.is_none();
+        while let Some(next) = self.next {
+            if elapsed <= next.time {
+                break;
+            }
+            self.previous = next;
+            self.next = SignalCursor::read_sample(&mut self.reader, self.columns, &self.signal)?;
         }
         Ok(())
     }
 
-    fn required_sample(&mut self) -> Result<Sample, ScenarioError> {
-        self.read_sample()?
-            .ok_or_else(|| ScenarioError::MissingSamples {
-                signal: self.signal.clone(),
-            })
+    fn required_sample(
+        reader: &mut Reader<File>,
+        columns: ColumnPair,
+        signal: &str,
+    ) -> Result<Sample, ScenarioError> {
+        SignalCursor::read_sample(reader, columns, signal)?.ok_or_else(|| {
+            ScenarioError::MissingSamples {
+                signal: signal.to_owned(),
+            }
+        })
     }
 
-    fn read_sample(&mut self) -> Result<Option<Sample>, ScenarioError> {
+    fn read_sample(
+        reader: &mut Reader<File>,
+        columns: ColumnPair,
+        signal: &str,
+    ) -> Result<Option<Sample>, ScenarioError> {
         let mut record = StringRecord::new();
-        let has_record = self.reader.read_record(&mut record)?;
+        let has_record = reader.read_record(&mut record)?;
         if !has_record {
             return Ok(None);
         }
 
         let line = record.position().map(Position::line);
-        let time_text = record.get(self.columns.time_idx).unwrap_or_default();
-        let value_text = record.get(self.columns.value_idx).unwrap_or_default();
+        let time_text = record.get(columns.time_idx).unwrap_or_default();
+        let value_text = record.get(columns.value_idx).unwrap_or_default();
         if time_text.is_empty() != value_text.is_empty() {
             return Err(ScenarioError::HalfPopulatedPair {
-                signal: self.signal.clone(),
+                signal: signal.to_owned(),
                 line,
             });
         }
@@ -245,7 +250,7 @@ impl SignalCursor {
             return Ok(None);
         }
 
-        let time = parse_time(time_text, &self.signal, line)?;
+        let time = parse_time(time_text, signal, line)?;
         let value = value_text.parse::<f64>()?;
         Ok(Some(Sample::new(time, value)?))
     }
