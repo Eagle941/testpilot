@@ -16,6 +16,9 @@ toml = "0.8"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 msfs = { git = "https://github.com/flybywiresim/msfs-rs", branch = "main" }
 
+[lints.clippy]
+all = "deny"
+
 [profile.release]
 lto = true
 strip = true

@@ -9,7 +9,7 @@ if ! command -v wasm-opt >/dev/null 2>&1; then
     exit 1
 fi
 
-cargo build --release --target wasm32-wasip1
+cargo build --locked --release --target wasm32-wasip1
 
 wasm-opt \
     -O1 \
