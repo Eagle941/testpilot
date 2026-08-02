@@ -1,0 +1,80 @@
+name: CI
+
+on:
+    push:
+        branches: [master]
+    pull_request:
+
+permissions:
+  contents: read
+
+env:
+    CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Cache Rust build data
+        uses: Swatinem/rust-cache@v2
+        with:
+            shared-key: "checks-cache"
+            cache-all-crates: "true"
+            cache-directories: |
+                ~/.cargo/registry/index/
+                ~/.cargo/registry/cache/
+                ~/.cargo/git/db/
+                target/
+      - name: Install Rust
+        run: |
+            curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain 1.93.0 --no-update-default-toolchain
+            . "$HOME/.cargo/env"
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Check Rustdoc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --no-deps --all-features
+      - name: Run tests
+        run: cargo test --locked
+
+  # Commented because MSFS_SDK is missing.
+  # wasm:
+  #   name: MSFS WASM build
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Check out repository
+  #       uses: actions/checkout@v7
+  #     - name: Cache Rust build data
+  #       uses: Swatinem/rust-cache@v2
+  #       with:
+  #           shared-key: "build-cache"
+  #           cache-all-crates: "true"
+  #           cache-directories: |
+  #               ~/.cargo/registry/index/
+  #               ~/.cargo/registry/cache/
+  #               ~/.cargo/git/db/
+  #               target/
+  #     - name: Install Rust
+  #       run: |
+  #           curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain 1.93.0 --target wasm32-wasip1 --no-update-default-toolchain
+  #           . "$HOME/.cargo/env"
+  #     - name: Run WASM Clippy
+  #       run: cargo clippy --locked --target wasm32-wasip1 --all-features -- -D warnings
+  #     - name: Install Binaryen
+  #       run: |
+  #         sudo apt-get update
+  #         sudo apt-get install --yes binaryen
+  #     - name: Build packaged WASM module
+  #       run: sh scripts/build-wasm.sh
+  #     - name: Upload WASM artifact
+  #       uses: actions/upload-artifact@v4
+  #       with:
+  #         name: testpilot-msfs-wasm
+  #         path: target/wasm32-wasip1/release/testpilot-msfs.wasm
+  #         if-no-files-found: error

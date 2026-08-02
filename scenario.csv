@@ -1,0 +1,6 @@
+sidestick_pitch_position.time,sidestick_pitch_position.value,sidestick_roll_position.time,sidestick_roll_position.value
+0.0,0.000000,0.0,0.000000
+5.0,25.0,20.0,0.0
+15.0,-25.0,25.0,25.0
+20.0,0.0,35.0,-25.0
+,,40.0,0.0

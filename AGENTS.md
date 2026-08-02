@@ -40,9 +40,7 @@ Record these aircraft-response signals:
 - elevator position;
 - aileron position.
 
-These are logical scenario and telemetry names, not arbitrary simulator variable names. Before implementing the simulator adapter, determine and document each signal's precise semantics, A32NX/MSFS interface, engineering unit, sign convention, valid range, and update behavior. The `yourcontrols` A32NX mapping is an accepted source for these straightforward MVP mappings; cross-check current FlyByWire A32NX source when the mapping is ambiguous, unavailable through `msfs-rs`, or contradicted by current behavior.
-
-The MVP configuration must select from this supported signal set and reject unsupported names. Keep the core data model extensible, but do not add speculative simulator mappings before this end-to-end path works.
+These are logical scenario and telemetry names, not simulator variable names. Keep configured injection and recording signal names as strings so the core data model is not restricted to predefined enums. Each `inject.N` section also contains a `variable` string with its prefixed simulator destination, such as `K:AXIS_ELEVATOR_SET` or `L:SOME_LOCAL_VARIABLE`. Before implementing the simulator adapter, determine and document each signal's precise semantics, A32NX/MSFS interface, engineering unit, sign convention, valid range, and update behavior. The `yourcontrols` A32NX mapping is an accepted source for these straightforward MVP mappings; cross-check current FlyByWire A32NX source when the mapping is ambiguous, unavailable through `msfs-rs`, or contradicted by current behavior. Do not add speculative simulator mappings before this end-to-end path works.
 
 ## Scope and Compatibility
 
@@ -91,15 +89,15 @@ Use an explicit, documented configuration format. The configuration must define:
 - the input time-series file;
 - the parameters and paired time/value columns to inject;
 - the aircraft-response parameters to record;
-- each injected parameter's source engineering unit/range and simulator engineering unit/range;
-- each recorded parameter's engineering unit and supported range;
+- each injected parameter's logical name, prefixed simulator `variable`, paired CSV columns, source range, and simulator range;
+- each recorded parameter's logical name and prefixed simulator `variable`;
 - optional metadata needed to reproduce the test.
 
 Do not add configuration fields for behavior fixed by the format or supported signal catalog. In particular, the MVP configuration does not contain a time unit, time origin, telemetry section, parameter type, or interpolation parameter. Document fixed time-unit, time-origin, signal-type, interpolation, telemetry sampling, and sampling-order semantics in the format specification.
 
-For the MVP, load configuration from the hardcoded `/work/replay/config.toml` path and resolve relative input paths from `/work/replay/`. Treat this location as provisional until validated in the MSFS WASM sandbox with the selected `msfs-rs` revision. The configuration `format_version` governs both the TOML and scenario CSV contract.
+For the MVP, load configuration from the hardcoded package-relative `SimObjects/AirPlanes/FlyByWire_A320_NEO/replayer_config.toml` path and resolve relative input paths from `SimObjects/AirPlanes/FlyByWire_A320_NEO/`. The configuration filename is lowercase. The configuration `format_version` governs both the TOML and scenario CSV contract.
 
-Reject duplicate, unknown, unsupported, or conflicting parameter selections. Do not require every time-series column to be injected or every supported aircraft parameter to be recorded.
+Reject duplicate or conflicting parameter selections, but do not restrict configured injection or recording names to predefined enums. Validate simulator identifiers and interfaces at the adapter boundary. Do not require every time-series column to be injected or every supported aircraft parameter to be recorded.
 
 ## Scenario Input
 
@@ -109,7 +107,7 @@ Use an explicit, documented text format such as CSV unless the existing code est
 - fixed time unit and time origin;
 - signal/parameter names and column order;
 - value types;
-- engineering units;
+- numeric scales and supported ranges;
 - how each parameter's `(time, value)` tuples are represented and associated with that parameter;
 - optional metadata needed to reproduce the test.
 
@@ -117,28 +115,17 @@ Every data point must carry an explicit time value in scenario-relative seconds.
 
 For independently sampled series, use a standard rectangular CSV with adjacent `<signal>.time` and `<signal>.value` columns for each parameter. Values in different pairs on the same row are associated by sample ordinal only and need not have the same timestamp. Keep each pair densely populated from the first data row and permit only trailing empty pairs when series lengths differ. Require both fields of a pair to be present or both empty. Do not introduce custom blocks or mixed row types that make ordinary batch reads difficult.
 
-Do not impose a fixed duration, row-count, or file-size limit. Design parsing and playback so scenarios can use the available disk capacity without requiring proportional RAM. A streaming preflight validation pass followed by a streaming playback pass is acceptable when supported by the MSFS WASM file APIs.
+Do not impose a fixed duration, row-count, or file-size limit. Design parsing and playback so scenarios can use the available disk capacity without requiring proportional RAM. The MVP skips a full-file preflight pass and assumes the scenario is correctly formatted.
 
-Validation must detect and report:
-
-- malformed rows or unsupported format versions;
-- missing, duplicate, reused, half-populated, or internally sparse time/value columns;
-- non-finite numeric values;
-- non-finite, negative, out-of-range, duplicate, or non-increasing timestamps within a parameter's series;
-- arithmetic overflow when parsing timestamps or calculating durations;
-- unknown parameters;
-- invalid units;
-- values outside safe or supported ranges.
-
-Errors should include useful context such as the file, line, column, timestamp, or signal name. Do not silently clamp, skip, or reinterpret invalid data unless that behavior is explicitly part of the format and is reported.
+Open the scenario independently once per configured injection so each signal has its own sequential file position and bounded two-sample lookahead. During initialization on the arm frame, read each cursor's CSV header and first two data rows, then interpolate and inject the first frame at scenario time zero. On each subsequent frame, read each cursor forward until its samples bracket the current scenario time or the series reaches EOF; this may consume multiple rows after a late frame. Never load the complete scenario into memory. File access, CSV parsing, or numeric parsing errors encountered during playback must include useful file, line, column, or signal context and terminate safely without panicking.
 
 ## Input Injection and Safety
 
-- Represent supported signals through an explicit mapping from scenario names to MSFS/A32NX interfaces, value types, units, and valid ranges.
+- Represent each configured injection through its logical scenario name, prefixed simulator `variable`, value type, and valid ranges. The simulator adapter selects the appropriate `msfs-rs` operation from the identifier prefix.
 - Keep conversions at the simulator boundary and test them independently.
-- For each continuous injected signal, linearly interpolate in source units, then apply the configured affine range conversion from source range `[x, y]` to simulator range `[a, b]`: `a + (value - x) * (b - a) / (y - x)`.
+- For each continuous injected signal, linearly interpolate on its source scale, then apply the configured affine range conversion from source range `[x, y]` to simulator range `[a, b]`: `a + (value - x) * (b - a) / (y - x)`.
 - Require finite, strictly ordered range endpoints. Reject source values outside the configured source range and simulator ranges outside the signal catalog's safe range; do not silently clamp them.
-- Do not inject arbitrary variable names directly from an untrusted scenario file.
+- Read simulator identifiers only from the trusted replay configuration, never from scenario CSV column names or values.
 - Before playback, verify that required simulator/A32NX interfaces can be resolved where the API permits it.
 - Stop or fail safely when a required injection fails. Do not continue a test while presenting it as valid.
 - Arm and start a run by setting the library-owned `L:REPLAYER_ARMED` local variable to `1`. Setting it to `0` while running requests an abort. Initialize and reset it to `0` while idle and after any terminal run state. Reject overlapping runs.
@@ -167,7 +154,10 @@ Output must be a machine-readable CSV saved in the same directory as the input s
 ## Reliability and Error Handling
 
 - Do not use `unwrap`, `expect`, or panics for recoverable runtime failures in simulator-facing code.
-- Propagate errors with actionable context and report them through the logging/error facilities available in `msfs-rs`.
+- Domain and library functions must return concrete `thiserror` enums. Use `#[from]` and `?` for underlying errors where direct conversion is sufficient, and add structured variants when file, signal, line, column, or operation details are required.
+- Convert typed errors to `anyhow::Error` only at application or orchestration boundaries that combine unrelated error domains. Do not use `anyhow!`, `bail!`, `Context`, or `with_context`; encode actionable context in typed error variants instead.
+- Do not wrap an error inside another variant of the same error enum merely to add context. Use `map_err` only when converting to a different error layer or adding structured domain information.
+- Report terminal errors through the logging/error facilities available in `msfs-rs`.
 - On a terminal failure, perform best-effort control release, flush and close but do not delete partial telemetry, then return from the WASM event loop/module entry point without panicking.
 - Model the run lifecycle explicitly, for example: idle, loading, ready, running, stopping, completed, aborted, and failed.
 - Make start, stop, and cleanup operations idempotent where practical.
@@ -205,7 +195,7 @@ Use the commands supported by the repository once configured. Typical checks are
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test
-cargo build --target wasm32-wasip1
+sh scripts/build-wasm.sh
 ```
 
 Do not report simulator or A32NX compatibility based only on a successful host build. WASM compilation verifies the target build; actual compatibility requires an in-simulator test against the stated A32NX version.

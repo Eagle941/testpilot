@@ -1,0 +1,35 @@
+format_version = 1
+aircraft_target = "flybywire-a32nx"
+input_file = "scenario.csv"
+
+[inject.0]
+name = "sidestick_pitch_position"
+variable = "K:AXIS_ELEVATOR_SET"
+time_column = "sidestick_pitch_position.time"
+value_column = "sidestick_pitch_position.value"
+source_range = [-25.0, 25.0]
+simulator_range = [-16383.0, 16384.0]
+
+[inject.1]
+name = "sidestick_roll_position"
+variable = "K:AXIS_AILERONS_SET"
+time_column = "sidestick_roll_position.time"
+value_column = "sidestick_roll_position.value"
+source_range = [-25.0, 25.0]
+simulator_range = [-16383.0, 16384.0]
+
+[record.0]
+name = "pitch"
+variable = "A:PLANE PITCH DEGREES"
+
+[record.1]
+name = "roll"
+variable = "A:PLANE BANK DEGREES"
+
+[record.2]
+name = "elevator_position"
+variable = "A:ELEVATOR POSITION"
+
+[record.3]
+name = "aileron_position"
+variable = "A:AILERON POSITION"

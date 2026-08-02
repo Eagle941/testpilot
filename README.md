@@ -1,12 +1,16 @@
-# Replay
+# TestPilot
 
-`replay` is a Rust WebAssembly library for automated flight testing in
+`testpilot` is a Rust WebAssembly library for automated flight testing in
 Microsoft Flight Simulator 2020, initially targeting the FlyByWire A32NX.
 It replays timestamped flight-control inputs at simulator frame rate and
 streams the configured aircraft response to a telemetry file.
 
-The project is currently at the specification stage. The configuration and
-file formats below define the intended MVP contract; their parsers are not yet
+The simulator-independent core currently implements strict replay
+configuration parsing, incremental per-signal scenario cursors, optional
+streaming scenario validation, irregular-time linear interpolation, and affine
+input-range conversion. It also provides an MSFS-compatible WASM build and a
+`testpilot` gauge entry point with simulator-clock playback and calculator-code
+input injection. Input interception and telemetry recording remain to be
 implemented.
 
 ## MVP scope
@@ -23,8 +27,12 @@ It records these responses:
 - `elevator_position`
 - `aileron_position`
 
-Only these logical names are accepted by the MVP. Configuration files cannot
-supply arbitrary simulator variables or events.
+Injection and recording names are stored as arbitrary logical strings, so the
+core format is not coupled to predefined signal enums. Each entry also provides
+a `variable` string containing its prefixed simulator identifier, such as
+`K:AXIS_ELEVATOR_SET`, `A:PLANE PITCH DEGREES`, or `L:SOME_LOCAL_VARIABLE`.
+CSV columns remain logical source-data names and do not contain simulator
+identifiers.
 
 ## MVP configuration
 
@@ -37,52 +45,52 @@ input_file = "scenario.csv"
 
 [inject.0]
 name = "sidestick_pitch_position"
+variable = "K:AXIS_ELEVATOR_SET"
 time_column = "sidestick_pitch_position.time"
 value_column = "sidestick_pitch_position.value"
-source_unit = "percent"
-source_range = [-100.0, 100.0]
-simulator_unit = "normalized"
-simulator_range = [-1.0, 1.0]
+source_range = [-25.0, 25.0]
+simulator_range = [-16383.0, 16384.0]
 
 [inject.1]
 name = "sidestick_roll_position"
+variable = "K:AXIS_AILERONS_SET"
 time_column = "sidestick_roll_position.time"
 value_column = "sidestick_roll_position.value"
-source_unit = "percent"
-source_range = [-100.0, 100.0]
-simulator_unit = "normalized"
-simulator_range = [-1.0, 1.0]
+source_range = [-25.0, 25.0]
+simulator_range = [-16383.0, 16384.0]
 
 [record.0]
 name = "pitch"
-unit = "degrees"
-range = [-180.0, 180.0]
+variable = "A:PLANE PITCH DEGREES"
 
 [record.1]
 name = "roll"
-unit = "degrees"
-range = [-180.0, 180.0]
+variable = "A:PLANE BANK DEGREES"
 
 [record.2]
 name = "elevator_position"
-unit = "position_16k"
-range = [-16384.0, 16384.0]
+variable = "A:ELEVATOR POSITION"
 
 [record.3]
 name = "aileron_position"
-unit = "position_16k"
-range = [-16384.0, 16384.0]
+variable = "A:AILERON POSITION"
 ```
 
-`inject` and `record` section indexes are zero-based, contiguous, and define
-stable processing and output-column order. Missing indexes, duplicate signal
-names, and reused time or value columns are invalid.
+The repository provides this default as `replayer_config.toml`. The installation
+script copies it to the hardcoded package-relative configuration path.
 
-For the MVP, the module reads `/work/replay/config.toml`. Relative
-`input_file` paths are resolved from `/work/replay/`. This hardcoded location
-is provisional and must be validated in MSFS with the selected `msfs-rs`
-revision before compatibility is claimed. `format_version` governs both the
-TOML configuration and its scenario CSV contract.
+`inject` and `record` section indexes are zero-based, contiguous, and define
+stable processing and output-column order. Missing indexes, empty or duplicate
+signal names, and reused time or value columns are invalid. The required
+`variable` field preserves its simulator prefix so the adapter can select the
+appropriate `msfs-rs` interface; the parser stores the identifier without
+interpreting it.
+
+For the MVP, the module reads the package-relative, lowercase filename
+`SimObjects/AirPlanes/FlyByWire_A320_NEO/replayer_config.toml`. Relative
+`input_file` paths are resolved from the same
+`SimObjects/AirPlanes/FlyByWire_A320_NEO/` directory. `format_version` governs
+both the TOML configuration and its scenario CSV contract.
 
 The MVP fixes behavior that does not need to vary by configuration:
 
@@ -106,10 +114,13 @@ that MSFS is never paused during a run and that simulation rate remains `1x`;
 other timing modes are outside the validated MVP behavior.
 
 `L:REPLAYER_ARMED` is the library-owned arming variable. The module initializes
-it to `0` and remains idle. Setting it to `1` loads and validates the configured
-scenario, then starts the run. Setting it back to `0` while running requests an
-abort. The module rejects an overlapping run and resets the variable to `0`
-when the run ends.
+it to `0` and remains idle. Setting it to `1` loads the configuration and opens
+one read-only scenario cursor per injection. The MVP skips a full-file
+preflight pass and assumes the scenario is correctly formatted. Initialization
+reads the first two samples for every cursor. Subsequent simulator frames read
+forward until every cursor brackets the current scenario time or reaches EOF.
+Setting the LVAR back to `0` while running will request an abort once playback
+is implemented.
 
 While running, replay commands take precedence over local pilot controls. The
 simulator adapter must use an A32NX-compatible, verified input-bypass mechanism;
@@ -155,16 +166,21 @@ batch tools can read the complete table directly. For example, a tool can
 select one signal's two columns, drop trailing empty rows, and obtain an
 `N × 2` array without parsing custom blocks or mixed record types.
 
+The repository's default `scenario.csv` demonstrates unequal series lengths.
+Sidestick pitch has four samples ending at 20 seconds, while sidestick roll has
+five samples ending at 40 seconds. The pitch pair is empty on the final CSV row.
+
 For each configured signal:
 
 - configured time and value columns must exist exactly once;
 - timestamps must be finite, non-negative, and strictly increasing;
 - values must be finite and within the signal's configured `source_range`;
-- the first point must be at `0` seconds;
-- all injected signals must have the same final timestamp for the MVP.
+- the first point must be at `0` seconds.
 
 At every MSFS frame, each signal is linearly interpolated between its two
-surrounding points using their actual timestamps. The interpolated source value
+surrounding points using their actual timestamps. When a shorter series reaches
+its final sample, that value is held while the remaining series continue. The
+replay completes after every configured series reaches its final sample. The interpolated source value
 `v` in `source_range = [x, y]` is then converted to the simulator range
 `[a, b]` with:
 
@@ -173,12 +189,12 @@ simulator_value = a + (v - x) * (b - a) / (y - x)
 ```
 
 All range endpoints must be finite and each lower endpoint must be less than
-its upper endpoint. The simulator range must remain within the safe range for
-the supported logical signal. Invalid or out-of-range values are rejected, not
-clamped. Interpolation is performed before conversion so scenario values and
-validation remain in the documented source unit. Logical source signs are
-consistent with the corresponding MSFS/A32NX output signs; low-level event sign
-or axis conversions are handled only by the simulator adapter.
+its upper endpoint. For the MVP axis events, `simulator_range` must remain
+within `[-16383, 16384]` and expresses the raw value written to MSFS. Invalid or
+out-of-range values are rejected, not clamped. Interpolation is performed before
+conversion so scenario values and validation remain in the configured source
+scale. The simulator adapter writes the converted value directly without
+additional scaling or sign conversion.
 
 The final point is injected exactly, then the scenario completes. Source files
 are streamed with bounded lookahead so duration is limited by available
@@ -204,17 +220,112 @@ individual left/right A32NX surfaces. A row is sampled after input injection on
 every MSFS frame and is streamed incrementally with deterministic numeric
 formatting and bounded buffering.
 
+## MSFS WASM build
+
+The build configuration is aligned with the FlyByWire aircraft repository
+branch `fs2020-master` at commit
+`81461a72be047a9e91e1b1d647ef01cae86565ad`. In particular, this project uses:
+
+- Rust `1.93.0` with the `wasm32-wasip1` target;
+- a `cdylib` artifact and release LTO/stripping;
+- the A32NX WASM target features, linker mode, and exported runtime symbols;
+- the MSFS SDK WASI sysroot;
+- `msfs-rs` from its `main` branch, pinned by `Cargo.lock` to
+  `2f697b9aac9fa3c00474f901a7f7ee4218cf534b`.
+
+The crate emits only a `cdylib`, matching the A32NX Rust gauge build. Adding an
+`rlib` crate type to the same WASM build prevents the required dead-code
+elimination and retains unsupported SDK imports, causing MSFS module
+instantiation to fail. Simulator-independent unit tests still run on the host
+with `cargo test`.
+
+The linker paths in `.cargo/config.toml` assume the MSFS SDK is installed at
+`C:\MSFS SDK`; no `build.rs` or Docker container is required. Developers with
+the SDK in another location must update the two SDK paths in that file.
+
+Build and package the module natively with:
+
+```sh
+sh scripts/build-wasm.sh
+```
+
+The script first runs `cargo build --release --target wasm32-wasip1`, then
+post-processes the raw module with the same A32NX systems-library flags:
+
+```sh
+wasm-opt -O1 --signext-lowering --enable-bulk-memory \
+  --enable-nontrapping-float-to-int
+```
+
+The raw Cargo artifact remains at
+`target/wasm32-wasip1/release/testpilot.wasm`. The deployable MVP artifact is
+`target/wasm32-wasip1/release/testpilot-msfs.wasm`. `wasm-opt` must be available
+on `PATH`. Host-side `cargo test` does not link against the MSFS SDK.
+
+A successful build and post-processing pass verifies the WASM structure, SDK
+linkage, and A32NX-compatible lowering, not A32NX behavior. Compatibility still
+requires an in-simulator test against the referenced A32NX branch/version.
+
+## A32NX smoke-test installation
+
+Close MSFS, then build and install the current gauge into the local A32NX
+Community package from Git Bash:
+
+```sh
+sh scripts/install.sh /path/to/flybywire-aircraft-a320-neo
+```
+
+The required argument is the FlyByWire A32NX Community package directory. The
+script performs these operations:
+
+1. Runs `scripts/build-wasm.sh`.
+2. Overwrites the aircraft panel's `testpilot.wasm` with the deployable artifact.
+3. Copies the repository's `replayer_config.toml` and minimal `scenario.csv`
+   into the aircraft directory.
+4. Adds the `htmlgauge04` entry under `[VCockpit17]` if it is absent.
+5. Updates or adds the configuration, scenario, `panel.cfg`, and `testpilot.wasm` entries in
+   package-root `layout.json`, including exact byte sizes and Windows FILETIME
+   timestamps.
+
+The operation is idempotent for the expected A32NX package structure: rerunning
+it replaces the module and refreshes the same gauge and layout entries. Python
+must be available on `PATH`. This provisional script intentionally performs no
+backups, conflict checks, or rollback, and it does not launch MSFS or modify
+`manifest.json`.
+
+The current smoke test initializes `L:REPLAYER_ARMED` to `0` and reads it on
+every MSFS `PreUpdate` event. The simulator-independent `ArmState` struct owns
+the previous sample, and its `start` method returns `true` only when the value
+changes from exactly `0` to exactly `1`. On that transition, the gauge reads
+`SimObjects/AirPlanes/FlyByWire_A320_NEO/replayer_config.toml`, opens one
+independent `scenario.csv` reader per injection, reads each header and first
+two samples, and logs the cursor count. The same `PreUpdate` logs
+`TESTPILOT: scenario cursors ready`, captures `E:SIMULATION TIME` as scenario
+time zero, and injects the first frame. On every subsequent `PreUpdate`, each
+cursor reads forward until it brackets elapsed scenario time or reaches EOF, so
+a late frame may consume multiple rows. A file or parsing failure resets the
+armed LVAR to `0` and terminates the gauge task without panicking. No
+full-file scenario validation runs in the MVP, and disarm transitions have no
+behavior.
+
+To validate incremental playback, run the installer, load the A32NX, and set
+`L:REPLAYER_ARMED` to `1` with an LVAR or calculator-code tool. Verify the
+console reports the cursor count and ready message, then verify the configured
+controls follow the scenario. Each converted simulator value is written through
+legacy calculator code to its configured `K:` event or `L:` variable. Telemetry
+recording is not yet implemented.
+
 ## A32NX MVP mappings
 
 These adapter mappings are based on the YourControls FS2020 A32NX definition,
 version `0.12.3`, from repository tree
-`4e32af561a82f1f998fbe4b0b0db0efe2642cdf2`. The logical configuration never
-contains these low-level identifiers.
+`4e32af561a82f1f998fbe4b0b0db0efe2642cdf2`. The default configuration stores
+these low-level identifiers in each injection's `variable` field.
 
 | Logical signal | Direction | MSFS/A32NX interface | Native unit/conversion |
 | --- | --- | --- | --- |
-| `sidestick_pitch_position` | inject | `K:AXIS_ELEVATOR_SET`; readback `L:A32NX_SIDESTICK_POSITION_Y` | normalized `[-1, 1]`; event value = converted simulator value × `-16384` |
-| `sidestick_roll_position` | inject | `K:AXIS_AILERONS_SET`; readback `L:A32NX_SIDESTICK_POSITION_X` | normalized `[-1, 1]`; event value = converted simulator value × `-16384` |
+| `sidestick_pitch_position` | inject | `K:AXIS_ELEVATOR_SET`; readback `L:A32NX_SIDESTICK_POSITION_Y` | configured raw axis value in `[-16383, 16384]`, written directly to the event |
+| `sidestick_roll_position` | inject | `K:AXIS_AILERONS_SET`; readback `L:A32NX_SIDESTICK_POSITION_X` | configured raw axis value in `[-16383, 16384]`, written directly to the event |
 | `pitch` | record | `A:PLANE PITCH DEGREES` | degrees |
 | `roll` | record | `A:PLANE BANK DEGREES` | degrees |
 | `elevator_position` | record | `A:ELEVATOR POSITION` | `Position 16k` |
