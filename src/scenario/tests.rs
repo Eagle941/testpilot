@@ -48,8 +48,11 @@ fn validate(body: &str) -> Result<ScenarioSummary, ScenarioError> {
 
 #[test]
 fn validates_default_unequal_length_scenario() {
-    let summary = validate_scenario(include_bytes!("../../scenario.csv").as_slice(), &config())
-        .unwrap_or_else(|error| panic!("default scenario rejected: {error}"));
+    let summary = validate_scenario(
+        include_bytes!("../../example/scenario.csv").as_slice(),
+        &config(),
+    )
+    .unwrap_or_else(|error| panic!("default scenario rejected: {error}"));
 
     assert_eq!(summary.duration, time(40.0));
     assert_eq!(summary.signals[0].sample_count, 4);
@@ -195,7 +198,7 @@ fn initializes_rows_and_catches_up_across_multiple_intervals() {
 
 #[test]
 fn advances_and_holds_unequal_length_series() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("scenario.csv");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("example/scenario.csv");
     let mut playback = ScenarioPlayback::new(path, &config())
         .unwrap_or_else(|error| panic!("failed to open default scenario: {error:#}"));
 

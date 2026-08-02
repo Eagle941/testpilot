@@ -372,7 +372,7 @@ variable = "A:AILERON POSITION"
 
     #[test]
     fn parses_default_configuration_file() {
-        match parse_config(include_str!("../replayer_config.toml")) {
+        match parse_config(include_str!("../example/replayer_config.toml")) {
             Ok(config) => {
                 assert_eq!(config.inject.len(), 2);
                 assert_eq!(config.record.len(), 4);

@@ -76,8 +76,9 @@ name = "aileron_position"
 variable = "A:AILERON POSITION"
 ```
 
-The repository provides this default as `replayer_config.toml`. The installation
-script copies it to the hardcoded package-relative configuration path.
+The repository provides this default as `example/replayer_config.toml`. The
+installation script copies it to the hardcoded package-relative configuration
+path.
 
 `inject` and `record` section indexes are zero-based, contiguous, and define
 stable processing and output-column order. Missing indexes, empty or duplicate
@@ -166,7 +167,7 @@ batch tools can read the complete table directly. For example, a tool can
 select one signal's two columns, drop trailing empty rows, and obtain an
 `N × 2` array without parsing custom blocks or mixed record types.
 
-The repository's default `scenario.csv` demonstrates unequal series lengths.
+The repository's default `example/scenario.csv` demonstrates unequal series lengths.
 Sidestick pitch has four samples ending at 20 seconds, while sidestick roll has
 five samples ending at 40 seconds. The pitch pair is empty on the final CSV row.
 
@@ -280,8 +281,8 @@ script performs these operations:
 
 1. Runs `scripts/build-wasm.sh`.
 2. Overwrites the aircraft panel's `testpilot.wasm` with the deployable artifact.
-3. Copies the repository's `replayer_config.toml` and minimal `scenario.csv`
-   into the aircraft directory.
+3. Copies `example/replayer_config.toml` and `example/scenario.csv` into the
+   aircraft directory.
 4. Adds the `htmlgauge04` entry under `[VCockpit17]` if it is absent.
 5. Updates or adds the configuration, scenario, `panel.cfg`, and `testpilot.wasm` entries in
    package-root `layout.json`, including exact byte sizes and Windows FILETIME
