@@ -69,6 +69,15 @@ pub enum ConfigError {
     #[error("variable at record.{index} must not be empty")]
     EmptyRecordingVariable { index: usize },
 
+    #[error("unit at record.{index} is required for A: variables")]
+    MissingRecordingUnit { index: usize },
+
+    #[error("unit at record.{index} must not be empty")]
+    EmptyRecordingUnit { index: usize },
+
+    #[error("unit at record.{index} is only valid for A: variables, got `{variable}`")]
+    UnexpectedRecordingUnit { index: usize, variable: String },
+
     #[error("duplicate recording signal `{name}` at record.{index}")]
     DuplicateRecordingSignal { index: usize, name: String },
 }

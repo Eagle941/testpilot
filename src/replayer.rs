@@ -183,6 +183,7 @@ simulator_range = [-1.0, 1.0]
 [record.0]
 name = "pitch"
 variable = "A:PLANE PITCH DEGREES"
+unit = "radians"
 "#,
             )
             .unwrap_or_else(|error| panic!("failed to write fixture config: {error}"));

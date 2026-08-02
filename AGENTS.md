@@ -90,10 +90,10 @@ Use an explicit, documented configuration format. The configuration must define:
 - the parameters and paired time/value columns to inject;
 - the aircraft-response parameters to record;
 - each injected parameter's logical name, prefixed simulator `variable`, paired CSV columns, source range, and simulator range;
-- each recorded parameter's logical name and prefixed simulator `variable`;
+- each recorded parameter's logical name, prefixed simulator `variable`, and an MSFS `unit` when the variable uses the `A:` prefix;
 - optional metadata needed to reproduce the test.
 
-Do not add configuration fields for behavior fixed by the format or supported signal catalog. In particular, the MVP configuration does not contain a time unit, time origin, telemetry section, parameter type, or interpolation parameter. Document fixed time-unit, time-origin, signal-type, interpolation, telemetry sampling, and sampling-order semantics in the format specification.
+Do not add configuration fields for behavior fixed by the format or supported signal catalog. In particular, the MVP configuration does not contain a scenario time unit, time origin, telemetry section, parameter type, or interpolation parameter. Document fixed time-unit, time-origin, signal-type, interpolation, telemetry sampling, and sampling-order semantics in the format specification.
 
 For the MVP, load configuration from the hardcoded package-relative `SimObjects/AirPlanes/FlyByWire_A320_NEO/replayer_config.toml` path and resolve relative input paths from `SimObjects/AirPlanes/FlyByWire_A320_NEO/`. The configuration filename is lowercase. The configuration `format_version` governs both the TOML and scenario CSV contract.
 

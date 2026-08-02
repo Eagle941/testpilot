@@ -62,18 +62,22 @@ simulator_range = [-16383.0, 16384.0]
 [record.0]
 name = "pitch"
 variable = "A:PLANE PITCH DEGREES"
+unit = "radians"
 
 [record.1]
 name = "roll"
 variable = "A:PLANE BANK DEGREES"
+unit = "radians"
 
 [record.2]
 name = "elevator_position"
 variable = "A:ELEVATOR POSITION"
+unit = "position"
 
 [record.3]
 name = "aileron_position"
 variable = "A:AILERON POSITION"
+unit = "position"
 ```
 
 The repository provides this default as `example/replayer_config.toml`. The
@@ -84,8 +88,8 @@ path.
 stable processing and output-column order. Missing indexes, empty or duplicate
 signal names, and reused time or value columns are invalid. The required
 `variable` field preserves its simulator prefix so the adapter can select the
-appropriate `msfs-rs` interface; the parser stores the identifier without
-interpreting it.
+appropriate `msfs-rs` interface. Each recorded `A:` variable also requires a
+non-empty `unit`; units are rejected for other recording prefixes.
 
 For the MVP, the module reads the package-relative, lowercase filename
 `SimObjects/AirPlanes/FlyByWire_A320_NEO/replayer_config.toml`. Relative
