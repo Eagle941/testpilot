@@ -8,8 +8,8 @@ panel="$aircraft/panel"
 
 sh scripts/build-wasm.sh
 cp -f target/wasm32-wasip1/release/testpilot-msfs.wasm "$panel/testpilot.wasm"
-cp -f replayer_config.toml "$aircraft/replayer_config.toml"
-cp -f scenario.csv "$aircraft/scenario.csv"
+cp -f example/replayer_config.toml "$aircraft/replayer_config.toml"
+cp -f example/scenario.csv "$aircraft/scenario.csv"
 
 python - "$package" <<'PY'
 import json
