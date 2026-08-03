@@ -61,14 +61,6 @@ jobs:
                 ~/.cargo/registry/cache/
                 ~/.cargo/git/db/
                 target/
-      - name: Install Rust
-        run: |
-            curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain 1.93.0 --target wasm32-wasip1 --no-update-default-toolchain
-            . "$HOME/.cargo/env"
-      - name: Install Binaryen
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes binaryen
       # - name: Run WASM Clippy
       #   run: cargo clippy --locked --target wasm32-wasip1 --all-features -- -D warnings
       - name: Build packaged WASM module

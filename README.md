@@ -45,16 +45,12 @@ input_file = "scenario.csv"
 [inject.0]
 name = "sidestick_pitch_position"
 variable = "K:AXIS_ELEVATOR_SET"
-time_column = "sidestick_pitch_position.time"
-value_column = "sidestick_pitch_position.value"
 source_range = [-25.0, 25.0]
 simulator_range = [-16383.0, 16384.0]
 
 [inject.1]
 name = "sidestick_roll_position"
 variable = "K:AXIS_AILERONS_SET"
-time_column = "sidestick_roll_position.time"
-value_column = "sidestick_roll_position.value"
 source_range = [-25.0, 25.0]
 simulator_range = [-16383.0, 16384.0]
 
@@ -84,11 +80,13 @@ installation script copies it to `/work/replayer_config.toml` together with the
 default scenario.
 
 `inject` and `record` section indexes are zero-based, contiguous, and define
-stable processing and output-column order. Missing indexes, empty or duplicate
-signal names, and reused time or value columns are invalid. The required
-`variable` field preserves its simulator prefix so the adapter can select the
-appropriate `msfs-rs` interface. Each recorded `A:` variable also requires a
-non-empty `unit`; units are rejected for other recording prefixes.
+stable processing and output-column order. Missing indexes and empty or
+duplicate signal names are invalid. Each injection's CSV columns are derived
+from its logical `name` as `<name>.time` and `<name>.value`; they are not
+configured separately. The required `variable` field preserves its simulator
+prefix so the adapter can select the appropriate `msfs-rs` interface. Each
+recorded `A:` variable also requires a non-empty `unit`; units are rejected for
+other recording prefixes.
 
 For the MVP, the module reads the lowercase filename
 `/work/replayer_config.toml` from the package-specific writable MSFS mount.
@@ -174,7 +172,7 @@ five samples ending at 40 seconds. The pitch pair is empty on the final CSV row.
 
 For each configured signal:
 
-- configured time and value columns must exist exactly once;
+- the derived `<name>.time` and `<name>.value` columns must exist exactly once;
 - timestamps must be finite, non-negative, and strictly increasing;
 - values must be finite and within the signal's configured `source_range`;
 - the first point must be at `0` seconds.
@@ -240,62 +238,49 @@ or renaming it. Future abort handling must provide the same behavior.
 
 ## MSFS WASM build
 
-The build configuration is aligned with the FlyByWire aircraft repository
-branch `fs2020-master` at commit
-`81461a72be047a9e91e1b1d647ef01cae86565ad`. In particular, this project uses:
+The MSFS WASM module uses:
 
 - Rust `1.93.0` with the `wasm32-wasip1` target;
 - a `cdylib` artifact and release LTO/stripping;
-- the A32NX WASM target features, linker mode, and exported runtime symbols;
+- the target features, linker mode, and exported runtime symbols required by the
+  MSFS gauge environment;
 - the MSFS SDK WASI sysroot;
-- `msfs-rs` from its `main` branch, pinned by `Cargo.lock` to
-  `2f697b9aac9fa3c00474f901a7f7ee4218cf534b`.
+- `msfs-rs`.
 
-The crate emits only a `cdylib`, matching the A32NX Rust gauge build. Adding an
-`rlib` crate type to the same WASM build prevents the required dead-code
-elimination and retains unsupported SDK imports, causing MSFS module
-instantiation to fail. Simulator-independent unit tests still run on the host
-with `cargo test`.
-
-The linker paths in `.cargo/config.toml` assume the MSFS SDK is installed at
-`C:\MSFS SDK`; no `build.rs` or Docker container is required. Developers with
-the SDK in another location must update the two SDK paths in that file.
+The crate emits only a `cdylib`. Simulator-independent unit tests still run on
+the host with `cargo test`.
 
 Build and package the module natively with:
 
 ```sh
-sh scripts/build-wasm.sh
+sh scripts/dev-env/run.sh ./scripts/build-wasm.sh
 ```
 
 The script first runs `cargo build --release --target wasm32-wasip1`, then
-post-processes the raw module with the same A32NX systems-library flags:
-
-```sh
-wasm-opt -O1 --signext-lowering --enable-bulk-memory \
-  --enable-nontrapping-float-to-int
-```
+post-processes the raw module with compatibility-lowering flags required by the
+MSFS WASM environment.
 
 The raw Cargo artifact remains at
-`target/wasm32-wasip1/release/testpilot.wasm`. The deployable MVP artifact is
-`target/wasm32-wasip1/release/testpilot-msfs.wasm`. `wasm-opt` must be available
-on `PATH`. Host-side `cargo test` does not link against the MSFS SDK.
+`target/wasm32-wasip1/release/testpilot.wasm`. The deployable artifact is
+`target/wasm32-wasip1/release/testpilot-msfs.wasm`.
+Host-side `cargo test` does not link against the MSFS SDK.
 
-A successful build and post-processing pass verifies the WASM structure, SDK
-linkage, and A32NX-compatible lowering, not A32NX behavior. Compatibility still
-requires an in-simulator test against the referenced A32NX branch/version.
+A successful build and post-processing pass verifies the WASM structure and SDK
+linkage, not simulator or aircraft behavior. Runtime compatibility still
+requires an in-simulator test against the intended MSFS and aircraft versions.
 
-## A32NX smoke-test installation
+## MSFS installation (for A32NX)
 
-Close MSFS, then build and install the current gauge into the local A32NX
-Community package from Git Bash:
+Close MSFS, then build and install the gauge from Bash:
 
 ```sh
 sh scripts/install.sh /path/to/flybywire-aircraft-a320-neo
 ```
 
-The required argument is the FlyByWire A32NX Community package directory. On a
-Microsoft Store installation, the script derives the package-specific work
-directory from `%LOCALAPPDATA%`. Other installations can provide it explicitly:
+The required argument is the target Community package directory. The script
+expects the current test aircraft, panel, and layout paths. On a Microsoft Store
+installation, it derives the package-specific work directory from
+`%LOCALAPPDATA%`. Other installations can provide it explicitly:
 
 ```sh
 sh scripts/install.sh /path/to/flybywire-aircraft-a320-neo /path/to/package/work
@@ -311,43 +296,27 @@ The script performs these operations:
 5. Updates or adds the `panel.cfg` and `testpilot.wasm` entries in package-root
    `layout.json`, including exact byte sizes and Windows FILETIME timestamps.
 
-The operation is idempotent for the expected A32NX package structure: rerunning
-it replaces the module and refreshes the same gauge and layout entries. Python
-must be available on `PATH`. This provisional script intentionally performs no
-backups, conflict checks, or rollback, and it does not launch MSFS or modify
-`manifest.json`.
+Python must be available on `PATH`. This provisional script intentionally
+performs no backups, conflict checks, or rollback, and it does not launch MSFS
+or modify `manifest.json`.
 
-The current smoke test initializes `L:REPLAYER_ARMED` to `0` and reads it on
-every MSFS `PreUpdate` event. The simulator-independent `ArmState` struct owns
-the previous sample, and its `start` method returns `true` only when the value
-changes from exactly `0` to exactly `1`. On that transition, the gauge reads
-`/work/replayer_config.toml`, opens one independent `/work/scenario.csv` reader
-per injection, reads each header and the first two samples, and logs the cursor
-count. The same `PreUpdate` logs
-`TESTPILOT: scenario cursors ready`, captures `E:SIMULATION TIME` as scenario
-time zero, and injects the first frame. On every subsequent `PreUpdate`, each
-cursor reads forward until it brackets elapsed scenario time or reaches EOF, so
-a late frame may consume multiple rows. A file or parsing failure resets the
-armed LVAR to `0` and terminates the gauge task without panicking. No
-full-file scenario validation runs in the MVP, and disarm transitions have no
-behavior.
+To validate incremental playback, run the installer, load the target aircraft,
+and set `L:REPLAYER_ARMED` to `1`.
+Verify the console reports the cursor count and ready message, then verify the
+configured controls follow the scenario. Each converted simulator value is
+written through legacy calculator code to its configured `K:` event or `L:`
+variable. Verify that a timestamped telemetry CSV is created in the
+package-specific `/work` mount and contains one paired time/value column set per
+configured recording.
 
-To validate incremental playback, run the installer, load the A32NX, and set
-`L:REPLAYER_ARMED` to `1` with an LVAR or calculator-code tool. Verify the
-console reports the cursor count and ready message, then verify the configured
-controls follow the scenario. Each converted simulator value is written through
-legacy calculator code to its configured `K:` event or `L:` variable. Verify
-that a timestamped telemetry CSV is created in the package-specific `/work`
-mount and contains one paired time/value column set per configured recording.
+## MVP simulator mappings
 
-## A32NX MVP mappings
+The default configuration stores the following low-level simulator identifiers
+in each injection's `variable` field. These interfaces are part of TestPilot's
+adapter configuration and must be validated against the selected simulator and
+aircraft versions.
 
-These adapter mappings are based on the YourControls FS2020 A32NX definition,
-version `0.12.3`, from repository tree
-`4e32af561a82f1f998fbe4b0b0db0efe2642cdf2`. The default configuration stores
-these low-level identifiers in each injection's `variable` field.
-
-| Logical signal | Direction | MSFS/A32NX interface | Native unit/conversion |
+| Logical signal | Direction | Simulator interface | Native unit/conversion |
 | --- | --- | --- | --- |
 | `sidestick_pitch_position` | inject | `K:AXIS_ELEVATOR_SET`; readback `L:A32NX_SIDESTICK_POSITION_Y` | configured raw axis value in `[-16383, 16384]`, written directly to the event |
 | `sidestick_roll_position` | inject | `K:AXIS_AILERONS_SET`; readback `L:A32NX_SIDESTICK_POSITION_X` | configured raw axis value in `[-16383, 16384]`, written directly to the event |
@@ -356,19 +325,16 @@ these low-level identifiers in each injection's `variable` field.
 | `elevator_position` | record | `A:ELEVATOR POSITION` | `Position 16k` |
 | `aileron_position` | record | `A:AILERON POSITION` | `Position 16k` |
 
-References:
+### External references
+
+The following independent projects are useful sources for cross-checking MSFS
+interfaces and aircraft compatibility.
 
 - [YourControls A32NX definition](https://github.com/Sequal32/yourcontrols/blob/master/definitions/FS2020/aircraft/FlyByWire%20Simulations%20-%20Airbus%20A320-251N.yaml)
 - [YourControls controls definition](https://github.com/Sequal32/yourcontrols/blob/master/definitions/FS2020/modules/controls.yaml)
 - [YourControls physics definition](https://github.com/Sequal32/yourcontrols/blob/master/definitions/FS2020/modules/physics.yaml)
 - [FlyByWire aircraft](https://github.com/flybywiresim/aircraft)
 - [`msfs-rs`](https://github.com/flybywiresim/msfs-rs)
-
-The YourControls mappings are the accepted baseline for these simple MVP
-signals. The simulator adapter must still confirm that each event and variable
-is accessible from the selected `msfs-rs` WASM revision. Any observed mismatch
-with the current A32NX must be documented and resolved before claiming
-in-simulator compatibility.
 
 ## TODO
 

@@ -59,16 +59,10 @@ impl ReplayConfig {
     ) -> Result<Vec<InjectionConfig>, ConfigError> {
         let entries = ReplayConfig::ordered_entries("inject", entries)?;
         let mut signals = HashSet::with_capacity(entries.len());
-        let mut columns = HashSet::with_capacity(entries.len().saturating_mul(2));
         let mut result = Vec::with_capacity(entries.len());
 
         for (index, raw) in entries {
-            result.push(InjectionConfig::new(
-                index,
-                raw,
-                &mut signals,
-                &mut columns,
-            )?);
+            result.push(InjectionConfig::new(index, raw, &mut signals)?);
         }
 
         Ok(result)
@@ -140,10 +134,6 @@ pub struct InjectionConfig {
     pub name: String,
     /// Prefixed simulator destination, such as `K:AXIS_ELEVATOR_SET`.
     pub variable: String,
-    /// CSV column containing scenario-relative timestamps in seconds.
-    pub time_column: String,
-    /// CSV column containing source values.
-    pub value_column: String,
     /// Inclusive, strictly increasing valid range for source values.
     pub source_range: [f64; 2],
     /// Inclusive affine-conversion target range within the signal's safe range.
@@ -155,8 +145,10 @@ impl InjectionConfig {
         index: usize,
         raw: RawInjectionConfig,
         signals: &mut HashSet<String>,
-        columns: &mut HashSet<String>,
     ) -> Result<InjectionConfig, ConfigError> {
+        if raw.name.is_empty() {
+            return Err(ConfigError::EmptyInjectionName { index });
+        }
         if !signals.insert(raw.name.clone()) {
             return Err(ConfigError::DuplicateInjectionSignal {
                 index,
@@ -164,8 +156,6 @@ impl InjectionConfig {
             });
         }
 
-        InjectionConfig::validate_column(index, "time_column", &raw.time_column, columns)?;
-        InjectionConfig::validate_column(index, "value_column", &raw.value_column, columns)?;
         InjectionConfig::validate_increasing_range(index, "source_range", raw.source_range)?;
         InjectionConfig::validate_increasing_range(index, "simulator_range", raw.simulator_range)?;
         if raw.simulator_range[0] < -16_383.0 || raw.simulator_range[1] > 16_384.0 {
@@ -175,33 +165,9 @@ impl InjectionConfig {
         Ok(InjectionConfig {
             name: raw.name,
             variable: raw.variable,
-            time_column: raw.time_column,
-            value_column: raw.value_column,
             source_range: raw.source_range,
             simulator_range: raw.simulator_range,
         })
-    }
-
-    /// Validates one CSV column and records it to detect reuse.
-    ///
-    /// Empty names and names already used by another injection column are
-    /// rejected with the relevant indexed configuration error.
-    fn validate_column(
-        index: usize,
-        field: &'static str,
-        column: &str,
-        columns: &mut HashSet<String>,
-    ) -> Result<(), ConfigError> {
-        if column.is_empty() {
-            return Err(ConfigError::EmptyInjectionColumn { index, field });
-        }
-        if !columns.insert(column.to_owned()) {
-            return Err(ConfigError::ReusedInjectionColumn {
-                index,
-                column: column.to_owned(),
-            });
-        }
-        Ok(())
     }
 
     /// Validates that a configured range has finite, strictly increasing endpoints.
@@ -297,8 +263,6 @@ struct RawReplayConfig {
 struct RawInjectionConfig {
     name: String,
     variable: String,
-    time_column: String,
-    value_column: String,
     source_range: [f64; 2],
     simulator_range: [f64; 2],
 }
@@ -338,16 +302,12 @@ input_file = "scenario.csv"
 [inject.0]
 name = "sidestick_pitch_position"
 variable = "K:AXIS_ELEVATOR_SET"
-time_column = "sidestick_pitch_position.time"
-value_column = "sidestick_pitch_position.value"
 source_range = [-100.0, 100.0]
 simulator_range = [-1.0, 1.0]
 
 [inject.1]
 name = "sidestick_roll_position"
 variable = "K:AXIS_AILERONS_SET"
-time_column = "sidestick_roll_position.time"
-value_column = "sidestick_roll_position.value"
 source_range = [-100.0, 100.0]
 simulator_range = [-1.0, 1.0]
 
@@ -464,6 +424,14 @@ unit = "position"
     }
 
     #[test]
+    fn requires_non_empty_injection_name() {
+        assert_error(
+            &VALID_CONFIG.replacen("name = \"sidestick_pitch_position\"", "name = \"\"", 1),
+            |error| matches!(error, ConfigError::EmptyInjectionName { .. }),
+        );
+    }
+
+    #[test]
     fn requires_injection_variable() {
         assert_error(
             &VALID_CONFIG.replacen("variable = \"K:AXIS_ELEVATOR_SET\"\n", "", 1),
@@ -552,7 +520,7 @@ unit = "position"
     }
 
     #[test]
-    fn rejects_duplicate_signals_and_columns() {
+    fn rejects_duplicate_signals() {
         assert_error(
             &VALID_CONFIG.replacen(
                 "name = \"sidestick_roll_position\"",
@@ -564,22 +532,6 @@ unit = "position"
         assert_error(
             &VALID_CONFIG.replacen("name = \"roll\"", "name = \"pitch\"", 1),
             |error| matches!(error, ConfigError::DuplicateRecordingSignal { .. }),
-        );
-        assert_error(
-            &VALID_CONFIG.replacen(
-                "value_column = \"sidestick_pitch_position.value\"",
-                "value_column = \"sidestick_pitch_position.time\"",
-                1,
-            ),
-            |error| matches!(error, ConfigError::ReusedInjectionColumn { .. }),
-        );
-        assert_error(
-            &VALID_CONFIG.replacen(
-                "time_column = \"sidestick_roll_position.time\"",
-                "time_column = \"sidestick_pitch_position.value\"",
-                1,
-            ),
-            |error| matches!(error, ConfigError::ReusedInjectionColumn { .. }),
         );
     }
 
@@ -615,14 +567,20 @@ unit = "position"
             ),
             |error| matches!(error, ConfigError::Toml(_)),
         );
-        assert_error(
-            &VALID_CONFIG.replacen(
-                "source_range = [-100.0, 100.0]",
-                "source_range = [-100.0, 100.0]\ninterpolation = \"linear\"",
-                1,
-            ),
-            |error| matches!(error, ConfigError::Toml(_)),
-        );
+        for unknown_field in [
+            "time_column = \"custom.time\"",
+            "value_column = \"custom.value\"",
+            "interpolation = \"linear\"",
+        ] {
+            assert_error(
+                &VALID_CONFIG.replacen(
+                    "source_range = [-100.0, 100.0]",
+                    &format!("source_range = [-100.0, 100.0]\n{unknown_field}"),
+                    1,
+                ),
+                |error| matches!(error, ConfigError::Toml(_)),
+            );
+        }
         for removed_field in ["unit = \"degrees\"", "range = [-180.0, 180.0]"] {
             assert_error(
                 &VALID_CONFIG.replacen(

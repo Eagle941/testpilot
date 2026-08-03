@@ -48,14 +48,11 @@ pub enum ConfigError {
     #[error("simulator_range at inject.{index} must remain within [-16383, 16384]")]
     UnsafeSimulatorRange { index: usize },
 
+    #[error("name at inject.{index} must not be empty")]
+    EmptyInjectionName { index: usize },
+
     #[error("duplicate injection signal `{name}` at inject.{index}")]
     DuplicateInjectionSignal { index: usize, name: String },
-
-    #[error("column `{column}` is reused at inject.{index}; time and value columns must be unique")]
-    ReusedInjectionColumn { index: usize, column: String },
-
-    #[error("{field} at inject.{index} must not be empty")]
-    EmptyInjectionColumn { index: usize, field: &'static str },
 
     #[error("name at record.{index} must not be empty")]
     EmptyRecordingName { index: usize },
