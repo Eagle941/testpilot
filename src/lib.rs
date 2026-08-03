@@ -34,4 +34,5 @@ mod simulator;
 pub mod config;
 pub mod error;
 pub mod playback;
+pub mod recording;
 pub mod scenario;

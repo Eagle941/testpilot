@@ -15,11 +15,8 @@ pub use crate::error::ConfigError;
 /// Configuration and scenario format version supported by this crate.
 pub const FORMAT_VERSION: u32 = 1;
 
-/// Aircraft target identifier accepted by the MVP configuration parser.
-pub const AIRCRAFT_TARGET: &str = "flybywire-a32nx";
-
-/// Package-relative path read by the MSFS WASM gauge when it is armed.
-pub const CONFIG_PATH: &str = "SimObjects/AirPlanes/FlyByWire_A320_NEO/replayer_config.toml";
+/// Configuration path in the package-specific writable MSFS work mount.
+pub const CONFIG_PATH: &str = "/work/replayer_config.toml";
 
 /// Validated replay configuration in deterministic processing order.
 #[derive(Debug, Clone, PartialEq)]
@@ -44,12 +41,6 @@ impl ReplayConfig {
             return Err(ConfigError::UnsupportedFormatVersion {
                 found: raw.format_version,
                 expected: FORMAT_VERSION,
-            });
-        }
-        if raw.aircraft_target != AIRCRAFT_TARGET {
-            return Err(ConfigError::UnsupportedAircraftTarget {
-                found: raw.aircraft_target,
-                expected: AIRCRAFT_TARGET,
             });
         }
 
@@ -247,6 +238,8 @@ pub struct RecordingConfig {
     pub name: String,
     /// Prefixed simulator source, such as `A:PLANE PITCH DEGREES`.
     pub variable: String,
+    /// MSFS read unit required for `A:` variables and absent for other prefixes.
+    pub unit: Option<String>,
 }
 
 impl RecordingConfig {
@@ -267,10 +260,23 @@ impl RecordingConfig {
         if raw.variable.is_empty() {
             return Err(ConfigError::EmptyRecordingVariable { index });
         }
+        if raw.variable.starts_with("A:") {
+            match raw.unit.as_deref() {
+                None => return Err(ConfigError::MissingRecordingUnit { index }),
+                Some("") => return Err(ConfigError::EmptyRecordingUnit { index }),
+                Some(_) => {}
+            }
+        } else if raw.unit.is_some() {
+            return Err(ConfigError::UnexpectedRecordingUnit {
+                index,
+                variable: raw.variable,
+            });
+        }
 
         Ok(RecordingConfig {
             name: raw.name,
             variable: raw.variable,
+            unit: raw.unit,
         })
     }
 }
@@ -279,7 +285,6 @@ impl RecordingConfig {
 #[serde(deny_unknown_fields)]
 struct RawReplayConfig {
     format_version: u32,
-    aircraft_target: String,
     input_file: String,
     #[serde(default)]
     inject: BTreeMap<String, RawInjectionConfig>,
@@ -303,6 +308,7 @@ struct RawInjectionConfig {
 struct RawRecordingConfig {
     name: String,
     variable: String,
+    unit: Option<String>,
 }
 
 /// Reads and parses a replay configuration file.
@@ -327,7 +333,6 @@ mod tests {
 
     const VALID_CONFIG: &str = r#"
 format_version = 1
-aircraft_target = "flybywire-a32nx"
 input_file = "scenario.csv"
 
 [inject.0]
@@ -349,18 +354,22 @@ simulator_range = [-1.0, 1.0]
 [record.0]
 name = "pitch"
 variable = "A:PLANE PITCH DEGREES"
+unit = "radians"
 
 [record.1]
 name = "roll"
 variable = "A:PLANE BANK DEGREES"
+unit = "radians"
 
 [record.2]
 name = "elevator_position"
 variable = "A:ELEVATOR POSITION"
+unit = "position"
 
 [record.3]
 name = "aileron_position"
 variable = "A:AILERON POSITION"
+unit = "position"
 "#;
 
     fn assert_error(config: &str, predicate: impl FnOnce(&ConfigError) -> bool) {
@@ -397,8 +406,10 @@ variable = "A:AILERON POSITION"
         assert_eq!(config.record.len(), 4);
         assert_eq!(config.record[0].name, "pitch");
         assert_eq!(config.record[0].variable, "A:PLANE PITCH DEGREES");
+        assert_eq!(config.record[0].unit.as_deref(), Some("radians"));
         assert_eq!(config.record[3].name, "aileron_position");
         assert_eq!(config.record[3].variable, "A:AILERON POSITION");
+        assert_eq!(config.record[3].unit.as_deref(), Some("position"));
     }
 
     #[test]
@@ -431,14 +442,10 @@ variable = "A:AILERON POSITION"
     }
 
     #[test]
-    fn rejects_unsupported_version_and_target() {
+    fn rejects_unsupported_version() {
         assert_error(
             &VALID_CONFIG.replacen("format_version = 1", "format_version = 2", 1),
             |error| matches!(error, ConfigError::UnsupportedFormatVersion { .. }),
-        );
-        assert_error(
-            &VALID_CONFIG.replacen("flybywire-a32nx", "other-aircraft", 1),
-            |error| matches!(error, ConfigError::UnsupportedAircraftTarget { .. }),
         );
     }
 
@@ -468,11 +475,13 @@ variable = "A:AILERON POSITION"
     fn accepts_arbitrary_recording_names_and_variables() {
         let arbitrary = VALID_CONFIG
             .replacen("name = \"pitch\"", "name = \"custom_response\"", 1)
-            .replacen("A:PLANE PITCH DEGREES", "L:CUSTOM_RESPONSE", 1);
+            .replacen("A:PLANE PITCH DEGREES", "L:CUSTOM_RESPONSE", 1)
+            .replacen("unit = \"radians\"\n", "", 1);
         match parse_config(&arbitrary) {
             Ok(config) => {
                 assert_eq!(config.record[0].name, "custom_response");
                 assert_eq!(config.record[0].variable, "L:CUSTOM_RESPONSE");
+                assert_eq!(config.record[0].unit, None);
             }
             Err(error) => panic!("arbitrary recording should parse: {error}"),
         }
@@ -495,6 +504,22 @@ variable = "A:AILERON POSITION"
         assert_error(
             &VALID_CONFIG.replacen("variable = \"A:PLANE PITCH DEGREES\"", "variable = \"\"", 1),
             |error| matches!(error, ConfigError::EmptyRecordingVariable { .. }),
+        );
+    }
+
+    #[test]
+    fn validates_recording_units() {
+        assert_error(
+            &VALID_CONFIG.replacen("unit = \"radians\"\n", "", 1),
+            |error| matches!(error, ConfigError::MissingRecordingUnit { .. }),
+        );
+        assert_error(
+            &VALID_CONFIG.replacen("unit = \"radians\"", "unit = \"\"", 1),
+            |error| matches!(error, ConfigError::EmptyRecordingUnit { .. }),
+        );
+        assert_error(
+            &VALID_CONFIG.replacen("A:PLANE PITCH DEGREES", "L:CUSTOM_RESPONSE", 1),
+            |error| matches!(error, ConfigError::UnexpectedRecordingUnit { .. }),
         );
     }
 

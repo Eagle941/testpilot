@@ -8,7 +8,6 @@ use super::*;
 
 const CONFIG: &str = r#"
 format_version = 1
-aircraft_target = "flybywire-a32nx"
 input_file = "scenario.csv"
 
 [inject.0]
@@ -30,6 +29,7 @@ simulator_range = [-1.0, 1.0]
 [record.0]
 name = "pitch"
 variable = "A:PLANE PITCH DEGREES"
+unit = "radians"
 "#;
 
 const HEADER: &str = "sidestick_pitch_position.time,sidestick_pitch_position.value,sidestick_roll_position.time,sidestick_roll_position.value\n";

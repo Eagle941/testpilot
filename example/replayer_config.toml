@@ -1,5 +1,4 @@
 format_version = 1
-aircraft_target = "flybywire-a32nx"
 input_file = "scenario.csv"
 
 [inject.0]
@@ -21,15 +20,19 @@ simulator_range = [-16383.0, 16384.0]
 [record.0]
 name = "pitch"
 variable = "A:PLANE PITCH DEGREES"
+unit = "radians"
 
 [record.1]
 name = "roll"
 variable = "A:PLANE BANK DEGREES"
+unit = "radians"
 
 [record.2]
 name = "elevator_position"
 variable = "A:ELEVATOR POSITION"
+unit = "position"
 
 [record.3]
 name = "aileron_position"
 variable = "A:AILERON POSITION"
+unit = "position"

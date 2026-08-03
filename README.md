@@ -10,8 +10,8 @@ configuration parsing, incremental per-signal scenario cursors, optional
 streaming scenario validation, irregular-time linear interpolation, and affine
 input-range conversion. It also provides an MSFS-compatible WASM build and a
 `testpilot` gauge entry point with simulator-clock playback and calculator-code
-input injection. Input interception and telemetry recording remain to be
-implemented.
+input injection and bounded, incremental telemetry recording. Input
+interception remains to be implemented.
 
 ## MVP scope
 
@@ -40,7 +40,6 @@ The MVP configuration format is TOML:
 
 ```toml
 format_version = 1
-aircraft_target = "flybywire-a32nx"
 input_file = "scenario.csv"
 
 [inject.0]
@@ -62,35 +61,38 @@ simulator_range = [-16383.0, 16384.0]
 [record.0]
 name = "pitch"
 variable = "A:PLANE PITCH DEGREES"
+unit = "radians"
 
 [record.1]
 name = "roll"
 variable = "A:PLANE BANK DEGREES"
+unit = "radians"
 
 [record.2]
 name = "elevator_position"
 variable = "A:ELEVATOR POSITION"
+unit = "position"
 
 [record.3]
 name = "aileron_position"
 variable = "A:AILERON POSITION"
+unit = "position"
 ```
 
 The repository provides this default as `example/replayer_config.toml`. The
-installation script copies it to the hardcoded package-relative configuration
-path.
+installation script copies it to `/work/replayer_config.toml` together with the
+default scenario.
 
 `inject` and `record` section indexes are zero-based, contiguous, and define
 stable processing and output-column order. Missing indexes, empty or duplicate
 signal names, and reused time or value columns are invalid. The required
 `variable` field preserves its simulator prefix so the adapter can select the
-appropriate `msfs-rs` interface; the parser stores the identifier without
-interpreting it.
+appropriate `msfs-rs` interface. Each recorded `A:` variable also requires a
+non-empty `unit`; units are rejected for other recording prefixes.
 
-For the MVP, the module reads the package-relative, lowercase filename
-`SimObjects/AirPlanes/FlyByWire_A320_NEO/replayer_config.toml`. Relative
-`input_file` paths are resolved from the same
-`SimObjects/AirPlanes/FlyByWire_A320_NEO/` directory. `format_version` governs
+For the MVP, the module reads the lowercase filename
+`/work/replayer_config.toml` from the package-specific writable MSFS mount.
+Relative `input_file` paths are resolved from `/work`. `format_version` governs
 both the TOML configuration and its scenario CSV contract.
 
 The MVP fixes behavior that does not need to vary by configuration:
@@ -120,8 +122,8 @@ one read-only scenario cursor per injection. The MVP skips a full-file
 preflight pass and assumes the scenario is correctly formatted. Initialization
 reads the first two samples for every cursor. Subsequent simulator frames read
 forward until every cursor brackets the current scenario time or reaches EOF.
-Setting the LVAR back to `0` while running will request an abort once playback
-is implemented.
+Setting the LVAR back to `0` while running has no effect in the current MVP;
+operator-requested abort handling is a future requirement.
 
 While running, replay commands take precedence over local pilot controls. The
 simulator adapter must use an A32NX-compatible, verified input-bypass mechanism;
@@ -130,14 +132,13 @@ an operator precondition: the MVP does not engage, disengage, or change
 autopilot modes. Scenarios requiring autopilot arbitration or mode changes are
 outside MVP scope.
 
-After the final sample or an abort request, the module stops injecting and
-intercepting controls, removes its replay overrides, resets
+After the final sample, the module stops injecting, resets
 `L:REPLAYER_ARMED` to `0`, and returns control to the user. It does not restore
 prior control positions or autopilot modes. On a failure, it performs the same
-best-effort control release, flushes and closes telemetry where possible,
-retains the partial telemetry file under its normal timestamped name, reports
-the error, and exits its WASM event loop without panicking. Aborted runs also
-retain their partial, unmarked telemetry file.
+best-effort cleanup, flushes and closes telemetry where possible, retains the
+partial telemetry file under its normal timestamped name, reports the error,
+and exits its WASM event loop without panicking. Operator-requested abort
+handling and input interception remain to be implemented.
 
 ## Scenario CSV
 
@@ -203,23 +204,39 @@ storage rather than RAM.
 
 ## Telemetry CSV
 
-Telemetry is saved beside the input scenario. Its file name is generated from
-the host UTC date and time captured when the replay begins, using the
-Windows-safe form `telemetry_YYYYMMDDTHHMMSS.csv`. If that exact name already
-exists, the run fails rather than overwriting it. The first column is `time`, followed
-by each configured `record.N` signal in numeric section order. With the complete
-MVP selection the header is:
+In MSFS, telemetry is saved in the package-specific writable `/work` mount. On
+the validated Microsoft Store installation, this is exposed to the host under:
 
-```csv
-time,pitch,roll,elevator_position,aileron_position
+```text
+%LOCALAPPDATA%\Packages\Microsoft.FlightSimulator_8wekyb3d8bbwe\LocalState\packages\flybywire-aircraft-a320-neo\work
 ```
 
-`time` is scenario-relative simulator-clock time in seconds.
+Host-side tests save telemetry beside their input scenario. The file name is
+generated from the host UTC date and time captured when the replay begins,
+using the Windows-safe form `telemetry_YYYYMMDDTHHMMSS.csv`. If that exact name
+already exists, the run fails rather than overwriting it.
+
+Each configured `record.N` signal contributes an adjacent
+`<signal>.time,<signal>.value` pair in numeric section order. This is the same
+rectangular paired-column shape used by scenario input, so a telemetry file can
+be selected directly as a later replay's input. With the complete MVP selection
+the header is:
+
+```csv
+pitch.time,pitch.value,roll.time,roll.value,elevator_position.time,elevator_position.value,aileron_position.time,aileron_position.value
+```
+
+Every MSFS frame is sampled after that frame's input injection. The row repeats
+the same scenario-relative simulator elapsed time in seconds in every signal's
+`.time` column and writes the sampled response in the adjacent `.value` column.
 `pitch` and `roll` are aggregate MSFS aircraft attitudes; `elevator_position`
 and `aileron_position` are aggregate MSFS control-surface positions, not
-individual left/right A32NX surfaces. A row is sampled after input injection on
-every MSFS frame and is streamed incrementally with deterministic numeric
-formatting and bounded buffering.
+individual left/right A32NX surfaces.
+
+Rows are written incrementally with deterministic numeric formatting and
+bounded buffering. Telemetry is flushed on completion and failure. Failures
+retain the partial file under its normal timestamped name rather than deleting
+or renaming it. Future abort handling must provide the same behavior.
 
 ## MSFS WASM build
 
@@ -276,17 +293,23 @@ Community package from Git Bash:
 sh scripts/install.sh /path/to/flybywire-aircraft-a320-neo
 ```
 
-The required argument is the FlyByWire A32NX Community package directory. The
-script performs these operations:
+The required argument is the FlyByWire A32NX Community package directory. On a
+Microsoft Store installation, the script derives the package-specific work
+directory from `%LOCALAPPDATA%`. Other installations can provide it explicitly:
+
+```sh
+sh scripts/install.sh /path/to/flybywire-aircraft-a320-neo /path/to/package/work
+```
+
+The script performs these operations:
 
 1. Runs `scripts/build-wasm.sh`.
 2. Overwrites the aircraft panel's `testpilot.wasm` with the deployable artifact.
 3. Copies `example/replayer_config.toml` and `example/scenario.csv` into the
-   aircraft directory.
+   package-specific work directory.
 4. Adds the `htmlgauge04` entry under `[VCockpit17]` if it is absent.
-5. Updates or adds the configuration, scenario, `panel.cfg`, and `testpilot.wasm` entries in
-   package-root `layout.json`, including exact byte sizes and Windows FILETIME
-   timestamps.
+5. Updates or adds the `panel.cfg` and `testpilot.wasm` entries in package-root
+   `layout.json`, including exact byte sizes and Windows FILETIME timestamps.
 
 The operation is idempotent for the expected A32NX package structure: rerunning
 it replaces the module and refreshes the same gauge and layout entries. Python
@@ -298,9 +321,9 @@ The current smoke test initializes `L:REPLAYER_ARMED` to `0` and reads it on
 every MSFS `PreUpdate` event. The simulator-independent `ArmState` struct owns
 the previous sample, and its `start` method returns `true` only when the value
 changes from exactly `0` to exactly `1`. On that transition, the gauge reads
-`SimObjects/AirPlanes/FlyByWire_A320_NEO/replayer_config.toml`, opens one
-independent `scenario.csv` reader per injection, reads each header and first
-two samples, and logs the cursor count. The same `PreUpdate` logs
+`/work/replayer_config.toml`, opens one independent `/work/scenario.csv` reader
+per injection, reads each header and the first two samples, and logs the cursor
+count. The same `PreUpdate` logs
 `TESTPILOT: scenario cursors ready`, captures `E:SIMULATION TIME` as scenario
 time zero, and injects the first frame. On every subsequent `PreUpdate`, each
 cursor reads forward until it brackets elapsed scenario time or reaches EOF, so
@@ -313,8 +336,9 @@ To validate incremental playback, run the installer, load the A32NX, and set
 `L:REPLAYER_ARMED` to `1` with an LVAR or calculator-code tool. Verify the
 console reports the cursor count and ready message, then verify the configured
 controls follow the scenario. Each converted simulator value is written through
-legacy calculator code to its configured `K:` event or `L:` variable. Telemetry
-recording is not yet implemented.
+legacy calculator code to its configured `K:` event or `L:` variable. Verify
+that a timestamped telemetry CSV is created in the package-specific `/work`
+mount and contains one paired time/value column set per configured recording.
 
 ## A32NX MVP mappings
 
@@ -345,3 +369,12 @@ signals. The simulator adapter must still confirm that each event and variable
 is accessible from the selected `msfs-rs` WASM revision. Any observed mismatch
 with the current A32NX must be documented and resolved before claiming
 in-simulator compatibility.
+
+## TODO
+
+- Support multiple replay configurations through
+  `/work/replayer_selection.toml`. Reserve `L:REPLAYER_ARMED = 0` for idle and
+  use each configured positive numeric value to select and start its associated
+  configuration. Each selected configuration continues to identify its own
+  scenario through `input_file`, so configuration and scenario selection cannot
+  become inconsistent. No cockpit UI is required for the initial implementation.
