@@ -13,16 +13,16 @@ async fn testpilot(mut gauge: msfs::Gauge) -> Result<(), Box<dyn Error>> {
         match event {
             MSFSEvent::PreUpdate => {
                 if let Err(error) = runtime.pre_update() {
-                    eprintln!("TESTPILOT: {error:#}");
+                    println!("TESTPILOT ERROR: {error:#}");
                     if let Err(cleanup_error) = runtime.stop() {
-                        eprintln!("TESTPILOT: cleanup failed: {cleanup_error}");
+                        println!("TESTPILOT ERROR: cleanup failed: {cleanup_error}");
                     }
-                    return Err(error.into());
+                    return Ok(());
                 }
             }
             MSFSEvent::PreKill => {
                 if let Err(error) = runtime.stop() {
-                    eprintln!("TESTPILOT: cleanup failed: {error}");
+                    println!("TESTPILOT ERROR: cleanup failed: {error}");
                 }
             }
             _ => {}
