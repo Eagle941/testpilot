@@ -64,7 +64,7 @@ pub(crate) struct Replayer {
 }
 
 impl Replayer {
-    /// Creates a replayer using the package-relative MVP configuration path.
+    /// Creates a replayer using the configuration in the writable MSFS work mount.
     pub(crate) fn new() -> Replayer {
         Replayer::with_config_path(CONFIG_PATH)
     }
@@ -254,7 +254,7 @@ unit = "radians"
     }
 
     #[test]
-    fn uses_the_package_relative_configuration_path_by_default() {
+    fn uses_the_work_configuration_path_by_default() {
         let replayer = Replayer::new();
 
         assert_eq!(

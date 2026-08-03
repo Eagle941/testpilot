@@ -80,8 +80,8 @@ unit = "position"
 ```
 
 The repository provides this default as `example/replayer_config.toml`. The
-installation script copies it to the hardcoded package-relative configuration
-path.
+installation script copies it to `/work/replayer_config.toml` together with the
+default scenario.
 
 `inject` and `record` section indexes are zero-based, contiguous, and define
 stable processing and output-column order. Missing indexes, empty or duplicate
@@ -90,10 +90,9 @@ signal names, and reused time or value columns are invalid. The required
 appropriate `msfs-rs` interface. Each recorded `A:` variable also requires a
 non-empty `unit`; units are rejected for other recording prefixes.
 
-For the MVP, the module reads the package-relative, lowercase filename
-`SimObjects/AirPlanes/FlyByWire_A320_NEO/replayer_config.toml`. Relative
-`input_file` paths are resolved from the same
-`SimObjects/AirPlanes/FlyByWire_A320_NEO/` directory. `format_version` governs
+For the MVP, the module reads the lowercase filename
+`/work/replayer_config.toml` from the package-specific writable MSFS mount.
+Relative `input_file` paths are resolved from `/work`. `format_version` governs
 both the TOML configuration and its scenario CSV contract.
 
 The MVP fixes behavior that does not need to vary by configuration:
@@ -294,17 +293,23 @@ Community package from Git Bash:
 sh scripts/install.sh /path/to/flybywire-aircraft-a320-neo
 ```
 
-The required argument is the FlyByWire A32NX Community package directory. The
-script performs these operations:
+The required argument is the FlyByWire A32NX Community package directory. On a
+Microsoft Store installation, the script derives the package-specific work
+directory from `%LOCALAPPDATA%`. Other installations can provide it explicitly:
+
+```sh
+sh scripts/install.sh /path/to/flybywire-aircraft-a320-neo /path/to/package/work
+```
+
+The script performs these operations:
 
 1. Runs `scripts/build-wasm.sh`.
 2. Overwrites the aircraft panel's `testpilot.wasm` with the deployable artifact.
 3. Copies `example/replayer_config.toml` and `example/scenario.csv` into the
-   aircraft directory.
+   package-specific work directory.
 4. Adds the `htmlgauge04` entry under `[VCockpit17]` if it is absent.
-5. Updates or adds the configuration, scenario, `panel.cfg`, and `testpilot.wasm` entries in
-   package-root `layout.json`, including exact byte sizes and Windows FILETIME
-   timestamps.
+5. Updates or adds the `panel.cfg` and `testpilot.wasm` entries in package-root
+   `layout.json`, including exact byte sizes and Windows FILETIME timestamps.
 
 The operation is idempotent for the expected A32NX package structure: rerunning
 it replaces the module and refreshes the same gauge and layout entries. Python
@@ -316,9 +321,9 @@ The current smoke test initializes `L:REPLAYER_ARMED` to `0` and reads it on
 every MSFS `PreUpdate` event. The simulator-independent `ArmState` struct owns
 the previous sample, and its `start` method returns `true` only when the value
 changes from exactly `0` to exactly `1`. On that transition, the gauge reads
-`SimObjects/AirPlanes/FlyByWire_A320_NEO/replayer_config.toml`, opens one
-independent `scenario.csv` reader per injection, reads each header and first
-two samples, and logs the cursor count. The same `PreUpdate` logs
+`/work/replayer_config.toml`, opens one independent `/work/scenario.csv` reader
+per injection, reads each header and the first two samples, and logs the cursor
+count. The same `PreUpdate` logs
 `TESTPILOT: scenario cursors ready`, captures `E:SIMULATION TIME` as scenario
 time zero, and injects the first frame. On every subsequent `PreUpdate`, each
 cursor reads forward until it brackets elapsed scenario time or reaches EOF, so

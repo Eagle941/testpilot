@@ -15,8 +15,8 @@ pub use crate::error::ConfigError;
 /// Configuration and scenario format version supported by this crate.
 pub const FORMAT_VERSION: u32 = 1;
 
-/// Package-relative path read by the MSFS WASM gauge when it is armed.
-pub const CONFIG_PATH: &str = "SimObjects/AirPlanes/FlyByWire_A320_NEO/replayer_config.toml";
+/// Configuration path in the package-specific writable MSFS work mount.
+pub const CONFIG_PATH: &str = "/work/replayer_config.toml";
 
 /// Validated replay configuration in deterministic processing order.
 #[derive(Debug, Clone, PartialEq)]
