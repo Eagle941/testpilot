@@ -217,7 +217,6 @@ mod tests {
             fs::write(
                 &config_path,
                 r#"format_version = 1
-aircraft_target = "flybywire-a32nx"
 input_file = "scenario.csv"
 
 [inject.0]

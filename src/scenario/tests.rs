@@ -8,7 +8,6 @@ use super::*;
 
 const CONFIG: &str = r#"
 format_version = 1
-aircraft_target = "flybywire-a32nx"
 input_file = "scenario.csv"
 
 [inject.0]

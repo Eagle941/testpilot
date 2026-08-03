@@ -22,12 +22,6 @@ pub enum ConfigError {
     #[error("unsupported format_version {found}; expected {expected}")]
     UnsupportedFormatVersion { found: u32, expected: u32 },
 
-    #[error("unsupported aircraft_target `{found}`; expected `{expected}")]
-    UnsupportedAircraftTarget {
-        found: String,
-        expected: &'static str,
-    },
-
     #[error("{section} section must contain at least one entry")]
     EmptySection { section: &'static str },
 

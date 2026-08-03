@@ -15,9 +15,6 @@ pub use crate::error::ConfigError;
 /// Configuration and scenario format version supported by this crate.
 pub const FORMAT_VERSION: u32 = 1;
 
-/// Aircraft target identifier accepted by the MVP configuration parser.
-pub const AIRCRAFT_TARGET: &str = "flybywire-a32nx";
-
 /// Package-relative path read by the MSFS WASM gauge when it is armed.
 pub const CONFIG_PATH: &str = "SimObjects/AirPlanes/FlyByWire_A320_NEO/replayer_config.toml";
 
@@ -44,12 +41,6 @@ impl ReplayConfig {
             return Err(ConfigError::UnsupportedFormatVersion {
                 found: raw.format_version,
                 expected: FORMAT_VERSION,
-            });
-        }
-        if raw.aircraft_target != AIRCRAFT_TARGET {
-            return Err(ConfigError::UnsupportedAircraftTarget {
-                found: raw.aircraft_target,
-                expected: AIRCRAFT_TARGET,
             });
         }
 
@@ -294,7 +285,6 @@ impl RecordingConfig {
 #[serde(deny_unknown_fields)]
 struct RawReplayConfig {
     format_version: u32,
-    aircraft_target: String,
     input_file: String,
     #[serde(default)]
     inject: BTreeMap<String, RawInjectionConfig>,
@@ -343,7 +333,6 @@ mod tests {
 
     const VALID_CONFIG: &str = r#"
 format_version = 1
-aircraft_target = "flybywire-a32nx"
 input_file = "scenario.csv"
 
 [inject.0]
@@ -453,14 +442,10 @@ unit = "position"
     }
 
     #[test]
-    fn rejects_unsupported_version_and_target() {
+    fn rejects_unsupported_version() {
         assert_error(
             &VALID_CONFIG.replacen("format_version = 1", "format_version = 2", 1),
             |error| matches!(error, ConfigError::UnsupportedFormatVersion { .. }),
-        );
-        assert_error(
-            &VALID_CONFIG.replacen("flybywire-a32nx", "other-aircraft", 1),
-            |error| matches!(error, ConfigError::UnsupportedAircraftTarget { .. }),
         );
     }
 
