@@ -44,33 +44,35 @@ pub(super) fn parse_time(
 
 /// Returns the CSV-header indexes for one configured injection's columns.
 ///
-/// The returned [`ColumnPair`] contains the zero-based indexes of the time and
-/// value columns named by `injection.time_column` and `injection.value_column`.
-/// The time column must immediately precede its matching value column.
+/// The returned [`ColumnPair`] contains the zero-based indexes of the derived
+/// `<signal>.time` and `<signal>.value` columns. The time column must immediately
+/// precede its matching value column.
 pub(super) fn find_column_indices(
     headers: &StringRecord,
     injection: &InjectionConfig,
 ) -> Result<ColumnPair, ScenarioError> {
+    let time_column = format!("{}.time", injection.name);
+    let value_column = format!("{}.value", injection.name);
     let time_idx = headers
         .iter()
-        .position(|header| header == injection.time_column)
+        .position(|header| header == time_column)
         .ok_or_else(|| ScenarioError::MissingColumn {
             signal: injection.name.clone(),
-            column: injection.time_column.clone(),
+            column: time_column.clone(),
         })?;
     let value_idx = headers
         .iter()
-        .position(|header| header == injection.value_column)
+        .position(|header| header == value_column)
         .ok_or_else(|| ScenarioError::MissingColumn {
             signal: injection.name.clone(),
-            column: injection.value_column.clone(),
+            column: value_column.clone(),
         })?;
 
     if time_idx.checked_add(1) != Some(value_idx) {
         return Err(ScenarioError::NonAdjacentColumns {
             signal: injection.name.clone(),
-            time_column: injection.time_column.clone(),
-            value_column: injection.value_column.clone(),
+            time_column,
+            value_column,
         });
     }
 

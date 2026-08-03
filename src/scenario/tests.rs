@@ -13,16 +13,12 @@ input_file = "scenario.csv"
 [inject.0]
 name = "sidestick_pitch_position"
 variable = "K:AXIS_ELEVATOR_SET"
-time_column = "sidestick_pitch_position.time"
-value_column = "sidestick_pitch_position.value"
 source_range = [-100.0, 100.0]
 simulator_range = [-1.0, 1.0]
 
 [inject.1]
 name = "sidestick_roll_position"
 variable = "K:AXIS_AILERONS_SET"
-time_column = "sidestick_roll_position.time"
-value_column = "sidestick_roll_position.value"
 source_range = [-100.0, 100.0]
 simulator_range = [-1.0, 1.0]
 
@@ -81,7 +77,8 @@ fn rejects_missing_duplicate_and_non_adjacent_headers() {
     let missing = "sidestick_pitch_position.time,other,sidestick_roll_position.time,sidestick_roll_position.value\n0,0,0,0\n";
     assert!(matches!(
         validate_scenario(missing.as_bytes(), &config()),
-        Err(ScenarioError::MissingColumn { .. })
+        Err(ScenarioError::MissingColumn { column, .. })
+            if column == "sidestick_pitch_position.value"
     ));
 
     let duplicate = "sidestick_pitch_position.time,sidestick_pitch_position.value,sidestick_pitch_position.value,sidestick_roll_position.time,sidestick_roll_position.value\n0,0,0,0,0\n";

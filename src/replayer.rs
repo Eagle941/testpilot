@@ -222,8 +222,6 @@ input_file = "scenario.csv"
 [inject.0]
 name = "sidestick_pitch_position"
 variable = "K:AXIS_ELEVATOR_SET"
-time_column = "sidestick_pitch_position.time"
-value_column = "sidestick_pitch_position.value"
 source_range = [-100.0, 100.0]
 simulator_range = [-1.0, 1.0]
 
