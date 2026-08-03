@@ -91,6 +91,9 @@ pub enum ReplayerError {
     #[error("configuration path `{path}` has no parent directory")]
     ConfigPathWithoutParent { path: PathBuf },
 
+    #[error("scenario path `{path}` has no parent directory")]
+    ScenarioPathWithoutParent { path: PathBuf },
+
     #[error("scenario update requested while idle")]
     UpdateWhileIdle,
 
@@ -125,6 +128,23 @@ pub enum SimulatorError {
 
     #[error("calculator code failed while writing {value} to `{variable}`")]
     CalculatorCodeWriteFailed { variable: String, value: f64 },
+
+    #[error(
+        "unsupported readable simulator variable `{variable}`; expected a non-empty A: or L: prefix"
+    )]
+    UnsupportedReadVariable { variable: String },
+
+    #[error("A: variable `{variable}` requires a read unit")]
+    MissingReadUnit { variable: String },
+
+    #[error("unit is only valid for A: variables, got `{variable}`")]
+    UnexpectedReadUnit { variable: String },
+
+    #[error("calculator code failed while reading `{variable}`")]
+    CalculatorCodeReadFailed { variable: String },
+
+    #[error("simulator returned non-finite value {value} for `{variable}`")]
+    NonFiniteRead { variable: String, value: f64 },
 }
 
 /// Structural and numeric validation failures for scenario CSV input.
@@ -235,6 +255,60 @@ pub enum GaugeError {
         #[source]
         source: SimulatorError,
     },
+
+    #[error("recording signal `{signal}` is not readable: {source}")]
+    ValidateRecordingSignal {
+        signal: String,
+        #[source]
+        source: SimulatorError,
+    },
+
+    #[error("failed to sample signal `{signal}`: {source}")]
+    SampleSignal {
+        signal: String,
+        #[source]
+        source: SimulatorError,
+    },
+
+    #[error("failed to record telemetry frame: {0}")]
+    RecordFrame(#[from] RecordingError),
+}
+
+/// Telemetry file creation, serialization, and finalization failures.
+#[derive(Debug, Error)]
+pub enum RecordingError {
+    #[error("host time is before the Unix epoch")]
+    ClockBeforeUnixEpoch,
+
+    #[error("host UTC timestamp is outside the supported year range")]
+    TimestampOutOfRange,
+
+    #[error("failed to create telemetry file `{path}`: {source}")]
+    CreateFile {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+
+    #[error("failed to write telemetry file `{path}`: {source}")]
+    WriteCsv {
+        path: PathBuf,
+        #[source]
+        source: csv::Error,
+    },
+
+    #[error("failed to flush telemetry file `{path}`: {source}")]
+    FlushFile {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+
+    #[error("telemetry frame contains {found} values; expected {expected}")]
+    ValueCount { expected: usize, found: usize },
+
+    #[error("telemetry value for `{signal}` must be finite, got {value}")]
+    NonFiniteValue { signal: String, value: f64 },
 }
 
 /// Invalid samples, interpolation requests, and range conversions.

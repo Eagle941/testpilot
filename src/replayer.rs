@@ -1,17 +1,20 @@
 //! Replay lifecycle orchestration independent of the MSFS gauge API.
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use crate::arm::ArmState;
-use crate::config::{CONFIG_PATH, read_config_file};
-use crate::error::ReplayerError;
+use crate::config::{CONFIG_PATH, RecordingConfig, read_config_file};
+use crate::error::{RecordingError, ReplayerError};
+use crate::recording::TelemetryRecorder;
 use crate::scenario::{InterpolationRows, ScenarioPlayback};
 
 /// Data available while processing one running simulator frame.
 pub(crate) struct InterpolationFrame<'a> {
     elapsed: Duration,
     playback: &'a ScenarioPlayback,
+    recordings: &'a [RecordingConfig],
+    recorder: &'a mut TelemetryRecorder,
 }
 
 impl InterpolationFrame<'_> {
@@ -23,6 +26,17 @@ impl InterpolationFrame<'_> {
     /// Returns one bounding data-point pair per configured injection.
     pub(crate) fn data_points(&self) -> impl Iterator<Item = InterpolationRows<'_>> {
         self.playback.interpolation_rows()
+    }
+
+    /// Returns configured telemetry signals in deterministic numeric order.
+    pub(crate) const fn recordings(&self) -> &[RecordingConfig] {
+        self.recordings
+    }
+
+    /// Appends the sampled telemetry values for this simulator frame.
+    pub(crate) fn record(&mut self, values: &[f64]) -> Result<(), RecordingError> {
+        self.recorder
+            .write_frame(self.elapsed, self.recordings, values)
     }
 }
 
@@ -37,6 +51,8 @@ pub(crate) enum ReplayerUpdate<'a> {
 /// Scenario playback and its simulator-clock origin.
 struct ActiveScenario {
     playback: ScenarioPlayback,
+    recordings: Vec<RecordingConfig>,
+    recorder: TelemetryRecorder,
     started_at: Duration,
 }
 
@@ -80,9 +96,16 @@ impl Replayer {
         Ok(Some(self.update_scenario(simulation_time)?))
     }
 
-    /// Releases all replay state. Calling this repeatedly is safe.
-    pub(crate) fn reset(&mut self) {
-        self.active = None;
+    /// Flushes telemetry and releases all replay state.
+    ///
+    /// Calling this repeatedly is safe. Replay state is released even when the
+    /// final telemetry flush fails.
+    pub(crate) fn reset(&mut self) -> Result<(), RecordingError> {
+        self.arm_state = ArmState::default();
+        let Some(mut active) = self.active.take() else {
+            return Ok(());
+        };
+        active.recorder.flush()
     }
 
     fn start_scenario(&mut self, started_at: Duration) -> anyhow::Result<()> {
@@ -101,14 +124,37 @@ impl Replayer {
                 })?;
         let scenario_path = config_directory.join(&config.input_file);
         let playback = ScenarioPlayback::new(&scenario_path, &config)?;
+        #[cfg(target_arch = "wasm32")]
+        let telemetry_directory = std::path::Path::new("/work");
+        #[cfg(not(target_arch = "wasm32"))]
+        let telemetry_directory =
+            scenario_path
+                .parent()
+                .ok_or_else(|| ReplayerError::ScenarioPathWithoutParent {
+                    path: scenario_path.clone(),
+                })?;
+        println!("TESTPILOT: reading host UTC timestamp");
+        let recording_started_at = SystemTime::now();
+        println!(
+            "TESTPILOT: creating telemetry file in {}",
+            telemetry_directory.display()
+        );
+        let recorder =
+            TelemetryRecorder::new(telemetry_directory, &config.record, recording_started_at)?;
 
         println!(
             "TESTPILOT: opened {} with {} signal cursors",
             scenario_path.display(),
             playback.signal_count()
         );
+        println!(
+            "TESTPILOT: recording telemetry to {}",
+            recorder.path().display()
+        );
         self.active = Some(ActiveScenario {
             playback,
+            recordings: config.record,
+            recorder,
             started_at,
         });
         println!("TESTPILOT: scenario cursors ready");
@@ -132,6 +178,8 @@ impl Replayer {
         Ok(ReplayerUpdate::Running(InterpolationFrame {
             elapsed,
             playback: &active.playback,
+            recordings: &active.recordings,
+            recorder: &mut active.recorder,
         }))
     }
 }
@@ -292,8 +340,39 @@ unit = "radians"
         let update = replayer.update_scenario(time(100.2)).unwrap();
         assert!(matches!(update, ReplayerUpdate::Completed));
         assert!(replayer.active.is_some());
-        replayer.reset();
+        replayer.reset().unwrap();
         assert!(replayer.active.is_none());
+    }
+
+    #[test]
+    fn records_running_frames_beside_the_scenario() {
+        let fixture = Fixture::new();
+        let mut replayer = Replayer::with_config_path(fixture.config_path.clone());
+        replayer.start_scenario(time(100.0)).unwrap();
+
+        let ReplayerUpdate::Running(mut frame) = replayer.update_scenario(time(100.05)).unwrap()
+        else {
+            panic!("running update did not return interpolation data");
+        };
+        assert_eq!(frame.recordings().len(), 1);
+        assert_eq!(frame.recordings()[0].name, "pitch");
+        frame.record(&[0.125]).unwrap();
+        replayer.reset().unwrap();
+
+        let telemetry_path = fs::read_dir(&fixture.directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("telemetry_") && name.ends_with(".csv"))
+            })
+            .expect("telemetry file was not created beside the scenario");
+        assert_eq!(
+            fs::read_to_string(telemetry_path).unwrap(),
+            "pitch.time,pitch.value\n0.05,0.125\n"
+        );
     }
 
     #[test]
@@ -363,8 +442,8 @@ unit = "radians"
         let mut replayer = Replayer::with_config_path(fixture.config_path.clone());
         replayer.pre_update(1.0, Duration::ZERO).unwrap();
 
-        replayer.reset();
-        replayer.reset();
+        replayer.reset().unwrap();
+        replayer.reset().unwrap();
 
         assert!(replayer.active.is_none());
     }

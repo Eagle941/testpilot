@@ -15,18 +15,24 @@ pub(crate) trait SimulatorAdapter {
 
     /// Writes a value to a prefixed simulator destination.
     fn write(&mut self, variable: &str, value: f64) -> Result<(), SimulatorError>;
+
+    /// Validates that a prefixed simulator source can be read with the given unit.
+    fn validate_read(&mut self, variable: &str, unit: Option<&str>) -> Result<(), SimulatorError>;
+
+    /// Reads a finite value from a prefixed simulator source.
+    fn read(&mut self, variable: &str, unit: Option<&str>) -> Result<f64, SimulatorError>;
 }
 
 /// MSFS implementation backed by legacy calculator code.
 pub(crate) struct MsfsSimulator {
-    calculator_code: String,
+    calculator_code_buffer: String,
 }
 
 impl MsfsSimulator {
     /// Creates an adapter with a reusable calculator-code buffer.
     pub(crate) const fn new() -> MsfsSimulator {
         MsfsSimulator {
-            calculator_code: String::new(),
+            calculator_code_buffer: String::new(),
         }
     }
 }
@@ -41,13 +47,32 @@ impl SimulatorAdapter for MsfsSimulator {
     }
 
     fn write(&mut self, variable: &str, value: f64) -> Result<(), SimulatorError> {
-        build_calculator_code(&mut self.calculator_code, variable, value)?;
-        msfs::legacy::execute_calculator_code::<()>(&self.calculator_code).ok_or_else(|| {
+        build_calculator_code(&mut self.calculator_code_buffer, variable, value)?;
+        msfs::legacy::execute_calculator_code::<()>(&self.calculator_code_buffer).ok_or_else(|| {
             SimulatorError::CalculatorCodeWriteFailed {
                 variable: variable.to_owned(),
                 value,
             }
         })
+    }
+
+    fn validate_read(&mut self, variable: &str, unit: Option<&str>) -> Result<(), SimulatorError> {
+        build_read_calculator_code(&mut self.calculator_code_buffer, variable, unit)
+    }
+
+    fn read(&mut self, variable: &str, unit: Option<&str>) -> Result<f64, SimulatorError> {
+        self.validate_read(variable, unit)?;
+        let value = msfs::legacy::execute_calculator_code::<f64>(&self.calculator_code_buffer)
+            .ok_or_else(|| SimulatorError::CalculatorCodeReadFailed {
+                variable: variable.to_owned(),
+            })?;
+        if !value.is_finite() {
+            return Err(SimulatorError::NonFiniteRead {
+                variable: variable.to_owned(),
+                value,
+            });
+        }
+        Ok(value)
     }
 }
 
@@ -83,16 +108,59 @@ fn build_calculator_code(
     })
 }
 
+/// Formats a calculator-code read for an `A:` or `L:` simulator variable.
+fn build_read_calculator_code(
+    output: &mut String,
+    variable: &str,
+    unit: Option<&str>,
+) -> Result<(), SimulatorError> {
+    if variable.as_bytes().contains(&0) {
+        return Err(SimulatorError::UnsupportedReadVariable {
+            variable: variable.to_owned(),
+        });
+    }
+
+    output.clear();
+    match variable.as_bytes() {
+        [b'A', b':', _, ..] => {
+            let unit = unit
+                .filter(|unit| !unit.is_empty() && !unit.as_bytes().contains(&0))
+                .ok_or_else(|| SimulatorError::MissingReadUnit {
+                    variable: variable.to_owned(),
+                })?;
+            write!(output, "({variable}, {unit})")
+        }
+        [b'L', b':', _, ..] if unit.is_none() => write!(output, "({variable})"),
+        [b'L', b':', _, ..] => {
+            return Err(SimulatorError::UnexpectedReadUnit {
+                variable: variable.to_owned(),
+            });
+        }
+        _ => {
+            return Err(SimulatorError::UnsupportedReadVariable {
+                variable: variable.to_owned(),
+            });
+        }
+    }
+    .map_err(|source| SimulatorError::CalculatorCodeFormatting {
+        variable: variable.to_owned(),
+        source,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
     use crate::error::SimulatorError;
 
-    use super::{MsfsSimulator, SimulatorAdapter, build_calculator_code};
+    use super::{
+        MsfsSimulator, SimulatorAdapter, build_calculator_code, build_read_calculator_code,
+    };
 
     struct FakeSimulator {
         time: Duration,
+        read_value: f64,
         writes: Vec<(String, f64)>,
     }
 
@@ -105,12 +173,26 @@ mod tests {
             self.writes.push((variable.to_owned(), value));
             Ok(())
         }
+
+        fn validate_read(
+            &mut self,
+            variable: &str,
+            unit: Option<&str>,
+        ) -> Result<(), SimulatorError> {
+            let mut output = String::new();
+            build_read_calculator_code(&mut output, variable, unit)
+        }
+
+        fn read(&mut self, _variable: &str, _unit: Option<&str>) -> Result<f64, SimulatorError> {
+            Ok(self.read_value)
+        }
     }
 
     #[test]
     fn supports_fake_simulator_adapters() {
         let mut simulator = FakeSimulator {
             time: Duration::from_secs(42),
+            read_value: 2.5,
             writes: Vec::new(),
         };
 
@@ -119,6 +201,8 @@ mod tests {
             Duration::from_secs(42)
         );
         simulator.write("L:TEST", 1.0).unwrap();
+        simulator.validate_read("A:TEST", Some("number")).unwrap();
+        assert_eq!(simulator.read("A:TEST", Some("number")).unwrap(), 2.5);
         assert_eq!(simulator.writes, vec![("L:TEST".to_owned(), 1.0)]);
     }
 
@@ -134,21 +218,45 @@ mod tests {
     }
 
     #[test]
+    fn builds_aircraft_and_local_variable_reads() {
+        let mut output = String::new();
+
+        build_read_calculator_code(&mut output, "A:PLANE PITCH DEGREES", Some("radians")).unwrap();
+        assert_eq!(output, "(A:PLANE PITCH DEGREES, radians)");
+
+        build_read_calculator_code(&mut output, "L:EXAMPLE", None).unwrap();
+        assert_eq!(output, "(L:EXAMPLE)");
+
+        assert!(matches!(
+            build_read_calculator_code(&mut output, "A:TEST", None),
+            Err(SimulatorError::MissingReadUnit { .. })
+        ));
+        assert!(matches!(
+            build_read_calculator_code(&mut output, "L:TEST", Some("number")),
+            Err(SimulatorError::UnexpectedReadUnit { .. })
+        ));
+        assert!(matches!(
+            build_read_calculator_code(&mut output, "K:EVENT", None),
+            Err(SimulatorError::UnsupportedReadVariable { .. })
+        ));
+    }
+
+    #[test]
     fn reuses_and_clears_the_output_buffer() {
         let mut simulator = MsfsSimulator::new();
-        simulator.calculator_code.reserve(128);
-        let capacity = simulator.calculator_code.capacity();
+        simulator.calculator_code_buffer.reserve(128);
+        let capacity = simulator.calculator_code_buffer.capacity();
 
         build_calculator_code(
-            &mut simulator.calculator_code,
+            &mut simulator.calculator_code_buffer,
             "K:AXIS_AILERONS_SET",
             16384.0,
         )
         .unwrap();
-        build_calculator_code(&mut simulator.calculator_code, "L:X", 0.0).unwrap();
+        build_calculator_code(&mut simulator.calculator_code_buffer, "L:X", 0.0).unwrap();
 
-        assert_eq!(simulator.calculator_code, "0 (>L:X)");
-        assert_eq!(simulator.calculator_code.capacity(), capacity);
+        assert_eq!(simulator.calculator_code_buffer, "0 (>L:X)");
+        assert_eq!(simulator.calculator_code_buffer.capacity(), capacity);
     }
 
     #[test]

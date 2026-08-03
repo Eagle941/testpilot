@@ -90,7 +90,7 @@ Use an explicit, documented configuration format. The configuration must define:
 - the parameters and paired time/value columns to inject;
 - the aircraft-response parameters to record;
 - each injected parameter's logical name, prefixed simulator `variable`, paired CSV columns, source range, and simulator range;
-- each recorded parameter's logical name, prefixed simulator `variable`, and an MSFS `unit` when the variable uses the `A:` prefix;
+- each recorded parameter's logical name and prefixed simulator `variable`; recordings using the `A:` prefix require an MSFS `unit`, while recordings using any other prefix must not specify `unit`;
 - optional metadata needed to reproduce the test.
 
 Do not add configuration fields for behavior fixed by the format or supported signal catalog. In particular, the MVP configuration does not contain a scenario time unit, time origin, telemetry section, parameter type, or interpolation parameter. Document fixed time-unit, time-origin, signal-type, interpolation, telemetry sampling, and sampling-order semantics in the format specification.
@@ -128,26 +128,25 @@ Open the scenario independently once per configured injection so each signal has
 - Read simulator identifiers only from the trusted replay configuration, never from scenario CSV column names or values.
 - Before playback, verify that required simulator/A32NX interfaces can be resolved where the API permits it.
 - Stop or fail safely when a required injection fails. Do not continue a test while presenting it as valid.
-- Arm and start a run by setting the library-owned `L:REPLAYER_ARMED` local variable to `1`. Setting it to `0` while running requests an abort. Initialize and reset it to `0` while idle and after any terminal run state. Reject overlapping runs.
+- Arm and start a run by setting the library-owned `L:REPLAYER_ARMED` local variable to `1`. Initialize and reset it to `0` while idle and after any terminal run state. Reject overlapping runs. Setting it to `0` while running has no effect in the current MVP; operator-requested abort handling is a future requirement.
 - While running, replay commands must override local pilot controls using a verified A32NX-compatible input-bypass mechanism. Do not rely on racing competing input events.
 - Treat autopilot configuration as a precondition established by the operator before arming. The MVP does not engage, disengage, change, or restore autopilot modes; scenarios requiring autopilot arbitration are outside scope.
-- On completion, abort, or failure, stop injection and interception, remove replay overrides, reset `L:REPLAYER_ARMED` to `0`, and give control back to the user. Do not restore prior positions or autopilot modes unless a verified restoration mechanism is deliberately added later.
+- On completion or failure, stop injection, reset `L:REPLAYER_ARMED` to `0`, and give control back to the user. Do not restore prior positions or autopilot modes unless a verified restoration mechanism is deliberately added later. Future abort handling and input interception must provide the same cleanup guarantees.
 - Flight-test automation can command the aircraft unexpectedly. Do not automatically start control injection merely because the module loaded.
 
 ## Telemetry Recording
 
-Output must be a machine-readable CSV saved in the same directory as the input scenario. Generate its name from the host UTC date and time at replay start using `telemetry_YYYYMMDDTHHMMSS.csv`; do not configure or overwrite a fixed telemetry name. If the generated path already exists, fail rather than overwrite it.
+Output must be a machine-readable CSV saved in the package-specific writable `/work` mount when running in MSFS. On the validated Microsoft Store installation, this maps under `%LOCALAPPDATA%\Packages\Microsoft.FlightSimulator_8wekyb3d8bbwe\LocalState\packages\flybywire-aircraft-a320-neo\work`. Host-side tests may write beside the input scenario. Generate the filename from the host UTC date and time at replay start using `telemetry_YYYYMMDDTHHMMSS.csv`; do not configure or overwrite a fixed telemetry name. If the generated path already exists, fail rather than overwrite it.
 
-- Use `time` as the first column, followed by each selected `record.N` parameter in numeric configuration order.
-- For the complete MVP selection, use `time,pitch,roll,elevator_position,aileron_position`.
-- Record scenario-relative simulator-clock time in seconds.
+- Give each selected `record.N` parameter an adjacent `<signal>.time,<signal>.value` column pair in numeric configuration order so telemetry uses the scenario-input shape and can be replayed as input.
+- For the complete MVP selection, use `pitch.time,pitch.value,roll.time,roll.value,elevator_position.time,elevator_position.value,aileron_position.time,aileron_position.value`.
+- Sample telemetry every MSFS frame after that frame's input injection. Repeat that frame's scenario-relative simulator elapsed seconds in every recorded signal's `.time` column.
 - Treat pitch and roll as aggregate MSFS aircraft attitudes and elevator/aileron positions as aggregate MSFS control-surface positions, not individual A32NX surfaces.
-- Sample telemetry every MSFS frame after that frame's input injection.
 - Preserve the native MSFS sign convention for all logical signals. Keep low-level event sign conversions inside the simulator adapter.
 - Use stable column order and deterministic numeric formatting.
 - Stream telemetry incrementally with bounded buffering so recording length is limited by available output storage rather than RAM.
-- Flush at safe lifecycle points so failures do not lose the entire run, and detect/report disk-full and partial-write failures.
-- Retain partial telemetry after aborts or failures under its normal timestamped name; the MVP does not mark partial files in their name or schema.
+- Flush telemetry on completion and failure, and detect/report disk-full and partial-write failures. Future abort handling must also flush telemetry.
+- Retain partial telemetry after failures under its normal timestamped name; the MVP does not mark partial files in their name or schema. Future aborted runs must follow the same policy.
 - File access in MSFS WASM may be sandboxed or restricted. Use only file-system locations and APIs supported by the MSFS SDK and `msfs-rs`; surface access failures clearly.
 - Never claim a recording is complete if output creation, serialization, write, or finalization failed.
 
@@ -159,7 +158,7 @@ Output must be a machine-readable CSV saved in the same directory as the input s
 - Do not wrap an error inside another variant of the same error enum merely to add context. Use `map_err` only when converting to a different error layer or adding structured domain information.
 - Report terminal errors through the logging/error facilities available in `msfs-rs`.
 - On a terminal failure, perform best-effort control release, flush and close but do not delete partial telemetry, then return from the WASM event loop/module entry point without panicking.
-- Model the run lifecycle explicitly, for example: idle, loading, ready, running, stopping, completed, aborted, and failed.
+- Model the implemented run lifecycle explicitly, for example: idle, loading, ready, running, stopping, completed, and failed. Add an aborted state when operator-requested abort handling is implemented.
 - Make start, stop, and cleanup operations idempotent where practical.
 - Reject overlapping runs unless concurrency is deliberately implemented and tested.
 - Favor deterministic behavior and reproducible output over implicit convenience behavior.
@@ -176,12 +175,12 @@ Add host-side unit and integration tests for simulator-independent code. Cover a
 - configured injection and recording parameter selection;
 - bounded-memory processing of long scenarios and telemetry streams;
 - simulator-clock scheduling under the MVP `1x`, unpaused assumption;
-- arming-variable start/abort transitions and release of replay control;
+- arming-variable start transitions and release of replay control;
 - unit and range conversion;
 - output schema, host-UTC timestamped file naming, and numeric formatting;
 - write failures and partial-run status;
 - failure cleanup and panic-free module termination;
-- abort and lifecycle transitions.
+- lifecycle transitions; add abort coverage when operator-requested abort handling is implemented.
 
 Use a fake simulator adapter and a controllable clock for scheduling tests. Do not require a running copy of MSFS for ordinary parser, scheduler, or serializer tests.
 
