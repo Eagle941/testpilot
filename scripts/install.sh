@@ -12,7 +12,7 @@ fi
 aircraft="$package/SimObjects/AirPlanes/FlyByWire_A320_NEO"
 panel="$aircraft/panel"
 
-sh scripts/build-wasm.sh
+sh scripts/dev-env/run.sh ./scripts/build-wasm.sh
 cp -f target/wasm32-wasip1/release/testpilot-msfs.wasm "$panel/testpilot.wasm"
 mkdir -p "$work"
 cp -f example/replayer_config.toml "$work/replayer_config.toml"
