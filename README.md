@@ -364,3 +364,12 @@ signals. The simulator adapter must still confirm that each event and variable
 is accessible from the selected `msfs-rs` WASM revision. Any observed mismatch
 with the current A32NX must be documented and resolved before claiming
 in-simulator compatibility.
+
+## TODO
+
+- Support multiple replay configurations through
+  `/work/replayer_selection.toml`. Reserve `L:REPLAYER_ARMED = 0` for idle and
+  use each configured positive numeric value to select and start its associated
+  configuration. Each selected configuration continues to identify its own
+  scenario through `input_file`, so configuration and scenario selection cannot
+  become inconsistent. No cockpit UI is required for the initial implementation.
