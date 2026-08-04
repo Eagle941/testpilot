@@ -52,7 +52,7 @@ impl TelemetryRecorder {
         &mut self,
         elapsed: Duration,
         recordings: &[RecordingConfig],
-        values: &[f64],
+        values: &[Option<f64>],
     ) -> Result<(), RecordingError> {
         if recordings.len() != values.len() {
             return Err(RecordingError::ValueCount {
@@ -64,14 +64,22 @@ impl TelemetryRecorder {
         self.row_buffer.clear();
         let time = elapsed.as_secs_f64().to_string();
         for (recording, value) in recordings.iter().zip(values) {
-            if !value.is_finite() {
-                return Err(RecordingError::NonFiniteValue {
-                    signal: recording.name.clone(),
-                    value: *value,
-                });
+            match value {
+                Some(value) => {
+                    self.row_buffer.push_field(&time);
+                    if !value.is_finite() {
+                        return Err(RecordingError::NonFiniteValue {
+                            signal: recording.name.clone(),
+                            value: *value,
+                        });
+                    }
+                    self.row_buffer.push_field(&value.to_string());
+                }
+                None => {
+                    self.row_buffer.push_field("");
+                    self.row_buffer.push_field("");
+                }
             }
-            self.row_buffer.push_field(&time);
-            self.row_buffer.push_field(&value.to_string());
         }
         self.writer
             .write_record(&self.row_buffer)
@@ -166,6 +174,7 @@ mod tests {
             name: name.to_owned(),
             variable: format!("L:{name}"),
             unit: None,
+            max_sampling_rate: None,
         }
     }
 
@@ -222,7 +231,11 @@ mod tests {
         let started_at = UNIX_EPOCH + Duration::from_secs(946_684_800);
         let mut recorder = TelemetryRecorder::new(&directory, &recordings, started_at).unwrap();
         recorder
-            .write_frame(Duration::from_millis(1_500), &recordings, &[1.25, -0.5])
+            .write_frame(
+                Duration::from_millis(1_500),
+                &recordings,
+                &[Some(1.25), Some(-0.5)],
+            )
             .unwrap();
         recorder.flush().unwrap();
 
@@ -240,6 +253,42 @@ mod tests {
     }
 
     #[test]
+    fn writes_blank_columns_when_values_are_not_sampled() {
+        let directory = fixture_directory();
+        fs::create_dir_all(&directory).unwrap();
+        let recordings = [recording("pitch"), recording("roll")];
+        let mut recorder = TelemetryRecorder::new(
+            &directory,
+            &recordings,
+            UNIX_EPOCH + Duration::from_secs(42),
+        )
+        .unwrap();
+        recorder
+            .write_frame(
+                Duration::from_secs_f64(0.0),
+                &recordings,
+                &[Some(1.0), Some(2.0)],
+            )
+            .unwrap();
+        recorder
+            .write_frame(
+                Duration::from_secs_f64(0.5),
+                &recordings,
+                &[None, Some(3.0)],
+            )
+            .unwrap();
+        recorder.flush().unwrap();
+
+        let contents = fs::read_to_string(recorder.path()).unwrap();
+        assert_eq!(
+            contents,
+            "pitch.time,pitch.value,roll.time,roll.value\n0,1,0,2\n,,0.5,3\n"
+        );
+        drop(recorder);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn rejects_invalid_frames() {
         let directory = fixture_directory();
         fs::create_dir_all(&directory).unwrap();
@@ -251,7 +300,7 @@ mod tests {
             Err(RecordingError::ValueCount { .. })
         ));
         assert!(matches!(
-            recorder.write_frame(Duration::ZERO, &recordings, &[f64::NAN]),
+            recorder.write_frame(Duration::ZERO, &recordings, &[Some(f64::NAN)]),
             Err(RecordingError::NonFiniteValue { .. })
         ));
         drop(recorder);
