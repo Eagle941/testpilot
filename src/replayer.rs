@@ -5,9 +5,9 @@ use std::time::{Duration, SystemTime};
 
 use crate::arm::PositiveTrigger;
 use crate::config::{CONFIG_PATH, RecordingConfig, ReplayConfig};
+use crate::cursor::{Frame, Scenario};
 use crate::error::{RecordingError, ReplayerError};
 use crate::recording::TelemetryRecorder;
-use crate::scenario::{Frame, Scenario};
 
 /// Data available while processing one running simulator frame.
 pub struct InterpolationFrame<'a> {

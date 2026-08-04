@@ -43,8 +43,12 @@ impl GaugeRuntime {
         let simulation_time = self.simulator.simulation_time()?;
         let armed = self.armed_variable.get_value::<f64>();
 
-        if let Some(update) = self.replayer.pre_update(armed, simulation_time)? {
-            self.handle_replayer_update(update)?;
+        match self.replayer.pre_update(armed, simulation_time)? {
+            Some(ReplayerUpdate::Running { frame, started_now }) => {
+                Self::handle_running_frame(frame, started_now, &mut self.simulator)?;
+            }
+            Some(ReplayerUpdate::Completed) => self.stop()?,
+            None => {}
         }
 
         Ok(())
@@ -60,21 +64,6 @@ impl GaugeRuntime {
         result
     }
 
-    /// Routes a replay update produced by [`Replayer::pre_update`].
-    ///
-    /// Running updates are processed as a single frame; completed updates stop
-    /// telemetry and transition to idle state.
-    fn handle_replayer_update(&mut self, update: ReplayerUpdate<'_>) -> anyhow::Result<()> {
-        match update {
-            ReplayerUpdate::Running { frame, started_now } => {
-                self.handle_running_frame(frame, started_now)?
-            }
-            ReplayerUpdate::Completed => self.finish_run()?,
-        }
-
-        Ok(())
-    }
-
     /// Processes one running frame from the replay engine.
     ///
     /// If the frame is the first after a start transition, recording variables are
@@ -83,36 +72,35 @@ impl GaugeRuntime {
     /// `started_now` is true only for the first frame of a newly started run, and
     /// allows one-time per-run work to execute exactly once.
     fn handle_running_frame(
-        &mut self,
         mut frame: InterpolationFrame<'_>,
         started_now: bool,
+        simulator: &mut MsfsSimulator,
     ) -> Result<(), GaugeError> {
         if started_now {
-            self.validate_recordings(&frame)?;
+            Self::validate_recordings(simulator, &frame)?;
         }
 
-        self.inject_inputs(&frame)?;
-        self.record_outputs(&mut frame)?;
+        Self::inject_inputs(simulator, &frame)?;
+        Self::record_outputs(simulator, &mut frame)?;
 
         Ok(())
     }
 
-    /// Finalizes a completed replay run and resets scenario state.
+    /// Validates configured recordings before a run starts.
     ///
-    /// Telemetry flush and arming reset are delegated to [`Self::stop`].
-    fn finish_run(&mut self) -> Result<(), RecordingError> {
-        self.stop()?;
-        println!("TESTPILOT: scenario completed");
-        Ok(())
-    }
-
-    /// Validates all configured recording signals for simulator readability.
+    /// This verifies every requested recording signal is readable by the simulator:
+    /// variable prefix/format is supported, required read units are present for
+    /// `A:` variables, `L:` variables do not provide units, and calculator read
+    /// code can be generated.
     ///
     /// Validation runs only on the first running frame after a start transition so
     /// expensive per-run checks are separated from hot per-frame logic.
-    fn validate_recordings(&mut self, frame: &InterpolationFrame<'_>) -> Result<(), GaugeError> {
+    fn validate_recordings(
+        simulator: &mut MsfsSimulator,
+        frame: &InterpolationFrame<'_>,
+    ) -> Result<(), GaugeError> {
         for recording in frame.recordings() {
-            self.simulator
+            simulator
                 .validate_read(&recording.variable, recording.unit.as_deref())
                 .map_err(|source| GaugeError::ValidateRecordingSignal {
                     signal: recording.name.clone(),
@@ -126,7 +114,10 @@ impl GaugeRuntime {
     /// Interpolates and writes all configured input signals for this frame.
     ///
     /// Interpolation and conversion failures are surfaced as gauge-level errors.
-    fn inject_inputs(&mut self, frame: &InterpolationFrame<'_>) -> Result<(), GaugeError> {
+    fn inject_inputs(
+        simulator: &mut MsfsSimulator,
+        frame: &InterpolationFrame<'_>,
+    ) -> Result<(), GaugeError> {
         let elapsed = frame.elapsed();
         for data_points in frame.data_points() {
             let source_value =
@@ -146,7 +137,7 @@ impl GaugeRuntime {
                         source,
                     })?;
 
-            self.simulator
+            simulator
                 .write(data_points.variable, simulator_value)
                 .map_err(|source| GaugeError::InjectSignal {
                     signal: data_points.signal.to_owned(),
@@ -160,7 +151,10 @@ impl GaugeRuntime {
     /// Samples configured recordings when they are due and writes a telemetry row.
     ///
     /// Rows are written only when at least one recording is due on this frame.
-    fn record_outputs(&mut self, frame: &mut InterpolationFrame<'_>) -> Result<(), GaugeError> {
+    fn record_outputs(
+        simulator: &mut MsfsSimulator,
+        frame: &mut InterpolationFrame<'_>,
+    ) -> Result<(), GaugeError> {
         let elapsed = frame.elapsed();
         let mut sampled_values = Vec::with_capacity(frame.recordings().len());
         let mut any_due = false;
@@ -173,8 +167,7 @@ impl GaugeRuntime {
             }
 
             any_due = true;
-            let value = self
-                .simulator
+            let value = simulator
                 .read(&recording.variable, recording.unit.as_deref())
                 .map_err(|source| GaugeError::SampleSignal {
                     signal: recording.name.clone(),

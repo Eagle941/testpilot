@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::time::Duration;
 
+use crate::cursor::Scenario;
 use crate::playback::Sample;
 
 use super::shared::*;
@@ -16,7 +17,7 @@ fn initializes_rows_and_catches_up_across_multiple_intervals() {
         panic!("failed to create scenario fixture: {error}");
     }
 
-    let result = super::super::Scenario::new(&path, &config());
+    let result = Scenario::new(&path, &config());
     let mut playback = match result {
         Ok(playback) => playback,
         Err(error) => panic!("failed to open scenario fixture: {error:#}"),
@@ -50,7 +51,7 @@ fn initializes_rows_and_catches_up_across_multiple_intervals() {
 #[test]
 fn advances_and_holds_unequal_length_series() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("example/scenario.csv");
-    let mut playback = super::super::Scenario::new(path, &config())
+    let mut playback = Scenario::new(path, &config())
         .unwrap_or_else(|error| panic!("failed to open default scenario: {error:#}"));
 
     let mut held_pitch = false;

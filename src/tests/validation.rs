@@ -4,7 +4,7 @@ use crate::error::ScenarioError;
 #[test]
 fn validates_default_unequal_length_scenario() {
     let summary = validate_scenario(
-        include_bytes!("../../../example/scenario.csv").as_slice(),
+        include_bytes!("../../example/scenario.csv").as_slice(),
         &config(),
     )
     .unwrap_or_else(|error| panic!("default scenario rejected: {error}"));
