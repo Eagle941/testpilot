@@ -13,6 +13,26 @@ input-range conversion. It also provides an MSFS-compatible WASM build and a
 input injection and bounded, incremental telemetry recording. Input
 interception remains to be implemented.
 
+## Repository layout
+
+Current source layout:
+
+- `src/` contains the crate modules:
+  - `lib.rs` (crate entry, tests module wiring)
+  - `config.rs`, `playback.rs`, `recording.rs`, `cursor.rs`, `replayer.rs`, `simulator.rs`,
+    `gauge.rs`, `gauge_runtime.rs`, and `error.rs`.
+- `src/tests/` contains helper modules used by host-side tests (`playback`, `shared`, `validation`).
+- `example/` contains `replayer_config.toml` and `scenario.csv`.
+- `scripts/` contains build, dev, and install helpers.
+
+### Where to edit
+
+- Configuration format and validation: `src/config.rs`
+- Scenario cursors and interpolation: `src/cursor.rs`
+- Replay scheduling and frame orchestration: `src/replayer.rs`
+- MSFS simulation adapter and live loop: `src/simulator.rs`, `src/gauge.rs`, `src/gauge_runtime.rs`
+- Telemetry output: `src/recording.rs`
+
 ## MVP scope
 
 The MVP injects these continuous inputs:

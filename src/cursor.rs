@@ -7,7 +7,7 @@ use csv::{Position, Reader, ReaderBuilder, StringRecord, Trim};
 use crate::config::{InjectionConfig, ReplayConfig};
 use crate::playback::{AffineRange, LinearSegment, PlaybackError, Sample};
 
-use super::ScenarioError;
+use crate::error::ScenarioError;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ColumnPair {

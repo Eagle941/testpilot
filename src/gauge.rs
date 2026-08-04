@@ -6,29 +6,29 @@ use crate::gauge_runtime::GaugeRuntime;
 
 #[msfs::gauge(name=testpilot)]
 async fn testpilot(mut gauge: msfs::Gauge) -> Result<(), Box<dyn Error>> {
-    println!("TESTPILOT: waiting for L:REPLAYER_ARMED = 1");
-
     let mut runtime = GaugeRuntime::new();
+
+    println!("TESTPILOT: waiting for L:REPLAYER_ARMED = 1");
     while let Some(event) = gauge.next_event().await {
         match event {
             MSFSEvent::PreUpdate => {
                 if let Err(error) = runtime.pre_update() {
+                    // Pre-update failures are handled here and cleanup is deferred to a single
+                    // best-effort stop path below.
                     println!("TESTPILOT ERROR: {error:#}");
-                    if let Err(cleanup_error) = runtime.stop() {
-                        println!("TESTPILOT ERROR: cleanup failed: {cleanup_error}");
-                    }
-                    return Ok(());
+                    break;
                 }
             }
-            MSFSEvent::PreKill => {
-                if let Err(error) = runtime.stop() {
-                    println!("TESTPILOT ERROR: cleanup failed: {error}");
-                }
-            }
+            MSFSEvent::PreKill => break,
             _ => {}
         }
     }
 
-    runtime.stop()?;
+    // Cleanup is intentionally best-effort: report but do not fail this entrypoint
+    // on a secondary shutdown/write-path error.
+    if let Err(error) = runtime.stop() {
+        println!("TESTPILOT ERROR: cleanup failed: {error}");
+    }
+
     Ok(())
 }
