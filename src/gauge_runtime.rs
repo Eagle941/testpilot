@@ -73,10 +73,12 @@ impl GaugeRuntime {
         }
         GaugeRuntime::inject_frame(frame, simulator)?;
 
+        let elapsed = frame.elapsed();
         let mut sampled_values = Vec::with_capacity(frame.recordings().len());
         let mut has_due_recording = false;
-        for (recording, schedule) in frame.recordings().iter().zip(frame.recording_schedules()) {
-            if !schedule.should_sample(frame.elapsed()) {
+        let (recordings, schedules) = frame.recordings_and_schedules();
+        for (recording, schedule) in recordings.iter().zip(schedules.iter_mut()) {
+            if !schedule.should_sample(elapsed) {
                 sampled_values.push(None);
                 continue;
             }

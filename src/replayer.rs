@@ -34,9 +34,11 @@ impl InterpolationFrame<'_> {
         self.recordings
     }
 
-    /// Grants mutable access to per-recording sampling schedules.
-    pub(crate) fn recording_schedules(&mut self) -> &mut [RecordingSchedule] {
-        self.recording_schedules
+    /// Returns recordings together with mutable schedules for this frame.
+    pub(crate) fn recordings_and_schedules(
+        &mut self,
+    ) -> (&[RecordingConfig], &mut [RecordingSchedule]) {
+        (self.recordings, self.recording_schedules)
     }
 
     /// Appends the sampled telemetry values for this simulator frame.
@@ -464,7 +466,7 @@ unit = "radians"
             panic!("running update did not return interpolation data");
         };
         assert_eq!(frame.recordings().len(), 2);
-        assert_eq!(frame.recording_schedules().len(), 2);
+        assert_eq!(frame.recordings_and_schedules().1.len(), 2);
         frame.record(&[Some(0.1), Some(10.0)]).unwrap();
 
         let ReplayerUpdate::Running(mut frame) = replayer.update_scenario(time(10.5)).unwrap()
