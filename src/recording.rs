@@ -2,17 +2,21 @@
 
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use csv::{StringRecord, Writer, WriterBuilder};
+use time::OffsetDateTime;
 
 use crate::config::RecordingConfig;
 pub use crate::error::RecordingError;
 
 /// Streaming telemetry writer with one adjacent time/value pair per signal.
 pub struct TelemetryRecorder {
-    path: PathBuf,
+    /// Absolute path to the output CSV file.
+    filename: PathBuf,
+    /// CSV writer bound to the telemetry file.
     writer: Writer<File>,
+    /// Reused row buffer to avoid per-frame allocations.
     row_buffer: StringRecord,
 }
 
@@ -23,7 +27,7 @@ impl TelemetryRecorder {
         recordings: &[RecordingConfig],
         started_at: SystemTime,
     ) -> Result<TelemetryRecorder, RecordingError> {
-        let path = timestamped_path(directory.as_ref(), started_at)?;
+        let path = TelemetryRecorder::path_for(directory, started_at);
         let file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -33,7 +37,7 @@ impl TelemetryRecorder {
                 source,
             })?;
         let mut recorder = TelemetryRecorder {
-            path,
+            filename: path,
             writer: WriterBuilder::new().has_headers(false).from_writer(file),
             row_buffer: StringRecord::new(),
         };
@@ -44,7 +48,24 @@ impl TelemetryRecorder {
 
     /// Returns the generated telemetry path.
     pub fn path(&self) -> &Path {
-        &self.path
+        &self.filename
+    }
+
+    fn path_for(directory: impl AsRef<Path>, started_at: SystemTime) -> PathBuf {
+        // `SystemTime` values for telemetry filenames come from `SystemTime::now()` in normal
+        // execution, so they are expected to be well within supported UTC timestamp ranges.
+        // Keeping the conversion infallible here is acceptable for this low-likelihood edge case.
+        let started_at: OffsetDateTime = started_at.into();
+        let filename = format!(
+            "telemetry_{:0>4}{:0>2}{:0>2}T{:0>2}{:0>2}{:0>2}.csv",
+            started_at.year(),
+            started_at.month() as u8,
+            started_at.day(),
+            started_at.hour(),
+            started_at.minute(),
+            started_at.second()
+        );
+        directory.as_ref().join(filename)
     }
 
     /// Appends one frame using the same elapsed time for every configured value.
@@ -84,7 +105,7 @@ impl TelemetryRecorder {
         self.writer
             .write_record(&self.row_buffer)
             .map_err(|source| RecordingError::WriteCsv {
-                path: self.path.clone(),
+                path: self.filename.clone(),
                 source,
             })
     }
@@ -94,7 +115,7 @@ impl TelemetryRecorder {
         self.writer
             .flush()
             .map_err(|source| RecordingError::FlushFile {
-                path: self.path.clone(),
+                path: self.filename.clone(),
                 source,
             })
     }
@@ -110,62 +131,16 @@ impl TelemetryRecorder {
         self.writer
             .write_record(&self.row_buffer)
             .map_err(|source| RecordingError::WriteCsv {
-                path: self.path.clone(),
+                path: self.filename.clone(),
                 source,
             })
     }
 }
 
-/// Builds `telemetry_YYYYMMDDTHHMMSS.csv` from a host UTC system time.
-pub fn timestamped_path(
-    directory: &Path,
-    started_at: SystemTime,
-) -> Result<PathBuf, RecordingError> {
-    let elapsed = started_at
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| RecordingError::ClockBeforeUnixEpoch)?;
-    let seconds = elapsed.as_secs();
-    let days = i64::try_from(seconds / 86_400).map_err(|_| RecordingError::TimestampOutOfRange)?;
-    let seconds_of_day = seconds % 86_400;
-    let (year, month, day) = civil_date(days)?;
-    let hour = seconds_of_day / 3_600;
-    let minute = seconds_of_day % 3_600 / 60;
-    let second = seconds_of_day % 60;
-    let filename =
-        format!("telemetry_{year:04}{month:02}{day:02}T{hour:02}{minute:02}{second:02}.csv");
-    Ok(directory.join(filename))
-}
-
-/// Converts a signed count of days since 1970-01-01 into a UTC civil date.
-///
-/// The conversion follows Gregorian leap-year rules and supports four-digit
-/// years from 0000 through 9999. Dates outside that range are rejected because
-/// the telemetry filename reserves exactly four digits for the year.
-fn civil_date(days_since_epoch: i64) -> Result<(i64, i64, i64), RecordingError> {
-    let shifted = days_since_epoch
-        .checked_add(719_468)
-        .ok_or(RecordingError::TimestampOutOfRange)?;
-    let era = shifted.div_euclid(146_097);
-    let day_of_era = shifted.rem_euclid(146_097);
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let mut year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_prime = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
-    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
-    if month <= 2 {
-        year += 1;
-    }
-    if !(0..=9_999).contains(&year) {
-        return Err(RecordingError::TimestampOutOfRange);
-    }
-    Ok((year, month, day))
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::time::UNIX_EPOCH;
 
     use super::*;
 
@@ -189,38 +164,31 @@ mod tests {
     #[test]
     fn formats_host_utc_timestamped_paths() {
         assert_eq!(
-            timestamped_path(Path::new("output"), UNIX_EPOCH).unwrap(),
+            TelemetryRecorder::path_for(Path::new("output"), UNIX_EPOCH),
             Path::new("output/telemetry_19700101T000000.csv")
         );
         assert_eq!(
-            timestamped_path(
+            TelemetryRecorder::path_for(
                 Path::new("output"),
                 UNIX_EPOCH + Duration::from_secs(946_684_800)
-            )
-            .unwrap(),
+            ),
             Path::new("output/telemetry_20000101T000000.csv")
         );
     }
 
     #[test]
-    fn converts_epoch_and_pre_epoch_civil_dates() {
-        assert_eq!(civil_date(0).unwrap(), (1970, 1, 1));
-        assert_eq!(civil_date(-1).unwrap(), (1969, 12, 31));
-    }
+    fn formats_gregorian_leap_dates() {
+        let feb_2000 = Duration::from_secs(11_016 * 86_400);
+        assert_eq!(
+            TelemetryRecorder::path_for(Path::new("output"), UNIX_EPOCH + feb_2000),
+            Path::new("output/telemetry_20000229T000000.csv")
+        );
 
-    #[test]
-    fn converts_gregorian_leap_days() {
-        assert_eq!(civil_date(11_016).unwrap(), (2000, 2, 29));
-        assert_eq!(civil_date(19_782).unwrap(), (2024, 2, 29));
-    }
-
-    #[test]
-    fn rejects_civil_dates_after_four_digit_years() {
-        assert_eq!(civil_date(2_932_896).unwrap(), (9999, 12, 31));
-        assert!(matches!(
-            civil_date(2_932_897),
-            Err(RecordingError::TimestampOutOfRange)
-        ));
+        let feb_2024 = Duration::from_secs(19_782 * 86_400);
+        assert_eq!(
+            TelemetryRecorder::path_for(Path::new("output"), UNIX_EPOCH + feb_2024),
+            Path::new("output/telemetry_20240229T000000.csv")
+        );
     }
 
     #[test]

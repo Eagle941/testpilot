@@ -9,7 +9,7 @@ use crate::error::SimulatorError;
 const SIMULATION_TIME_CODE: &str = "(E:SIMULATION TIME, seconds)";
 
 /// Simulator operations required by replay injection.
-pub(crate) trait SimulatorAdapter {
+pub trait SimulatorAdapter {
     /// Returns the current simulator-clock time.
     fn simulation_time(&self) -> Result<Duration, SimulatorError>;
 
@@ -24,13 +24,14 @@ pub(crate) trait SimulatorAdapter {
 }
 
 /// MSFS implementation backed by legacy calculator code.
-pub(crate) struct MsfsSimulator {
+pub struct MsfsSimulator {
+    /// Reusable calculator-code scratch buffer for write/read commands.
     calculator_code_buffer: String,
 }
 
 impl MsfsSimulator {
     /// Creates an adapter with a reusable calculator-code buffer.
-    pub(crate) const fn new() -> MsfsSimulator {
+    pub const fn new() -> MsfsSimulator {
         MsfsSimulator {
             calculator_code_buffer: String::new(),
         }

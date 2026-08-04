@@ -33,10 +33,16 @@ impl ReplayConfig {
     /// Creates a replay configuration from TOML text.
     pub fn new(contents: &str) -> Result<ReplayConfig, ConfigError> {
         let raw = toml::from_str(contents)?;
-        ReplayConfig::from_raw(raw)
+        Self::parse_raw(raw)
     }
 
-    fn from_raw(raw: RawReplayConfig) -> Result<ReplayConfig, ConfigError> {
+    /// Reads and parses a replay configuration file.
+    pub fn read_config_file(path: impl AsRef<Path>) -> Result<ReplayConfig, ConfigError> {
+        let contents = fs::read_to_string(path)?;
+        Self::new(&contents)
+    }
+
+    fn parse_raw(raw: RawReplayConfig) -> Result<ReplayConfig, ConfigError> {
         if raw.format_version != FORMAT_VERSION {
             return Err(ConfigError::UnsupportedFormatVersion {
                 found: raw.format_version,
@@ -44,8 +50,8 @@ impl ReplayConfig {
             });
         }
 
-        let inject = ReplayConfig::parse_injections(raw.inject)?;
-        let record = ReplayConfig::parse_recordings(raw.record)?;
+        let inject = Self::parse_injections(raw.inject)?;
+        let record = Self::parse_recordings(raw.record)?;
 
         Ok(ReplayConfig {
             input_file: PathBuf::from(raw.input_file),
@@ -57,7 +63,7 @@ impl ReplayConfig {
     fn parse_injections(
         entries: BTreeMap<String, RawInjectionConfig>,
     ) -> Result<Vec<InjectionConfig>, ConfigError> {
-        let entries = ReplayConfig::ordered_entries("inject", entries)?;
+        let entries = Self::ordered_entries("inject", entries)?;
         let mut signals = HashSet::with_capacity(entries.len());
         let mut result = Vec::with_capacity(entries.len());
 
@@ -71,7 +77,7 @@ impl ReplayConfig {
     fn parse_recordings(
         entries: BTreeMap<String, RawRecordingConfig>,
     ) -> Result<Vec<RecordingConfig>, ConfigError> {
-        let entries = ReplayConfig::ordered_entries("record", entries)?;
+        let entries = Self::ordered_entries("record", entries)?;
         let mut signals = HashSet::with_capacity(entries.len());
         let mut result = Vec::with_capacity(entries.len());
 
@@ -156,8 +162,8 @@ impl InjectionConfig {
             });
         }
 
-        InjectionConfig::validate_increasing_range(index, "source_range", raw.source_range)?;
-        InjectionConfig::validate_increasing_range(index, "simulator_range", raw.simulator_range)?;
+        Self::validate_increasing_range(index, "source_range", raw.source_range)?;
+        Self::validate_increasing_range(index, "simulator_range", raw.simulator_range)?;
         if raw.simulator_range[0] < -16_383.0 || raw.simulator_range[1] > 16_384.0 {
             return Err(ConfigError::UnsafeSimulatorRange { index });
         }
@@ -240,7 +246,6 @@ impl RecordingConfig {
                 variable: raw.variable,
             });
         }
-
         Ok(RecordingConfig {
             name: raw.name,
             variable: raw.variable,
@@ -300,22 +305,6 @@ struct RawRecordingConfig {
     max_sampling_rate: Option<f64>,
 }
 
-/// Reads and parses a replay configuration file.
-///
-/// File-system and parse failures retain their typed source error.
-pub fn read_config_file(path: impl AsRef<Path>) -> Result<ReplayConfig, ConfigError> {
-    let contents = fs::read_to_string(path)?;
-    parse_config(&contents)
-}
-
-/// Parses and validates the versioned replay TOML document.
-///
-/// Numeric `inject.N` and `record.N` tables must be contiguous from zero. Their
-/// indexes define the order of the returned vectors.
-pub fn parse_config(contents: &str) -> Result<ReplayConfig, ConfigError> {
-    ReplayConfig::new(contents)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,7 +347,7 @@ unit = "position"
 "#;
 
     fn assert_error(config: &str, predicate: impl FnOnce(&ConfigError) -> bool) {
-        match parse_config(config) {
+        match ReplayConfig::new(config) {
             Ok(parsed) => panic!("configuration unexpectedly parsed: {parsed:?}"),
             Err(error) => assert!(predicate(&error), "unexpected error: {error}"),
         }
@@ -366,7 +355,7 @@ unit = "position"
 
     #[test]
     fn parses_default_configuration_file() {
-        match parse_config(include_str!("../example/replayer_config.toml")) {
+        match ReplayConfig::new(include_str!("../example/replayer_config.toml")) {
             Ok(config) => {
                 assert_eq!(config.inject.len(), 2);
                 assert_eq!(config.record.len(), 4);
@@ -377,7 +366,7 @@ unit = "position"
 
     #[test]
     fn parses_readme_configuration() {
-        let config = match parse_config(VALID_CONFIG) {
+        let config = match ReplayConfig::new(VALID_CONFIG) {
             Ok(config) => config,
             Err(error) => panic!("README configuration should parse: {error}"),
         };
@@ -405,7 +394,7 @@ unit = "position"
             panic!("failed to create test configuration: {error}");
         }
 
-        let result = read_config_file(&path);
+        let result = ReplayConfig::read_config_file(&path);
         let _ = std::fs::remove_file(&path);
 
         match result {
@@ -421,7 +410,7 @@ unit = "position"
         let _ = std::fs::remove_file(&path);
 
         assert!(matches!(
-            read_config_file(&path),
+            ReplayConfig::read_config_file(&path),
             Err(ConfigError::FileIo(_))
         ));
     }
@@ -439,7 +428,7 @@ unit = "position"
         let arbitrary = VALID_CONFIG
             .replacen("sidestick_pitch_position\"", "custom_input\"", 1)
             .replacen("K:AXIS_ELEVATOR_SET", "L:CUSTOM_INPUT", 1);
-        match parse_config(&arbitrary) {
+        match ReplayConfig::new(&arbitrary) {
             Ok(config) => {
                 assert_eq!(config.inject[0].name, "custom_input");
                 assert_eq!(config.inject[0].variable, "L:CUSTOM_INPUT");
@@ -470,7 +459,7 @@ unit = "position"
             .replacen("name = \"pitch\"", "name = \"custom_response\"", 1)
             .replacen("A:PLANE PITCH DEGREES", "L:CUSTOM_RESPONSE", 1)
             .replacen("unit = \"radians\"\n", "", 1);
-        match parse_config(&arbitrary) {
+        match ReplayConfig::new(&arbitrary) {
             Ok(config) => {
                 assert_eq!(config.record[0].name, "custom_response");
                 assert_eq!(config.record[0].variable, "L:CUSTOM_RESPONSE");
@@ -518,7 +507,7 @@ unit = "position"
 
     #[test]
     fn accepts_optional_recording_sampling_rate() {
-        let config = parse_config(&VALID_CONFIG.replacen(
+        let config = ReplayConfig::new(&VALID_CONFIG.replacen(
             "unit = \"radians\"\n",
             "unit = \"radians\"\nmax_sampling_rate = 1.0\n",
             1,
@@ -654,7 +643,7 @@ unit = "position"
             .replace("[record.1]", "[record.0]")
             .replace("[record.9]", "[record.1]");
 
-        let config = match parse_config(&reordered) {
+        let config = match ReplayConfig::new(&reordered) {
             Ok(config) => config,
             Err(error) => panic!("reordered configuration should parse: {error}"),
         };
