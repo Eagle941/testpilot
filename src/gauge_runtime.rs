@@ -75,8 +75,8 @@ impl GaugeRuntime {
 
         let mut sampled_values = Vec::with_capacity(frame.recordings().len());
         let mut has_due_recording = false;
-        for (recording, due) in frame.recordings().iter().zip(frame.recording_due()) {
-            if !*due {
+        for (recording, schedule) in frame.recordings().iter().zip(frame.recording_schedules()) {
+            if !schedule.should_sample(frame.elapsed()) {
                 sampled_values.push(None);
                 continue;
             }

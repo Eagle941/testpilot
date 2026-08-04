@@ -530,7 +530,7 @@ unit = "position"
 
     #[test]
     fn rejects_invalid_recording_sampling_rate() {
-        for value in ["0", "-1"] {
+        for value in ["0", "-1", "nan", "inf", "-inf"] {
             assert_error(
                 &VALID_CONFIG.replacen(
                     "unit = \"radians\"\n",

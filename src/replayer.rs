@@ -14,8 +14,8 @@ pub(crate) struct InterpolationFrame<'a> {
     elapsed: Duration,
     playback: &'a ScenarioPlayback,
     recordings: &'a [RecordingConfig],
+    recording_schedules: &'a mut [RecordingSchedule],
     recorder: &'a mut TelemetryRecorder,
-    recording_due: &'a [bool],
 }
 
 impl InterpolationFrame<'_> {
@@ -34,9 +34,9 @@ impl InterpolationFrame<'_> {
         self.recordings
     }
 
-    /// Returns which recording signals were sampled for this frame.
-    pub(crate) fn recording_due(&self) -> &[bool] {
-        self.recording_due
+    /// Grants mutable access to per-recording sampling schedules.
+    pub(crate) fn recording_schedules(&mut self) -> &mut [RecordingSchedule] {
+        self.recording_schedules
     }
 
     /// Appends the sampled telemetry values for this simulator frame.
@@ -60,57 +60,43 @@ struct ActiveScenario {
     recordings: Vec<RecordingConfig>,
     recorder: TelemetryRecorder,
     recording_schedules: Vec<RecordingSchedule>,
-    recording_due: Vec<bool>,
     started_at: Duration,
 }
 
-#[derive(Clone, Copy)]
-struct RecordingSchedule {
-    period: Option<f64>,
-    next_due: f64,
+pub(crate) enum RecordingSchedule {
+    EveryFrame,
+    Limited {
+        period: Duration,
+        next_due: Duration,
+    },
 }
 
 impl RecordingSchedule {
     fn new(max_sampling_rate: Option<f64>) -> RecordingSchedule {
         match max_sampling_rate {
-            Some(rate) => RecordingSchedule {
-                period: Some(1.0 / rate),
-                next_due: 0.0,
-            },
-            None => RecordingSchedule {
-                period: None,
-                next_due: 0.0,
-            },
+            Some(rate) => {
+                let period = Duration::from_secs_f64(1.0 / rate);
+                RecordingSchedule::Limited {
+                    period,
+                    next_due: Duration::ZERO,
+                }
+            }
+            None => RecordingSchedule::EveryFrame,
         }
     }
 
-    fn advance_and_check_due(&mut self, elapsed: f64) -> bool {
-        let Some(period) = self.period else {
-            self.next_due = elapsed;
-            return true;
-        };
+    pub(crate) fn should_sample(&mut self, elapsed: Duration) -> bool {
+        match self {
+            RecordingSchedule::EveryFrame => true,
+            RecordingSchedule::Limited { period, next_due } => {
+                if elapsed < *next_due {
+                    return false;
+                }
 
-        if elapsed < self.next_due {
-            return false;
+                *next_due = elapsed.saturating_add(*period);
+                true
+            }
         }
-
-        self.next_due = elapsed + period;
-        true
-    }
-}
-
-impl ActiveScenario {
-    fn refresh_recording_due(&mut self, elapsed: Duration) -> bool {
-        let elapsed_seconds = elapsed.as_secs_f64();
-        let mut has_due = false;
-
-        for index in 0..self.recording_schedules.len() {
-            let due = self.recording_schedules[index].advance_and_check_due(elapsed_seconds);
-            self.recording_due[index] = due;
-            has_due = has_due || due;
-        }
-
-        has_due
     }
 }
 
@@ -214,13 +200,11 @@ impl Replayer {
             .iter()
             .map(|recording| RecordingSchedule::new(recording.max_sampling_rate))
             .collect();
-        let recording_due = vec![false; recordings.len()];
         self.active = Some(ActiveScenario {
             playback,
             recordings,
             recorder,
             recording_schedules,
-            recording_due,
             started_at,
         });
         println!("TESTPILOT: scenario cursors ready");
@@ -237,7 +221,6 @@ impl Replayer {
         )?;
 
         active.playback.advance(elapsed)?;
-        let _ = active.refresh_recording_due(elapsed);
         if active.playback.completed() {
             return Ok(ReplayerUpdate::Completed);
         }
@@ -246,8 +229,8 @@ impl Replayer {
             elapsed,
             playback: &active.playback,
             recordings: &active.recordings,
+            recording_schedules: &mut active.recording_schedules,
             recorder: &mut active.recorder,
-            recording_due: &active.recording_due,
         }))
     }
 }
@@ -481,24 +464,19 @@ unit = "radians"
             panic!("running update did not return interpolation data");
         };
         assert_eq!(frame.recordings().len(), 2);
-        assert!(frame.recording_due()[0]);
-        assert!(frame.recording_due()[1]);
+        assert_eq!(frame.recording_schedules().len(), 2);
         frame.record(&[Some(0.1), Some(10.0)]).unwrap();
 
         let ReplayerUpdate::Running(mut frame) = replayer.update_scenario(time(10.5)).unwrap()
         else {
             panic!("running update did not return interpolation data");
         };
-        assert!(!frame.recording_due()[0]);
-        assert!(frame.recording_due()[1]);
         frame.record(&[None, Some(20.0)]).unwrap();
 
         let ReplayerUpdate::Running(mut frame) = replayer.update_scenario(time(11.0)).unwrap()
         else {
             panic!("running update did not return interpolation data");
         };
-        assert!(frame.recording_due()[0]);
-        assert!(frame.recording_due()[1]);
         frame.record(&[Some(0.2), Some(30.0)]).unwrap();
         replayer.reset().unwrap();
 
@@ -559,22 +537,16 @@ max_sampling_rate = 1.0
         else {
             panic!("running update did not return interpolation data");
         };
-        assert!(frame.recording_due()[0]);
-        assert!(frame.recording_due()[1]);
         frame.record(&[Some(0.1), Some(10.0)]).unwrap();
 
-        let ReplayerUpdate::Running(frame) = replayer.update_scenario(time(10.5)).unwrap() else {
+        let ReplayerUpdate::Running(_frame) = replayer.update_scenario(time(10.5)).unwrap() else {
             panic!("running update did not return interpolation data");
         };
-        assert!(!frame.recording_due()[0]);
-        assert!(!frame.recording_due()[1]);
 
         let ReplayerUpdate::Running(mut frame) = replayer.update_scenario(time(11.0)).unwrap()
         else {
             panic!("running update did not return interpolation data");
         };
-        assert!(frame.recording_due()[0]);
-        assert!(frame.recording_due()[1]);
         frame.record(&[Some(0.2), Some(20.0)]).unwrap();
         replayer.reset().unwrap();
 
@@ -592,6 +564,26 @@ max_sampling_rate = 1.0
             fs::read_to_string(telemetry_path).unwrap(),
             "pitch.time,pitch.value,roll.time,roll.value\n0,0.1,0,10\n1,0.2,1,20\n"
         );
+    }
+
+    #[test]
+    fn schedules_sample_rate_limits_are_advanced_with_frame_elapsed_time() {
+        let mut schedule = super::RecordingSchedule::new(Some(1.0));
+
+        assert!(schedule.should_sample(Duration::ZERO));
+        assert!(!schedule.should_sample(Duration::from_millis(400)));
+        assert!(schedule.should_sample(Duration::from_secs(1)));
+        assert!(!schedule.should_sample(Duration::from_millis(1_600)));
+        assert!(schedule.should_sample(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn schedules_without_max_sampling_rate_sample_every_frame() {
+        let mut schedule = super::RecordingSchedule::new(None);
+
+        assert!(schedule.should_sample(Duration::ZERO));
+        assert!(schedule.should_sample(Duration::from_millis(100)));
+        assert!(schedule.should_sample(Duration::from_millis(200)));
     }
 
     #[test]
