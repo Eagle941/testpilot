@@ -44,9 +44,13 @@ impl InterpolationFrame<'_> {
     }
 
     /// Appends the sampled telemetry values for this simulator frame.
-    pub fn record(&mut self, values: &[Option<f64>]) -> Result<(), RecordingError> {
+    pub fn record(
+        &mut self,
+        recording_values: &[Option<f64>],
+        injected_values: &[f64],
+    ) -> Result<(), RecordingError> {
         self.recorder
-            .write_frame(self.elapsed, self.recordings, values)
+            .write_frame(self.elapsed, recording_values, injected_values)
     }
 }
 
@@ -208,8 +212,22 @@ impl Replayer {
             "TESTPILOT: creating telemetry file in {}",
             telemetry_directory.display()
         );
-        let recorder =
-            TelemetryRecorder::new(telemetry_directory, &config.record, recording_started_at)?;
+        let injected_names: Vec<String> = config
+            .inject
+            .iter()
+            .map(|injection| injection.name.clone())
+            .collect();
+        let recording_names: Vec<String> = config
+            .record
+            .iter()
+            .map(|recording| recording.name.clone())
+            .collect();
+        let recorder = TelemetryRecorder::new(
+            telemetry_directory,
+            &recording_names,
+            &injected_names,
+            recording_started_at,
+        )?;
 
         println!(
             "TESTPILOT: opened {} with {} signal cursors",
@@ -455,7 +473,7 @@ unit = "radians"
         };
         assert_eq!(frame.recordings().len(), 1);
         assert_eq!(frame.recordings()[0].name, "pitch");
-        frame.record(&[Some(0.125)]).unwrap();
+        frame.record(&[Some(0.125)], &[0.05]).unwrap();
         replayer.reset().unwrap();
 
         let telemetry_path = fs::read_dir(&fixture.directory)
@@ -470,7 +488,7 @@ unit = "radians"
             .expect("telemetry file was not created beside the scenario");
         assert_eq!(
             fs::read_to_string(telemetry_path).unwrap(),
-            "pitch.time,pitch.value\n0.05,0.125\n"
+            "pitch.time,pitch.value,sidestick_pitch_position.time,sidestick_pitch_position.value\n0.05,0.125,0.05,0.05\n"
         );
     }
 
@@ -517,21 +535,21 @@ unit = "radians"
         };
         assert_eq!(frame.recordings().len(), 2);
         assert_eq!(frame.recordings_and_schedules().1.len(), 2);
-        frame.record(&[Some(0.1), Some(10.0)]).unwrap();
+        frame.record(&[Some(0.1), Some(10.0)], &[0.0]).unwrap();
 
         let ReplayerUpdate::Running { mut frame, .. } =
             replayer.update_scenario(time(10.5)).unwrap()
         else {
             panic!("running update did not return interpolation data");
         };
-        frame.record(&[None, Some(20.0)]).unwrap();
+        frame.record(&[None, Some(20.0)], &[0.05]).unwrap();
 
         let ReplayerUpdate::Running { mut frame, .. } =
             replayer.update_scenario(time(11.0)).unwrap()
         else {
             panic!("running update did not return interpolation data");
         };
-        frame.record(&[Some(0.2), Some(30.0)]).unwrap();
+        frame.record(&[Some(0.2), Some(30.0)], &[0.1]).unwrap();
         replayer.reset().unwrap();
 
         let telemetry_path = fs::read_dir(&fixture.directory)
@@ -546,7 +564,10 @@ unit = "radians"
             .expect("telemetry file was not created beside the scenario");
         assert_eq!(
             fs::read_to_string(telemetry_path).unwrap(),
-            "pitch.time,pitch.value,roll.time,roll.value\n0,0.1,0,10\n,,0.5,20\n1,0.2,1,30\n"
+            "pitch.time,pitch.value,roll.time,roll.value,sidestick_pitch_position.time,sidestick_pitch_position.value\n\
+             0,0.1,0,10,0,0\n\
+             ,,0.5,20,0.5,0.05\n\
+             1,0.2,1,30,1,0.1\n"
         );
     }
 
@@ -592,7 +613,7 @@ max_sampling_rate = 1.0
         else {
             panic!("running update did not return interpolation data");
         };
-        frame.record(&[Some(0.1), Some(10.0)]).unwrap();
+        frame.record(&[Some(0.1), Some(10.0)], &[0.0]).unwrap();
 
         let ReplayerUpdate::Running { .. } = replayer.update_scenario(time(10.5)).unwrap() else {
             panic!("running update did not return interpolation data");
@@ -603,7 +624,7 @@ max_sampling_rate = 1.0
         else {
             panic!("running update did not return interpolation data");
         };
-        frame.record(&[Some(0.2), Some(20.0)]).unwrap();
+        frame.record(&[Some(0.2), Some(20.0)], &[0.1]).unwrap();
         replayer.reset().unwrap();
 
         let telemetry_path = fs::read_dir(&fixture.directory)
@@ -618,7 +639,9 @@ max_sampling_rate = 1.0
             .expect("telemetry file was not created beside the scenario");
         assert_eq!(
             fs::read_to_string(telemetry_path).unwrap(),
-            "pitch.time,pitch.value,roll.time,roll.value\n0,0.1,0,10\n1,0.2,1,20\n"
+            "pitch.time,pitch.value,roll.time,roll.value,sidestick_pitch_position.time,sidestick_pitch_position.value\n\
+             0,0.1,0,10,0,0\n\
+             1,0.2,1,20,1,0.1\n"
         );
     }
 
