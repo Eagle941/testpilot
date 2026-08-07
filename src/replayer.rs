@@ -137,7 +137,7 @@ impl Replayer {
     }
 
     /// Constructs a replayer using an explicit config path.
-    fn with_config_path(config_path: impl Into<PathBuf>) -> Replayer {
+    pub(crate) fn with_config_path(config_path: impl Into<PathBuf>) -> Replayer {
         Replayer {
             config_path: config_path.into(),
             active: None,

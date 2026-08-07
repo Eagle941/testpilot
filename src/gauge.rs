@@ -2,12 +2,12 @@ use std::error::Error;
 
 use msfs::MSFSEvent;
 
-use crate::gauge_runtime::GaugeRuntime;
+use crate::{gauge_runtime::GaugeRuntime, replayer::Replayer, simulator::MsfsSimulator};
 
 #[msfs::gauge(name=testpilot)]
 /// MSFS gauge entrypoint that drives the replay runtime each `PreUpdate`.
 async fn testpilot(mut gauge: msfs::Gauge) -> Result<(), Box<dyn Error>> {
-    let mut runtime = GaugeRuntime::new()?;
+    let mut runtime = GaugeRuntime::new(Replayer::new(), MsfsSimulator::new())?;
 
     println!("TESTPILOT: waiting for L:REPLAYER_ARMED = 1");
     while let Some(event) = gauge.next_event().await {

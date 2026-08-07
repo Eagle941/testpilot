@@ -25,7 +25,7 @@ mod arm;
 /// MSFS gauge entrypoint and event loop.
 mod gauge;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 mod gauge_runtime;
 
 #[cfg(any(target_arch = "wasm32", test))]
