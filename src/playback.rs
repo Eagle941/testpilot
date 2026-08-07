@@ -38,7 +38,9 @@ impl Sample {
 /// resulting value between engineering or simulator ranges.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LinearSegment {
+    /// Earlier sample that bounds interpolation from below.
     start: Sample,
+    /// Later sample that bounds interpolation from above.
     end: Sample,
 }
 
@@ -111,15 +113,17 @@ impl LinearSegment {
 /// [`LinearSegment`] runs first and [`AffineRange`] runs second.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AffineRange {
+    /// Inclusive source range, [minimum, maximum].
     source: [f64; 2],
+    /// Inclusive target range, [minimum, maximum].
     target: [f64; 2],
 }
 
 impl AffineRange {
     /// Creates a conversion after validating both ranges.
     pub fn new(source: [f64; 2], target: [f64; 2]) -> Result<AffineRange, PlaybackError> {
-        AffineRange::validate_range("source", source)?;
-        AffineRange::validate_range("target", target)?;
+        Self::validate_range("source", source)?;
+        Self::validate_range("target", target)?;
         Ok(AffineRange { source, target })
     }
 

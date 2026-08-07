@@ -32,7 +32,14 @@ mod replayer;
 mod simulator;
 
 pub mod config;
+pub mod cursor;
 pub mod error;
 pub mod playback;
 pub mod recording;
-pub mod scenario;
+
+#[cfg(test)]
+mod tests {
+    mod playback;
+    mod shared;
+    mod validation;
+}

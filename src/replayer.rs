@@ -3,69 +3,75 @@
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
-use crate::arm::ArmState;
-use crate::config::{CONFIG_PATH, RecordingConfig, read_config_file};
+use crate::arm::PositiveTrigger;
+use crate::config::{CONFIG_PATH, RecordingConfig, ReplayConfig};
+use crate::cursor::{Frame, Scenario};
 use crate::error::{RecordingError, ReplayerError};
 use crate::recording::TelemetryRecorder;
-use crate::scenario::{InterpolationRows, ScenarioPlayback};
 
 /// Data available while processing one running simulator frame.
-pub(crate) struct InterpolationFrame<'a> {
+pub struct InterpolationFrame<'a> {
+    /// Elapsed scenario time since playback start for the current frame.
     elapsed: Duration,
-    playback: &'a ScenarioPlayback,
+    /// Borrowed playback cursor set used for interpolation.
+    playback: &'a Scenario,
+    /// Configured telemetry signals in deterministic order.
     recordings: &'a [RecordingConfig],
+    /// Mutable schedules that gate each recording signal by its sampling policy.
     recording_schedules: &'a mut [RecordingSchedule],
+    /// Open telemetry writer for the active scenario.
     recorder: &'a mut TelemetryRecorder,
 }
 
 impl InterpolationFrame<'_> {
     /// Returns elapsed scenario-relative simulator time.
-    pub(crate) const fn elapsed(&self) -> Duration {
+    pub const fn elapsed(&self) -> Duration {
         self.elapsed
     }
 
     /// Returns one bounding data-point pair per configured injection.
-    pub(crate) fn data_points(&self) -> impl Iterator<Item = InterpolationRows<'_>> {
+    pub fn data_points(&self) -> impl Iterator<Item = Frame<'_>> {
         self.playback.interpolation_rows()
     }
 
     /// Returns configured telemetry signals in deterministic numeric order.
-    pub(crate) const fn recordings(&self) -> &[RecordingConfig] {
+    pub const fn recordings(&self) -> &[RecordingConfig] {
         self.recordings
     }
 
     /// Returns recordings together with mutable schedules for this frame.
-    pub(crate) fn recordings_and_schedules(
-        &mut self,
-    ) -> (&[RecordingConfig], &mut [RecordingSchedule]) {
+    pub fn recordings_and_schedules(&mut self) -> (&[RecordingConfig], &mut [RecordingSchedule]) {
         (self.recordings, self.recording_schedules)
     }
 
     /// Appends the sampled telemetry values for this simulator frame.
-    pub(crate) fn record(&mut self, values: &[Option<f64>]) -> Result<(), RecordingError> {
+    pub fn record(&mut self, values: &[Option<f64>]) -> Result<(), RecordingError> {
         self.recorder
             .write_frame(self.elapsed, self.recordings, values)
     }
 }
 
 /// Action produced by processing one simulator update.
-pub(crate) enum ReplayerUpdate<'a> {
-    /// Every cursor has data points available for interpolation.
-    Running(InterpolationFrame<'a>),
+pub enum ReplayerUpdate<'a> {
+    /// Every cursor has data points available for interpolation after start-up.
+    Running {
+        frame: InterpolationFrame<'a>,
+        started_now: bool,
+    },
     /// Every scenario cursor reached the end of its input series.
     Completed,
 }
 
 /// Scenario playback and its simulator-clock origin.
 struct ActiveScenario {
-    playback: ScenarioPlayback,
+    playback: Scenario,
     recordings: Vec<RecordingConfig>,
     recorder: TelemetryRecorder,
     recording_schedules: Vec<RecordingSchedule>,
     started_at: Duration,
 }
 
-pub(crate) enum RecordingSchedule {
+pub enum RecordingSchedule {
     EveryFrame,
     Limited {
         period: Duration,
@@ -87,7 +93,7 @@ impl RecordingSchedule {
         }
     }
 
-    pub(crate) fn should_sample(&mut self, elapsed: Duration) -> bool {
+    pub fn should_sample(&mut self, elapsed: Duration) -> bool {
         match self {
             RecordingSchedule::EveryFrame => true,
             RecordingSchedule::Limited { period, next_due } => {
@@ -103,22 +109,25 @@ impl RecordingSchedule {
 }
 
 /// Owns arming, scenario streaming, and simulator-clock scheduling state.
-pub(crate) struct Replayer {
+pub struct Replayer {
+    /// Filesystem path from which replay configuration is loaded.
     config_path: PathBuf,
-    arm_state: ArmState,
+    /// Tracks arming zero-to-one transitions.
+    arm_state: PositiveTrigger,
+    /// Active replay state, if a scenario is currently loaded.
     active: Option<ActiveScenario>,
 }
 
 impl Replayer {
     /// Creates a replayer using the configuration in the writable MSFS work mount.
-    pub(crate) fn new() -> Replayer {
+    pub fn new() -> Replayer {
         Replayer::with_config_path(CONFIG_PATH)
     }
 
     fn with_config_path(config_path: impl Into<PathBuf>) -> Replayer {
         Replayer {
             config_path: config_path.into(),
-            arm_state: ArmState::default(),
+            arm_state: PositiveTrigger::default(),
             active: None,
         }
     }
@@ -127,27 +136,38 @@ impl Replayer {
     ///
     /// The arming frame opens and initializes the configured cursor set.
     /// Simulator time is used once a scenario is loaded.
-    pub(crate) fn pre_update(
+    pub fn pre_update(
         &mut self,
         armed_value: f64,
         simulation_time: Duration,
     ) -> anyhow::Result<Option<ReplayerUpdate<'_>>> {
-        if self.arm_state.start(armed_value) {
+        let starting = self.arm_state.start(armed_value);
+        if starting {
             self.start_scenario(simulation_time)?;
         }
         if self.active.is_none() {
             return Ok(None);
         }
 
-        Ok(Some(self.update_scenario(simulation_time)?))
+        let update = self.update_scenario(simulation_time)?;
+        Ok(Some(match update {
+            ReplayerUpdate::Running {
+                frame,
+                started_now: false,
+            } if starting => ReplayerUpdate::Running {
+                frame,
+                started_now: true,
+            },
+            update => update,
+        }))
     }
 
     /// Flushes telemetry and releases all replay state.
     ///
     /// Calling this repeatedly is safe. Replay state is released even when the
     /// final telemetry flush fails.
-    pub(crate) fn reset(&mut self) -> Result<(), RecordingError> {
-        self.arm_state = ArmState::default();
+    pub fn reset(&mut self) -> Result<(), RecordingError> {
+        self.arm_state = PositiveTrigger::default();
         let Some(mut active) = self.active.take() else {
             return Ok(());
         };
@@ -159,7 +179,7 @@ impl Replayer {
             return Err(ReplayerError::ScenarioAlreadyLoaded.into());
         }
 
-        let config = read_config_file(&self.config_path)?;
+        let config = ReplayConfig::read_config_file(&self.config_path)?;
         // Paths need to be joined because the scenario file is in the same
         // directory as the config file.
         let config_directory =
@@ -169,7 +189,7 @@ impl Replayer {
                     path: self.config_path.clone(),
                 })?;
         let scenario_path = config_directory.join(&config.input_file);
-        let playback = ScenarioPlayback::new(&scenario_path, &config)?;
+        let playback = Scenario::new(&scenario_path, &config)?;
         #[cfg(target_arch = "wasm32")]
         let telemetry_directory = std::path::Path::new("/work");
         #[cfg(not(target_arch = "wasm32"))]
@@ -227,13 +247,16 @@ impl Replayer {
             return Ok(ReplayerUpdate::Completed);
         }
 
-        Ok(ReplayerUpdate::Running(InterpolationFrame {
-            elapsed,
-            playback: &active.playback,
-            recordings: &active.recordings,
-            recording_schedules: &mut active.recording_schedules,
-            recorder: &mut active.recorder,
-        }))
+        Ok(ReplayerUpdate::Running {
+            frame: InterpolationFrame {
+                elapsed,
+                playback: &active.playback,
+                recordings: &active.recordings,
+                recording_schedules: &mut active.recording_schedules,
+                recorder: &mut active.recorder,
+            },
+            started_now: false,
+        })
     }
 }
 
@@ -363,7 +386,7 @@ unit = "radians"
         replayer.start_scenario(time(100.0)).unwrap();
 
         let update = replayer.update_scenario(time(100.0)).unwrap();
-        let ReplayerUpdate::Running(frame) = update else {
+        let ReplayerUpdate::Running { frame, .. } = update else {
             panic!("running update did not return interpolation data");
         };
         assert_eq!(frame.elapsed(), Duration::ZERO);
@@ -382,7 +405,7 @@ unit = "radians"
         );
 
         let update = replayer.update_scenario(time(100.0625)).unwrap();
-        let ReplayerUpdate::Running(frame) = update else {
+        let ReplayerUpdate::Running { frame, .. } = update else {
             panic!("running update did not return interpolation data");
         };
         assert_eq!(frame.elapsed(), time(0.0625));
@@ -400,7 +423,8 @@ unit = "radians"
         let mut replayer = Replayer::with_config_path(fixture.config_path.clone());
         replayer.start_scenario(time(100.0)).unwrap();
 
-        let ReplayerUpdate::Running(mut frame) = replayer.update_scenario(time(100.05)).unwrap()
+        let ReplayerUpdate::Running { mut frame, .. } =
+            replayer.update_scenario(time(100.05)).unwrap()
         else {
             panic!("running update did not return interpolation data");
         };
@@ -461,7 +485,8 @@ unit = "radians"
         let mut replayer = Replayer::with_config_path(fixture.config_path.clone());
         replayer.start_scenario(time(10.0)).unwrap();
 
-        let ReplayerUpdate::Running(mut frame) = replayer.update_scenario(time(10.0)).unwrap()
+        let ReplayerUpdate::Running { mut frame, .. } =
+            replayer.update_scenario(time(10.0)).unwrap()
         else {
             panic!("running update did not return interpolation data");
         };
@@ -469,13 +494,15 @@ unit = "radians"
         assert_eq!(frame.recordings_and_schedules().1.len(), 2);
         frame.record(&[Some(0.1), Some(10.0)]).unwrap();
 
-        let ReplayerUpdate::Running(mut frame) = replayer.update_scenario(time(10.5)).unwrap()
+        let ReplayerUpdate::Running { mut frame, .. } =
+            replayer.update_scenario(time(10.5)).unwrap()
         else {
             panic!("running update did not return interpolation data");
         };
         frame.record(&[None, Some(20.0)]).unwrap();
 
-        let ReplayerUpdate::Running(mut frame) = replayer.update_scenario(time(11.0)).unwrap()
+        let ReplayerUpdate::Running { mut frame, .. } =
+            replayer.update_scenario(time(11.0)).unwrap()
         else {
             panic!("running update did not return interpolation data");
         };
@@ -535,17 +562,19 @@ max_sampling_rate = 1.0
         let mut replayer = Replayer::with_config_path(fixture.config_path.clone());
         replayer.start_scenario(time(10.0)).unwrap();
 
-        let ReplayerUpdate::Running(mut frame) = replayer.update_scenario(time(10.0)).unwrap()
+        let ReplayerUpdate::Running { mut frame, .. } =
+            replayer.update_scenario(time(10.0)).unwrap()
         else {
             panic!("running update did not return interpolation data");
         };
         frame.record(&[Some(0.1), Some(10.0)]).unwrap();
 
-        let ReplayerUpdate::Running(_frame) = replayer.update_scenario(time(10.5)).unwrap() else {
+        let ReplayerUpdate::Running { .. } = replayer.update_scenario(time(10.5)).unwrap() else {
             panic!("running update did not return interpolation data");
         };
 
-        let ReplayerUpdate::Running(mut frame) = replayer.update_scenario(time(11.0)).unwrap()
+        let ReplayerUpdate::Running { mut frame, .. } =
+            replayer.update_scenario(time(11.0)).unwrap()
         else {
             panic!("running update did not return interpolation data");
         };
@@ -611,7 +640,10 @@ max_sampling_rate = 1.0
 
         assert!(matches!(
             replayer.pre_update(1.0, time(99.0)).unwrap(),
-            Some(ReplayerUpdate::Running(_))
+            Some(ReplayerUpdate::Running {
+                started_now: true,
+                ..
+            })
         ));
         assert_eq!(
             replayer.active.as_ref().map(|active| active.started_at),
@@ -619,7 +651,10 @@ max_sampling_rate = 1.0
         );
         assert!(matches!(
             replayer.pre_update(1.0, time(99.05)).unwrap(),
-            Some(ReplayerUpdate::Running(_))
+            Some(ReplayerUpdate::Running {
+                started_now: false,
+                ..
+            })
         ));
         assert!(matches!(
             replayer.pre_update(1.0, time(99.2)).unwrap(),
