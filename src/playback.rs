@@ -161,6 +161,7 @@ impl AffineRange {
         Ok(converted)
     }
 
+    /// Validates that a conversion range is finite and strictly increasing.
     fn validate_range(name: &'static str, range: [f64; 2]) -> Result<(), PlaybackError> {
         if !range.iter().all(|endpoint| endpoint.is_finite()) {
             return Err(PlaybackError::InvalidRange {

@@ -2,6 +2,7 @@
 //!
 //! File-system and simulator-facing variants retain underlying failures as
 //! inspectable error sources.
+#![allow(missing_docs)]
 
 use std::io;
 use std::num::ParseFloatError;
@@ -345,6 +346,7 @@ pub enum PlaybackError {
     ArithmeticOverflow,
 }
 
+/// Formats an optional CSV line context suffix for parse failures.
 fn format_line(line: Option<u64>) -> String {
     line.map_or_else(String::new, |line| format!(" at CSV line {line}"))
 }

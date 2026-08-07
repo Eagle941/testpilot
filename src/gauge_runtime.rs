@@ -5,12 +5,14 @@ use crate::error::GaugeError;
 use crate::replayer::{InterpolationFrame, Replayer, ReplayerUpdate};
 use crate::simulator::{MsfsSimulator, SimulatorAdapter};
 
+/// Local simulator variable that arms replay start when it transitions to `1`.
 const ARMED_VARIABLE: &str = "L:REPLAYER_ARMED";
 
 /// Owns the MSFS variables and replay state used by the gauge event loop.
 pub struct GaugeRuntime {
     /// Replay orchestrator.
     replayer: Replayer,
+    /// Tracks arming transitions and writes reset state.
     arming: ArmingMonitor,
     /// Adapter around msfs-rs legacy calculator code.
     simulator: MsfsSimulator,

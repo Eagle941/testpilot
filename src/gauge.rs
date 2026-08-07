@@ -5,6 +5,7 @@ use msfs::MSFSEvent;
 use crate::gauge_runtime::GaugeRuntime;
 
 #[msfs::gauge(name=testpilot)]
+/// MSFS gauge entrypoint that drives the replay runtime each `PreUpdate`.
 async fn testpilot(mut gauge: msfs::Gauge) -> Result<(), Box<dyn Error>> {
     let mut runtime = GaugeRuntime::new()?;
 

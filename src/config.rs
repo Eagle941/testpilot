@@ -42,6 +42,7 @@ impl ReplayConfig {
         Self::new(&contents)
     }
 
+    /// Builds a validated config from raw deserialized TOML data.
     fn parse_raw(raw: RawReplayConfig) -> Result<ReplayConfig, ConfigError> {
         if raw.format_version != FORMAT_VERSION {
             return Err(ConfigError::UnsupportedFormatVersion {
@@ -60,6 +61,7 @@ impl ReplayConfig {
         })
     }
 
+    /// Parses and validates all injection entries.
     fn parse_injections(
         entries: BTreeMap<String, RawInjectionConfig>,
     ) -> Result<Vec<InjectionConfig>, ConfigError> {
@@ -74,6 +76,7 @@ impl ReplayConfig {
         Ok(result)
     }
 
+    /// Parses and validates all recording entries.
     fn parse_recordings(
         entries: BTreeMap<String, RawRecordingConfig>,
     ) -> Result<Vec<RecordingConfig>, ConfigError> {
@@ -147,6 +150,7 @@ pub struct InjectionConfig {
 }
 
 impl InjectionConfig {
+    /// Builds a validated injection config from raw TOML fields.
     fn new(
         index: usize,
         raw: RawInjectionConfig,
@@ -217,6 +221,7 @@ pub struct RecordingConfig {
 }
 
 impl RecordingConfig {
+    /// Builds a validated recording config from raw TOML fields.
     fn new(
         index: usize,
         raw: RawRecordingConfig,
@@ -257,6 +262,7 @@ impl RecordingConfig {
         })
     }
 
+    /// Validates an optional max sampling rate (must be finite and > 0).
     fn validate_sampling_rate(index: usize, rate: f64) -> Result<f64, ConfigError> {
         if !rate.is_finite() {
             return Err(ConfigError::InvalidRecordingSamplingRate {
@@ -278,30 +284,45 @@ impl RecordingConfig {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Internal raw configuration as deserialized from TOML.
 struct RawReplayConfig {
+    /// Declared format version.
     format_version: u32,
+    /// Raw input filename provided in config.
     input_file: String,
     #[serde(default)]
+    /// Raw injection map section.
     inject: BTreeMap<String, RawInjectionConfig>,
     #[serde(default)]
+    /// Raw recording map section.
     record: BTreeMap<String, RawRecordingConfig>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Internal raw input signal configuration.
 struct RawInjectionConfig {
+    /// Raw signal name.
     name: String,
+    /// Raw destination variable string.
     variable: String,
+    /// Raw source range.
     source_range: [f64; 2],
+    /// Raw simulator range.
     simulator_range: [f64; 2],
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Internal raw recording signal configuration.
 struct RawRecordingConfig {
+    /// Raw signal name.
     name: String,
+    /// Raw source variable string.
     variable: String,
+    /// Optional raw recording unit.
     unit: Option<String>,
+    /// Optional raw max sampling rate.
     max_sampling_rate: Option<f64>,
 }
 

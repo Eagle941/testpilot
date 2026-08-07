@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use crate::error::SimulatorError;
 
+/// Packed calculator code used to query simulation time.
 #[cfg(target_arch = "wasm32")]
 const SIMULATION_TIME_CODE: &str = "(E:SIMULATION TIME, seconds)";
 

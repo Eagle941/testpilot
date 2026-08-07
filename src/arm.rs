@@ -20,8 +20,11 @@ impl PositiveTrigger {
 /// Tracks and applies the configured arming variable for simulator replay state.
 #[derive(Debug)]
 pub struct ArmingMonitor {
+    /// Simulator variable name to read/write for arming.
     variable: String,
+    /// Most recently sampled arming value.
     armed_value: f64,
+    /// Transition detector for a 0->1 arming edge.
     trigger: PositiveTrigger,
 }
 

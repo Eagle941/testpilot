@@ -51,6 +51,7 @@ impl TelemetryRecorder {
         &self.filename
     }
 
+    /// Computes the telemetry path from the UTC run start time and target directory.
     fn path_for(directory: impl AsRef<Path>, started_at: SystemTime) -> PathBuf {
         // `SystemTime` values for telemetry filenames come from `SystemTime::now()` in normal
         // execution, so they are expected to be well within supported UTC timestamp ranges.
@@ -120,6 +121,7 @@ impl TelemetryRecorder {
             })
     }
 
+    /// Writes the paired `<signal>.time`/`<signal>.value` CSV header columns.
     fn write_header(&mut self, recordings: &[RecordingConfig]) -> Result<(), RecordingError> {
         self.row_buffer.clear();
         for recording in recordings {

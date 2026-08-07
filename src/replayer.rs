@@ -54,7 +54,9 @@ impl InterpolationFrame<'_> {
 pub enum ReplayerUpdate<'a> {
     /// Every cursor has data points available for interpolation after start-up.
     Running {
+        /// Frame-scoped playback and recording context.
         frame: InterpolationFrame<'a>,
+        /// Indicates this is the first frame after replay start.
         started_now: bool,
     },
     /// Every scenario cursor reached the end of its input series.
@@ -62,23 +64,35 @@ pub enum ReplayerUpdate<'a> {
 }
 
 /// Scenario playback and its simulator-clock origin.
+/// Active scenario execution state.
 struct ActiveScenario {
+    /// Parsed scenario with per-signal interpolation cursors.
     playback: Scenario,
+    /// Selected recording definitions for telemetry output.
     recordings: Vec<RecordingConfig>,
+    /// Open telemetry recorder for this run.
     recorder: TelemetryRecorder,
+    /// Per-recording sampling schedules.
     recording_schedules: Vec<RecordingSchedule>,
+    /// Scenario start time in simulator-clock coordinates.
     started_at: Duration,
 }
 
+/// Controls when each recording signal is sampled.
 pub enum RecordingSchedule {
+    /// Sample on every frame.
     EveryFrame,
+    /// Sample no more often than a configured interval period.
     Limited {
+        /// Minimum interval between samples.
         period: Duration,
+        /// Next due time in scenario elapsed seconds.
         next_due: Duration,
     },
 }
 
 impl RecordingSchedule {
+    /// Builds a schedule from an optional max sampling rate.
     fn new(max_sampling_rate: Option<f64>) -> RecordingSchedule {
         match max_sampling_rate {
             Some(rate) => {
@@ -92,6 +106,7 @@ impl RecordingSchedule {
         }
     }
 
+    /// Reports whether the signal should be sampled at the provided elapsed time.
     pub fn should_sample(&mut self, elapsed: Duration) -> bool {
         match self {
             RecordingSchedule::EveryFrame => true,
@@ -121,6 +136,7 @@ impl Replayer {
         Replayer::with_config_path(CONFIG_PATH)
     }
 
+    /// Constructs a replayer using an explicit config path.
     fn with_config_path(config_path: impl Into<PathBuf>) -> Replayer {
         Replayer {
             config_path: config_path.into(),
@@ -168,6 +184,7 @@ impl Replayer {
         active.recorder.flush()
     }
 
+    /// Opens config/scenario, initializes cursors, and opens telemetry output.
     fn start_scenario(&mut self, started_at: Duration) -> anyhow::Result<()> {
         if self.active.is_some() {
             return Err(ReplayerError::ScenarioAlreadyLoaded.into());
@@ -220,11 +237,14 @@ impl Replayer {
     }
 
     #[cfg(target_arch = "wasm32")]
+    /// Returns the telemetry output directory for wasm execution.
+    #[cfg(target_arch = "wasm32")]
     fn telemetry_directory(&self, _scenario_path: &Path) -> Result<PathBuf, ReplayerError> {
         Ok(Path::new("/work").to_path_buf())
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    /// Returns the telemetry output directory for host execution.
     fn telemetry_directory(&self, scenario_path: &Path) -> Result<PathBuf, ReplayerError> {
         scenario_path
             .parent()
@@ -234,6 +254,7 @@ impl Replayer {
             })
     }
 
+    /// Advances playback to `simulation_time` and builds the current frame update.
     fn update_scenario(&mut self, simulation_time: Duration) -> anyhow::Result<ReplayerUpdate<'_>> {
         let active = self.active.as_mut().ok_or(ReplayerError::UpdateWhileIdle)?;
         let elapsed = simulation_time.checked_sub(active.started_at).ok_or(
