@@ -34,35 +34,35 @@ fn validates_irregular_independent_series() {
 #[test]
 fn rejects_missing_duplicate_and_non_adjacent_headers() {
     let missing = "sidestick_pitch_position.time,other,sidestick_roll_position.time,sidestick_roll_position.value\n0,0,0,0\n";
-    assert!(matches!(
-        validate_scenario(missing.as_bytes(), &config()),
+    match validate_scenario(missing.as_bytes(), &config()) {
         Err(ScenarioError::MissingColumn { column, .. })
-            if column == "sidestick_pitch_position.value"
-    ));
+            if column == "sidestick_pitch_position.value" => {}
+        unexpected => panic!("expected missing-column validation error, got: {unexpected:?}"),
+    }
 
     let duplicate = "sidestick_pitch_position.time,sidestick_pitch_position.value,sidestick_pitch_position.value,sidestick_roll_position.time,sidestick_roll_position.value\n0,0,0,0,0\n";
-    assert!(matches!(
-        validate_scenario(duplicate.as_bytes(), &config()),
-        Err(ScenarioError::DuplicateHeader { .. })
-    ));
+    match validate_scenario(duplicate.as_bytes(), &config()) {
+        Err(ScenarioError::DuplicateHeader { .. }) => {}
+        unexpected => panic!("expected duplicate-header validation error, got: {unexpected:?}"),
+    }
 
     let non_adjacent = "sidestick_pitch_position.time,other,sidestick_pitch_position.value,sidestick_roll_position.time,sidestick_roll_position.value\n0,0,0,0,0\n";
-    assert!(matches!(
-        validate_scenario(non_adjacent.as_bytes(), &config()),
-        Err(ScenarioError::NonAdjacentColumns { .. })
-    ));
+    match validate_scenario(non_adjacent.as_bytes(), &config()) {
+        Err(ScenarioError::NonAdjacentColumns { .. }) => {}
+        unexpected => panic!("expected non-adjacent-column validation error, got: {unexpected:?}"),
+    }
 }
 
 #[test]
 fn rejects_half_populated_and_sparse_pairs() {
-    assert!(matches!(
-        validate("0,0,0,0\n0.5,,0.5,0\n"),
-        Err(ScenarioError::HalfPopulatedPair { .. })
-    ));
-    assert!(matches!(
-        validate("0,0,0,0\n,,0.5,0\n0.5,0,1,0\n"),
-        Err(ScenarioError::SparseSeries { .. })
-    ));
+    match validate("0,0,0,0\n0.5,,0.5,0\n") {
+        Err(ScenarioError::HalfPopulatedPair { .. }) => {}
+        unexpected => panic!("expected half-populated-pair validation error, got: {unexpected:?}"),
+    }
+    match validate("0,0,0,0\n,,0.5,0\n0.5,0,1,0\n") {
+        Err(ScenarioError::SparseSeries { .. }) => {}
+        unexpected => panic!("expected sparse-series validation error, got: {unexpected:?}"),
+    }
 }
 
 #[test]
@@ -76,11 +76,36 @@ fn rejects_invalid_timestamps() {
     ] {
         let error = validate(body).expect_err("invalid timestamp accepted");
         match predicate {
-            "first" => assert!(matches!(error, ScenarioError::FirstTimestampNotZero { .. })),
-            "order" => assert!(matches!(error, ScenarioError::NonIncreasingTime { .. })),
-            "negative" => assert!(matches!(error, ScenarioError::NegativeTime { .. })),
-            "finite" => assert!(matches!(error, ScenarioError::NonFiniteTime { .. })),
-            "range" => assert!(matches!(error, ScenarioError::TimeOutOfRange { .. })),
+            "first" => match error {
+                ScenarioError::FirstTimestampNotZero { .. } => {}
+                unexpected => {
+                    panic!("expected first-timestamp validation error, got: {unexpected:?}")
+                }
+            },
+            "order" => match error {
+                ScenarioError::NonIncreasingTime { .. } => {}
+                unexpected => {
+                    panic!("expected non-increasing-time validation error, got: {unexpected:?}")
+                }
+            },
+            "negative" => match error {
+                ScenarioError::NegativeTime { .. } => {}
+                unexpected => {
+                    panic!("expected negative-time validation error, got: {unexpected:?}")
+                }
+            },
+            "finite" => match error {
+                ScenarioError::NonFiniteTime { .. } => {}
+                unexpected => {
+                    panic!("expected non-finite-time validation error, got: {unexpected:?}")
+                }
+            },
+            "range" => match error {
+                ScenarioError::TimeOutOfRange { .. } => {}
+                unexpected => {
+                    panic!("expected timestamp-out-of-range validation error, got: {unexpected:?}")
+                }
+            },
             _ => panic!("unknown test predicate"),
         }
     }
@@ -88,31 +113,36 @@ fn rejects_invalid_timestamps() {
 
 #[test]
 fn rejects_invalid_and_out_of_range_values() {
-    assert!(matches!(
-        validate("0,nope,0,0\n1,0,1,0\n"),
-        Err(ScenarioError::ParseInvalid(_))
-    ));
-    assert!(matches!(
-        validate("0,NaN,0,0\n1,0,1,0\n"),
-        Err(ScenarioError::NonFiniteValue { .. })
-    ));
-    assert!(matches!(
-        validate("0,101,0,0\n1,0,1,0\n"),
-        Err(ScenarioError::ValueOutsideSourceRange { .. })
-    ));
+    match validate("0,nope,0,0\n1,0,1,0\n") {
+        Err(ScenarioError::ParseInvalid(_)) => {}
+        unexpected => panic!("expected parse-invalid validation error, got: {unexpected:?}"),
+    }
+    match validate("0,NaN,0,0\n1,0,1,0\n") {
+        Err(ScenarioError::NonFiniteValue { .. }) => {}
+        unexpected => panic!("expected non-finite-value validation error, got: {unexpected:?}"),
+    }
+    match validate("0,101,0,0\n1,0,1,0\n") {
+        Err(ScenarioError::ValueOutsideSourceRange { .. }) => {}
+        unexpected => {
+            panic!("expected value-outside-source-range validation error, got: {unexpected:?}")
+        }
+    }
 }
 
 #[test]
 fn rejects_missing_samples() {
-    assert!(matches!(
-        validate(",,0,0\n,,1,0\n"),
-        Err(ScenarioError::MissingSamples { .. })
-    ));
+    match validate(",,0,0\n,,1,0\n") {
+        Err(ScenarioError::MissingSamples { .. }) => {}
+        unexpected => panic!("expected missing-samples validation error, got: {unexpected:?}"),
+    }
 }
 
 #[test]
 fn reports_csv_structure_errors() {
-    assert!(matches!(validate("0,0,0\n"), Err(ScenarioError::Csv(_))));
+    match validate("0,0,0\n") {
+        Err(ScenarioError::Csv(_)) => {}
+        unexpected => panic!("expected CSV-parse validation error, got: {unexpected:?}"),
+    }
 }
 
 #[test]

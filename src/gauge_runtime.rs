@@ -197,7 +197,7 @@ mod tests {
     use crate::replayer::Replayer;
     use crate::simulator::SimulatorAdapter;
 
-    use super::{GaugeRuntime, ARMED_VARIABLE};
+    use super::{ARMED_VARIABLE, GaugeRuntime};
 
     const CONFIG: &str = r#"format_version = 1
 input_file = "scenario.csv"
@@ -444,12 +444,13 @@ max_sampling_rate = 1.0
             Replayer::with_config_path(fixture.config_path.clone()),
             simulator,
         );
-        assert!(matches!(
-            result,
-            Err(GaugeError::Simulator(
-                SimulatorError::CalculatorCodeWriteFailed { variable, value }
-            )) if variable == ARMED_VARIABLE && value == 0.0
-        ));
+        match result {
+            Err(GaugeError::Simulator(SimulatorError::CalculatorCodeWriteFailed {
+                variable,
+                value,
+            })) if variable == ARMED_VARIABLE && value == 0.0 => {}
+            _ => panic!("expected arming write failure"),
+        }
     }
 
     #[test]
@@ -650,10 +651,10 @@ max_sampling_rate = 1.0
             .pre_update()
             .expect_err("overlapping replay should fail");
 
-        assert!(matches!(
-            error.downcast_ref::<ReplayerError>(),
-            Some(ReplayerError::ScenarioAlreadyLoaded)
-        ));
+        match error.downcast_ref::<ReplayerError>() {
+            Some(ReplayerError::ScenarioAlreadyLoaded) => {}
+            unexpected => panic!("expected scenario already loaded error, got: {unexpected:?}"),
+        }
         assert_eq!(
             runtime.simulator.operations,
             vec![Operation::Read {
@@ -677,10 +678,12 @@ max_sampling_rate = 1.0
             .pre_update()
             .expect_err("recording validation should fail");
 
-        assert!(matches!(
-            error.downcast_ref::<GaugeError>(),
-            Some(GaugeError::ValidateRecordingSignal { signal, .. }) if signal == "pitch"
-        ));
+        match error.downcast_ref::<GaugeError>() {
+            Some(GaugeError::ValidateRecordingSignal { signal, .. }) if signal == "pitch" => {}
+            unexpected => {
+                panic!("expected recording-validation error for pitch, got: {unexpected:?}")
+            }
+        }
         assert_eq!(
             runtime.simulator.operations,
             vec![
@@ -715,18 +718,19 @@ max_sampling_rate = 1.0
             .pre_update()
             .expect_err("input injection should fail");
 
-        assert!(matches!(
-            error.downcast_ref::<GaugeError>(),
+        match error.downcast_ref::<GaugeError>() {
             Some(GaugeError::InjectSignal { signal, .. })
-                if signal == "sidestick_pitch_position"
-        ));
+                if signal == "sidestick_pitch_position" => {}
+            unexpected => {
+                panic!("expected injection error for sidestick_pitch_position, got: {unexpected:?}")
+            }
+        }
         assert!(runtime.simulator.operations.iter().all(|operation| {
-            !matches!(
-                operation,
-                Operation::Read { variable, .. }
-                    if variable == "A:PLANE PITCH DEGREES"
-                        || variable == "L:ELEVATOR_POSITION"
-            )
+            if let Operation::Read { variable, .. } = operation {
+                !(variable == "A:PLANE PITCH DEGREES" || variable == "L:ELEVATOR_POSITION")
+            } else {
+                true
+            }
         }));
         runtime.simulator.failure = None;
         runtime.stop().unwrap();
@@ -745,21 +749,33 @@ max_sampling_rate = 1.0
             .pre_update()
             .expect_err("telemetry sampling should fail");
 
-        assert!(matches!(
-            error.downcast_ref::<GaugeError>(),
-            Some(GaugeError::SampleSignal { signal, .. }) if signal == "pitch"
-        ));
+        match error.downcast_ref::<GaugeError>() {
+            Some(GaugeError::SampleSignal { signal, .. }) if signal == "pitch" => {}
+            unexpected => panic!("expected sample error for pitch, got: {unexpected:?}"),
+        }
         let injection_index = runtime
             .simulator
             .operations
             .iter()
-            .position(|operation| matches!(operation, Operation::Write { variable, .. } if variable == "K:AXIS_ELEVATOR_SET"))
+            .position(|operation| {
+                if let Operation::Write { variable, .. } = operation {
+                    variable == "K:AXIS_ELEVATOR_SET"
+                } else {
+                    false
+                }
+            })
             .expect("input was not injected");
         let sampling_index = runtime
             .simulator
             .operations
             .iter()
-            .position(|operation| matches!(operation, Operation::Read { variable, .. } if variable == "A:PLANE PITCH DEGREES"))
+            .position(|operation| {
+                if let Operation::Read { variable, .. } = operation {
+                    variable == "A:PLANE PITCH DEGREES"
+                } else {
+                    false
+                }
+            })
             .expect("recording was not sampled");
         assert!(injection_index < sampling_index);
         runtime.simulator.failure = None;

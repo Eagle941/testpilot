@@ -394,10 +394,10 @@ unit = "radians"
             .start_scenario(time(101.0))
             .expect_err("overlapping replay should fail");
 
-        assert!(matches!(
-            error.downcast_ref::<ReplayerError>(),
-            Some(ReplayerError::ScenarioAlreadyLoaded)
-        ));
+        match error.downcast_ref::<ReplayerError>() {
+            Some(ReplayerError::ScenarioAlreadyLoaded) => {}
+            unexpected => panic!("expected overlapping replay error, got: {unexpected:?}"),
+        }
         assert!(replayer.active.is_some());
     }
 
@@ -433,7 +433,10 @@ unit = "radians"
         assert_eq!(frame.elapsed(), time(0.0625));
 
         let update = replayer.update_scenario(time(100.2)).unwrap();
-        assert!(matches!(update, ReplayerUpdate::Completed));
+        match update {
+            ReplayerUpdate::Completed => {}
+            _ => panic!("expected completed update"),
+        }
         assert!(replayer.active.is_some());
         replayer.reset().unwrap();
         assert!(replayer.active.is_none());
@@ -649,10 +652,10 @@ max_sampling_rate = 1.0
             Err(error) => error,
         };
 
-        assert!(matches!(
-            error.downcast_ref::<ReplayerError>(),
-            Some(ReplayerError::UpdateWhileIdle)
-        ));
+        match error.downcast_ref::<ReplayerError>() {
+            Some(ReplayerError::UpdateWhileIdle) => {}
+            unexpected => panic!("expected update-while-idle error, got: {unexpected:?}"),
+        }
     }
 
     #[test]
@@ -660,28 +663,26 @@ max_sampling_rate = 1.0
         let fixture = Fixture::new();
         let mut replayer = Replayer::with_config_path(fixture.config_path.clone());
 
-        assert!(matches!(
-            replayer.pre_update(true, time(99.0)).unwrap(),
+        match replayer.pre_update(true, time(99.0)).unwrap() {
             Some(ReplayerUpdate::Running {
-                started_now: true,
-                ..
-            })
-        ));
+                started_now: true, ..
+            }) => {}
+            _ => panic!("expected running update with start flag true"),
+        }
         assert_eq!(
             replayer.active.as_ref().map(|active| active.started_at),
             Some(time(99.0))
         );
-        assert!(matches!(
-            replayer.pre_update(false, time(99.05)).unwrap(),
+        match replayer.pre_update(false, time(99.05)).unwrap() {
             Some(ReplayerUpdate::Running {
-                started_now: false,
-                ..
-            })
-        ));
-        assert!(matches!(
-            replayer.pre_update(false, time(99.2)).unwrap(),
-            Some(ReplayerUpdate::Completed)
-        ));
+                started_now: false, ..
+            }) => {}
+            _ => panic!("expected running update with start flag false"),
+        }
+        match replayer.pre_update(false, time(99.2)).unwrap() {
+            Some(ReplayerUpdate::Completed) => {}
+            _ => panic!("expected completed update"),
+        }
         assert!(replayer.active.is_some());
     }
 
@@ -697,13 +698,13 @@ max_sampling_rate = 1.0
             Err(error) => error,
         };
 
-        assert!(matches!(
-            error.downcast_ref::<ReplayerError>(),
+        match error.downcast_ref::<ReplayerError>() {
             Some(ReplayerError::SimulationTimeMovedBackwards {
                 started_at,
                 current,
-            }) if *started_at == time(10.0) && *current == time(9.5)
-        ));
+            }) if *started_at == time(10.0) && *current == time(9.5) => {}
+            _ => panic!("expected backwards-time error"),
+        }
     }
 
     #[test]

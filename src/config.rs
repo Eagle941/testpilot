@@ -430,17 +430,23 @@ unit = "position"
             std::env::temp_dir().join(format!("replay-missing-config-{}.toml", std::process::id()));
         let _ = std::fs::remove_file(&path);
 
-        assert!(matches!(
-            ReplayConfig::read_config_file(&path),
-            Err(ConfigError::FileIo(_))
-        ));
+        match ReplayConfig::read_config_file(&path) {
+            Err(ConfigError::FileIo(_)) => {}
+            unexpected => panic!("expected file I/O error, got: {unexpected:?}"),
+        }
     }
 
     #[test]
     fn rejects_unsupported_version() {
         assert_error(
             &VALID_CONFIG.replacen("format_version = 1", "format_version = 2", 1),
-            |error| matches!(error, ConfigError::UnsupportedFormatVersion { .. }),
+            |error| {
+                if let ConfigError::UnsupportedFormatVersion { .. } = error {
+                    true
+                } else {
+                    false
+                }
+            },
         );
     }
 
@@ -462,7 +468,13 @@ unit = "position"
     fn requires_non_empty_injection_name() {
         assert_error(
             &VALID_CONFIG.replacen("name = \"sidestick_pitch_position\"", "name = \"\"", 1),
-            |error| matches!(error, ConfigError::EmptyInjectionName { .. }),
+            |error| {
+                if let ConfigError::EmptyInjectionName { .. } = error {
+                    true
+                } else {
+                    false
+                }
+            },
         );
     }
 
@@ -470,7 +482,13 @@ unit = "position"
     fn requires_injection_variable() {
         assert_error(
             &VALID_CONFIG.replacen("variable = \"K:AXIS_ELEVATOR_SET\"\n", "", 1),
-            |error| matches!(error, ConfigError::Toml(_)),
+            |error| {
+                if let ConfigError::Toml(_) = error {
+                    true
+                } else {
+                    false
+                }
+            },
         );
     }
 
@@ -494,7 +512,13 @@ unit = "position"
     fn requires_non_empty_recording_name() {
         assert_error(
             &VALID_CONFIG.replacen("name = \"pitch\"", "name = \"\"", 1),
-            |error| matches!(error, ConfigError::EmptyRecordingName { .. }),
+            |error| {
+                if let ConfigError::EmptyRecordingName { .. } = error {
+                    true
+                } else {
+                    false
+                }
+            },
         );
     }
 
@@ -502,11 +526,23 @@ unit = "position"
     fn requires_non_empty_recording_variable() {
         assert_error(
             &VALID_CONFIG.replacen("variable = \"A:PLANE PITCH DEGREES\"\n", "", 1),
-            |error| matches!(error, ConfigError::Toml(_)),
+            |error| {
+                if let ConfigError::Toml(_) = error {
+                    true
+                } else {
+                    false
+                }
+            },
         );
         assert_error(
             &VALID_CONFIG.replacen("variable = \"A:PLANE PITCH DEGREES\"", "variable = \"\"", 1),
-            |error| matches!(error, ConfigError::EmptyRecordingVariable { .. }),
+            |error| {
+                if let ConfigError::EmptyRecordingVariable { .. } = error {
+                    true
+                } else {
+                    false
+                }
+            },
         );
     }
 
@@ -514,15 +550,33 @@ unit = "position"
     fn validates_recording_units() {
         assert_error(
             &VALID_CONFIG.replacen("unit = \"radians\"\n", "", 1),
-            |error| matches!(error, ConfigError::MissingRecordingUnit { .. }),
+            |error| {
+                if let ConfigError::MissingRecordingUnit { .. } = error {
+                    true
+                } else {
+                    false
+                }
+            },
         );
         assert_error(
             &VALID_CONFIG.replacen("unit = \"radians\"", "unit = \"\"", 1),
-            |error| matches!(error, ConfigError::EmptyRecordingUnit { .. }),
+            |error| {
+                if let ConfigError::EmptyRecordingUnit { .. } = error {
+                    true
+                } else {
+                    false
+                }
+            },
         );
         assert_error(
             &VALID_CONFIG.replacen("A:PLANE PITCH DEGREES", "L:CUSTOM_RESPONSE", 1),
-            |error| matches!(error, ConfigError::UnexpectedRecordingUnit { .. }),
+            |error| {
+                if let ConfigError::UnexpectedRecordingUnit { .. } = error {
+                    true
+                } else {
+                    false
+                }
+            },
         );
     }
 
@@ -547,7 +601,13 @@ unit = "position"
                     &format!("unit = \"radians\"\nmax_sampling_rate = {value}\n"),
                     1,
                 ),
-                |error| matches!(error, ConfigError::InvalidRecordingSamplingRate { .. }),
+                |error| {
+                    if let ConfigError::InvalidRecordingSamplingRate { .. } = error {
+                        true
+                    } else {
+                        false
+                    }
+                },
             );
         }
     }
@@ -557,25 +617,27 @@ unit = "position"
         assert_error(
             &VALID_CONFIG.replacen("[inject.0]", "[inject.first]", 1),
             |error| {
-                matches!(
-                    error,
-                    ConfigError::InvalidIndex {
-                        section: "inject",
-                        ..
-                    }
-                )
+                if let ConfigError::InvalidIndex {
+                    section: "inject", ..
+                } = error
+                {
+                    true
+                } else {
+                    false
+                }
             },
         );
         assert_error(
             &VALID_CONFIG.replacen("[record.1]", "[record.4]", 1),
             |error| {
-                matches!(
-                    error,
-                    ConfigError::NonContiguousIndex {
-                        section: "record",
-                        ..
-                    }
-                )
+                if let ConfigError::NonContiguousIndex {
+                    section: "record", ..
+                } = error
+                {
+                    true
+                } else {
+                    false
+                }
             },
         );
     }
@@ -588,11 +650,23 @@ unit = "position"
                 "name = \"sidestick_pitch_position\"",
                 1,
             ),
-            |error| matches!(error, ConfigError::DuplicateInjectionSignal { .. }),
+            |error| {
+                if let ConfigError::DuplicateInjectionSignal { .. } = error {
+                    true
+                } else {
+                    false
+                }
+            },
         );
         assert_error(
             &VALID_CONFIG.replacen("name = \"roll\"", "name = \"pitch\"", 1),
-            |error| matches!(error, ConfigError::DuplicateRecordingSignal { .. }),
+            |error| {
+                if let ConfigError::DuplicateRecordingSignal { .. } = error {
+                    true
+                } else {
+                    false
+                }
+            },
         );
     }
 
@@ -605,7 +679,13 @@ unit = "position"
         ] {
             assert_error(
                 &VALID_CONFIG.replacen("source_range = [-100.0, 100.0]", replacement, 1),
-                |error| matches!(error, ConfigError::InvalidInjectionRange { .. }),
+                |error| {
+                    if let ConfigError::InvalidInjectionRange { .. } = error {
+                        true
+                    } else {
+                        false
+                    }
+                },
             );
         }
         assert_error(
@@ -614,7 +694,13 @@ unit = "position"
                 "simulator_range = [-16384.0, 16384.0]",
                 1,
             ),
-            |error| matches!(error, ConfigError::UnsafeSimulatorRange { .. }),
+            |error| {
+                if let ConfigError::UnsafeSimulatorRange { .. } = error {
+                    true
+                } else {
+                    false
+                }
+            },
         );
     }
 
@@ -626,7 +712,13 @@ unit = "position"
                 "input_file = \"scenario.csv\"\nunexpected = true",
                 1,
             ),
-            |error| matches!(error, ConfigError::Toml(_)),
+            |error| {
+                if let ConfigError::Toml(_) = error {
+                    true
+                } else {
+                    false
+                }
+            },
         );
         for unknown_field in [
             "time_column = \"custom.time\"",
@@ -639,7 +731,13 @@ unit = "position"
                     &format!("source_range = [-100.0, 100.0]\n{unknown_field}"),
                     1,
                 ),
-                |error| matches!(error, ConfigError::Toml(_)),
+                |error| {
+                    if let ConfigError::Toml(_) = error {
+                        true
+                    } else {
+                        false
+                    }
+                },
             );
         }
         for removed_field in ["unit = \"degrees\"", "range = [-180.0, 180.0]"] {
@@ -649,7 +747,13 @@ unit = "position"
                     &format!("variable = \"A:PLANE PITCH DEGREES\"\n{removed_field}"),
                     1,
                 ),
-                |error| matches!(error, ConfigError::Toml(_)),
+                |error| {
+                    if let ConfigError::Toml(_) = error {
+                        true
+                    } else {
+                        false
+                    }
+                },
             );
         }
     }

@@ -82,7 +82,7 @@ pub enum ConfigError {
 }
 
 /// Replay lifecycle and simulator-clock failures.
-#[derive(Debug, Error)]
+#[derive(Debug, PartialEq, Error)]
 pub enum ReplayerError {
     #[error("a replay scenario is already loaded")]
     ScenarioAlreadyLoaded,
@@ -104,7 +104,7 @@ pub enum ReplayerError {
 }
 
 /// MSFS calculator-code and simulator-variable failures.
-#[derive(Debug, Error)]
+#[derive(Debug, PartialEq, Error)]
 pub enum SimulatorError {
     #[error("failed to read simulator time")]
     SimulationTimeUnavailable,
