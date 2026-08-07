@@ -79,6 +79,9 @@ pub enum ConfigError {
 
     #[error("duplicate recording signal `{name}` at record.{index}")]
     DuplicateRecordingSignal { index: usize, name: String },
+
+    #[error("signal `{name}` is used in both inject and record sections")]
+    DuplicateSignalAcrossSections { name: String },
 }
 
 /// Replay lifecycle and simulator-clock failures.

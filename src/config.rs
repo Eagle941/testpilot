@@ -53,6 +53,7 @@ impl ReplayConfig {
 
         let inject = Self::parse_injections(raw.inject)?;
         let record = Self::parse_recordings(raw.record)?;
+        Self::validate_signal_names(&inject, &record)?;
 
         Ok(ReplayConfig {
             input_file: PathBuf::from(raw.input_file),
@@ -89,6 +90,25 @@ impl ReplayConfig {
         }
 
         Ok(result)
+    }
+
+    /// Rejects names that appear in both inject and record sections.
+    fn validate_signal_names(
+        inject: &[InjectionConfig],
+        record: &[RecordingConfig],
+    ) -> Result<(), ConfigError> {
+        let injection_names = inject
+            .iter()
+            .map(|injection| injection.name.as_str())
+            .collect::<HashSet<_>>();
+        for recording in record {
+            if injection_names.contains(recording.name.as_str()) {
+                return Err(ConfigError::DuplicateSignalAcrossSections {
+                    name: recording.name.clone(),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Converts an indexed TOML section into deterministic numeric order.
@@ -621,6 +641,17 @@ unit = "position"
             &VALID_CONFIG.replacen("name = \"roll\"", "name = \"pitch\"", 1),
             |error| match error {
                 ConfigError::DuplicateRecordingSignal { .. } => {}
+                _ => panic!("unexpected error: {error:?}"),
+            },
+        );
+    }
+
+    #[test]
+    fn rejects_signals_used_in_both_inject_and_record_sections() {
+        assert_error(
+            &VALID_CONFIG.replacen("name = \"pitch\"", "name = \"sidestick_pitch_position\"", 1),
+            |error| match error {
+                ConfigError::DuplicateSignalAcrossSections { .. } => {}
                 _ => panic!("unexpected error: {error:?}"),
             },
         );

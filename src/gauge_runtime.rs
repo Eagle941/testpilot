@@ -84,8 +84,8 @@ impl<S: SimulatorAdapter> GaugeRuntime<S> {
             Self::validate_recordings(simulator, &frame)?;
         }
 
-        Self::inject_inputs(simulator, &frame)?;
-        Self::record_outputs(simulator, &mut frame)?;
+        let injected_values = Self::inject_inputs(simulator, &frame)?;
+        Self::record_outputs(simulator, &mut frame, &injected_values)?;
 
         Ok(())
     }
@@ -118,8 +118,12 @@ impl<S: SimulatorAdapter> GaugeRuntime<S> {
     /// Interpolates and writes all configured input signals for this frame.
     ///
     /// Interpolation and conversion failures are surfaced as gauge-level errors.
-    fn inject_inputs(simulator: &mut S, frame: &InterpolationFrame<'_>) -> Result<(), GaugeError> {
+    fn inject_inputs(
+        simulator: &mut S,
+        frame: &InterpolationFrame<'_>,
+    ) -> Result<Vec<f64>, GaugeError> {
         let elapsed = frame.elapsed();
+        let mut injected_values = Vec::with_capacity(frame.recordings().len());
         for data_points in frame.data_points() {
             let source_value =
                 data_points
@@ -144,9 +148,10 @@ impl<S: SimulatorAdapter> GaugeRuntime<S> {
                     signal: data_points.signal.to_owned(),
                     source,
                 })?;
+            injected_values.push(simulator_value);
         }
 
-        Ok(())
+        Ok(injected_values)
     }
 
     /// Samples configured recordings when they are due and writes a telemetry row.
@@ -155,6 +160,7 @@ impl<S: SimulatorAdapter> GaugeRuntime<S> {
     fn record_outputs(
         simulator: &mut S,
         frame: &mut InterpolationFrame<'_>,
+        injected_values: &[f64],
     ) -> Result<(), GaugeError> {
         let elapsed = frame.elapsed();
         let mut sampled_values = Vec::with_capacity(frame.recordings().len());
@@ -178,7 +184,7 @@ impl<S: SimulatorAdapter> GaugeRuntime<S> {
         }
 
         if any_due {
-            frame.record(&sampled_values)?;
+            frame.record(&sampled_values, injected_values)?;
         }
 
         Ok(())
@@ -237,6 +243,21 @@ max_sampling_rate = 1.0
 name = "elevator_position"
 variable = "L:ELEVATOR_POSITION"
 max_sampling_rate = 1.0
+"#;
+
+    const INJECTED_VALUES_ONLY_CONFIG: &str = r#"format_version = 1
+input_file = "scenario.csv"
+
+[inject.0]
+name = "sidestick_pitch_position"
+variable = "K:AXIS_ELEVATOR_SET"
+source_range = [-100.0, 100.0]
+simulator_range = [-1.0, 1.0]
+
+[record.0]
+name = "pitch"
+variable = "A:PLANE PITCH DEGREES"
+unit = "radians"
 "#;
 
     const SCENARIO: &str =
@@ -547,9 +568,9 @@ max_sampling_rate = 1.0
         runtime.stop().unwrap();
         assert_eq!(
             fixture.telemetry_contents(),
-            "pitch.time,pitch.value,elevator_position.time,elevator_position.value\n\
-             0,0.25,0,0.75\n\
-             0.5,0.5,0.5,1\n"
+            "pitch.time,pitch.value,elevator_position.time,elevator_position.value,sidestick_pitch_position.time,sidestick_pitch_position.value\n\
+             0,0.25,0,0.75,0,0\n\
+             0.5,0.5,0.5,1,0.5,0.5\n"
         );
     }
 
@@ -585,9 +606,52 @@ max_sampling_rate = 1.0
         runtime.stop().unwrap();
         assert_eq!(
             fixture.telemetry_contents(),
-            "pitch.time,pitch.value,elevator_position.time,elevator_position.value\n\
-             0,0.1,0,0.3\n\
-             1,0.2,1,0.4\n"
+            "pitch.time,pitch.value,elevator_position.time,elevator_position.value,sidestick_pitch_position.time,sidestick_pitch_position.value\n\
+             0,0.1,0,0.3,0,0\n\
+             1,0.2,1,0.4,1,1\n"
+        );
+    }
+
+    #[test]
+    fn injected_values_are_written_to_telemetry() {
+        let fixture = Fixture::new(INJECTED_VALUES_ONLY_CONFIG);
+        let mut simulator = FakeSimulator::new(duration(100.0));
+        simulator.queue_reads(ARMED_VARIABLE, [1.0]);
+        simulator.queue_reads("A:PLANE PITCH DEGREES", [0.25]);
+        let mut runtime = runtime(&fixture, simulator);
+        runtime.simulator.clear_operations();
+
+        runtime
+            .pre_update()
+            .unwrap_or_else(|error| panic!("arming update failed: {error:#}"));
+
+        assert_eq!(
+            runtime.simulator.operations,
+            vec![
+                Operation::Read {
+                    variable: ARMED_VARIABLE.to_owned(),
+                    unit: None,
+                },
+                Operation::ValidateRead {
+                    variable: "A:PLANE PITCH DEGREES".to_owned(),
+                    unit: Some("radians".to_owned()),
+                },
+                Operation::Write {
+                    variable: "K:AXIS_ELEVATOR_SET".to_owned(),
+                    value: 0.0,
+                },
+                Operation::Read {
+                    variable: "A:PLANE PITCH DEGREES".to_owned(),
+                    unit: Some("radians".to_owned()),
+                },
+            ]
+        );
+
+        runtime.stop().unwrap();
+        assert_eq!(
+            fixture.telemetry_contents(),
+            "pitch.time,pitch.value,sidestick_pitch_position.time,sidestick_pitch_position.value\n\
+             0,0.25,0,0\n"
         );
     }
 
@@ -628,8 +692,8 @@ max_sampling_rate = 1.0
         );
         assert_eq!(
             fixture.telemetry_contents(),
-            "pitch.time,pitch.value,elevator_position.time,elevator_position.value\n\
-             0,0.1,0,0.2\n"
+            "pitch.time,pitch.value,elevator_position.time,elevator_position.value,sidestick_pitch_position.time,sidestick_pitch_position.value\n\
+             0,0.1,0,0.2,0,0\n"
         );
     }
 
@@ -701,7 +765,7 @@ max_sampling_rate = 1.0
         runtime.stop().unwrap();
         assert_eq!(
             fixture.telemetry_contents(),
-            "pitch.time,pitch.value,elevator_position.time,elevator_position.value\n"
+            "pitch.time,pitch.value,elevator_position.time,elevator_position.value,sidestick_pitch_position.time,sidestick_pitch_position.value\n"
         );
     }
 
