@@ -57,10 +57,10 @@ impl GaugeRuntime {
     /// This method is idempotent from the perspective of runtime state; if no
     /// scenario is active, it still resets arming state and returns `Ok(())`.
     pub fn stop(&mut self) -> Result<(), GaugeError> {
-        let recorder_result = self.replayer.reset().map_err(GaugeError::RecordFrame);
+        let recorder_result = self.replayer.reset();
         self.arming.reset(&mut self.simulator)?;
-
-        recorder_result
+        recorder_result?;
+        Ok(())
     }
 
     /// Processes one running frame from the replay engine.

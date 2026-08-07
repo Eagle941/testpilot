@@ -1,9 +1,9 @@
 //! Replay lifecycle orchestration independent of the MSFS gauge API.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use crate::config::{RecordingConfig, ReplayConfig, CONFIG_PATH};
+use crate::config::{CONFIG_PATH, RecordingConfig, ReplayConfig};
 use crate::cursor::{Frame, Scenario};
 use crate::error::{RecordingError, ReplayerError};
 use crate::recording::TelemetryRecorder;
@@ -184,15 +184,7 @@ impl Replayer {
                 })?;
         let scenario_path = config_directory.join(&config.input_file);
         let playback = Scenario::new(&scenario_path, &config)?;
-        #[cfg(target_arch = "wasm32")]
-        let telemetry_directory = std::path::Path::new("/work");
-        #[cfg(not(target_arch = "wasm32"))]
-        let telemetry_directory =
-            scenario_path
-                .parent()
-                .ok_or_else(|| ReplayerError::ScenarioPathWithoutParent {
-                    path: scenario_path.clone(),
-                })?;
+        let telemetry_directory = self.telemetry_directory(&scenario_path)?;
         println!("TESTPILOT: reading host UTC timestamp");
         let recording_started_at = SystemTime::now();
         println!(
@@ -225,6 +217,21 @@ impl Replayer {
         });
         println!("TESTPILOT: scenario cursors ready");
         Ok(())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn telemetry_directory(&self, _scenario_path: &Path) -> Result<PathBuf, ReplayerError> {
+        Ok(Path::new("/work").to_path_buf())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn telemetry_directory(&self, scenario_path: &Path) -> Result<PathBuf, ReplayerError> {
+        scenario_path
+            .parent()
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| ReplayerError::ScenarioPathWithoutParent {
+                path: scenario_path.to_path_buf(),
+            })
     }
 
     fn update_scenario(&mut self, simulation_time: Duration) -> anyhow::Result<ReplayerUpdate<'_>> {
