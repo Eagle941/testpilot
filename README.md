@@ -296,10 +296,10 @@ requires an in-simulator test against the intended MSFS and aircraft versions.
 
 ## MSFS installation (for A32NX)
 
-Close MSFS, then build and install the gauge from Bash:
+Close MSFS, then build and install the gauge:
 
-```sh
-sh scripts/install.sh /path/to/flybywire-aircraft-a320-neo
+```powershell
+./scripts/install.ps1 "C:\path\to\flybywire-aircraft-a320-neo"
 ```
 
 The required argument is the target Community package directory. The script
@@ -307,8 +307,8 @@ expects the current test aircraft, panel, and layout paths. On a Microsoft Store
 installation, it derives the package-specific work directory from
 `%LOCALAPPDATA%`. Other installations can provide it explicitly:
 
-```sh
-sh scripts/install.sh /path/to/flybywire-aircraft-a320-neo /path/to/package/work
+```powershell
+./scripts/install.ps1 "C:\path\to\flybywire-aircraft-a320-neo" "C:\path\to\package\work"
 ```
 
 The script performs these operations:
