@@ -206,6 +206,8 @@ pub struct RecordingConfig {
     pub variable: String,
     /// MSFS read unit required for `A:` variables and absent for other prefixes.
     pub unit: Option<String>,
+    /// Optional maximum sampling frequency in Hz.
+    pub max_sampling_rate: Option<f64>,
 }
 
 impl RecordingConfig {
@@ -243,7 +245,29 @@ impl RecordingConfig {
             name: raw.name,
             variable: raw.variable,
             unit: raw.unit,
+            max_sampling_rate: match raw.max_sampling_rate {
+                Some(rate) => Some(Self::validate_sampling_rate(index, rate)?),
+                None => None,
+            },
         })
+    }
+
+    fn validate_sampling_rate(index: usize, rate: f64) -> Result<f64, ConfigError> {
+        if !rate.is_finite() {
+            return Err(ConfigError::InvalidRecordingSamplingRate {
+                index,
+                value: rate,
+                reason: "must be finite",
+            });
+        }
+        if rate <= 0.0 {
+            return Err(ConfigError::InvalidRecordingSamplingRate {
+                index,
+                value: rate,
+                reason: "must be greater than 0",
+            });
+        }
+        Ok(rate)
     }
 }
 
@@ -273,6 +297,7 @@ struct RawRecordingConfig {
     name: String,
     variable: String,
     unit: Option<String>,
+    max_sampling_rate: Option<f64>,
 }
 
 /// Reads and parses a replay configuration file.
@@ -489,6 +514,32 @@ unit = "position"
             &VALID_CONFIG.replacen("A:PLANE PITCH DEGREES", "L:CUSTOM_RESPONSE", 1),
             |error| matches!(error, ConfigError::UnexpectedRecordingUnit { .. }),
         );
+    }
+
+    #[test]
+    fn accepts_optional_recording_sampling_rate() {
+        let config = parse_config(&VALID_CONFIG.replacen(
+            "unit = \"radians\"\n",
+            "unit = \"radians\"\nmax_sampling_rate = 1.0\n",
+            1,
+        ))
+        .unwrap_or_else(|error| panic!("valid sampling-rate config rejected: {error}"));
+        assert_eq!(config.record[0].max_sampling_rate, Some(1.0));
+        assert_eq!(config.record[1].max_sampling_rate, None);
+    }
+
+    #[test]
+    fn rejects_invalid_recording_sampling_rate() {
+        for value in ["0", "-1", "nan", "inf", "-inf"] {
+            assert_error(
+                &VALID_CONFIG.replacen(
+                    "unit = \"radians\"\n",
+                    &format!("unit = \"radians\"\nmax_sampling_rate = {value}\n"),
+                    1,
+                ),
+                |error| matches!(error, ConfigError::InvalidRecordingSamplingRate { .. }),
+            );
+        }
     }
 
     #[test]

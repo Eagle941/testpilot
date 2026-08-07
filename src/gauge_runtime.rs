@@ -73,17 +73,27 @@ impl GaugeRuntime {
         }
         GaugeRuntime::inject_frame(frame, simulator)?;
 
+        let elapsed = frame.elapsed();
         let mut sampled_values = Vec::with_capacity(frame.recordings().len());
-        for recording in frame.recordings() {
+        let mut has_due_recording = false;
+        let (recordings, schedules) = frame.recordings_and_schedules();
+        for (recording, schedule) in recordings.iter().zip(schedules.iter_mut()) {
+            if !schedule.should_sample(elapsed) {
+                sampled_values.push(None);
+                continue;
+            }
+            has_due_recording = true;
             let value = simulator
                 .read(&recording.variable, recording.unit.as_deref())
                 .map_err(|source| GaugeError::SampleSignal {
                     signal: recording.name.clone(),
                     source,
                 })?;
-            sampled_values.push(value);
+            sampled_values.push(Some(value));
         }
-        frame.record(&sampled_values)?;
+        if has_due_recording {
+            frame.record(&sampled_values)?;
+        }
         Ok(())
     }
 

@@ -69,6 +69,13 @@ pub enum ConfigError {
     #[error("unit at record.{index} is only valid for A: variables, got `{variable}`")]
     UnexpectedRecordingUnit { index: usize, variable: String },
 
+    #[error("max_sampling_rate at record.{index} ({value}) is invalid: {reason}")]
+    InvalidRecordingSamplingRate {
+        index: usize,
+        value: f64,
+        reason: &'static str,
+    },
+
     #[error("duplicate recording signal `{name}` at record.{index}")]
     DuplicateRecordingSignal { index: usize, name: String },
 }

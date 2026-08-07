@@ -14,6 +14,7 @@ pub(crate) struct InterpolationFrame<'a> {
     elapsed: Duration,
     playback: &'a ScenarioPlayback,
     recordings: &'a [RecordingConfig],
+    recording_schedules: &'a mut [RecordingSchedule],
     recorder: &'a mut TelemetryRecorder,
 }
 
@@ -33,8 +34,15 @@ impl InterpolationFrame<'_> {
         self.recordings
     }
 
+    /// Returns recordings together with mutable schedules for this frame.
+    pub(crate) fn recordings_and_schedules(
+        &mut self,
+    ) -> (&[RecordingConfig], &mut [RecordingSchedule]) {
+        (self.recordings, self.recording_schedules)
+    }
+
     /// Appends the sampled telemetry values for this simulator frame.
-    pub(crate) fn record(&mut self, values: &[f64]) -> Result<(), RecordingError> {
+    pub(crate) fn record(&mut self, values: &[Option<f64>]) -> Result<(), RecordingError> {
         self.recorder
             .write_frame(self.elapsed, self.recordings, values)
     }
@@ -53,7 +61,45 @@ struct ActiveScenario {
     playback: ScenarioPlayback,
     recordings: Vec<RecordingConfig>,
     recorder: TelemetryRecorder,
+    recording_schedules: Vec<RecordingSchedule>,
     started_at: Duration,
+}
+
+pub(crate) enum RecordingSchedule {
+    EveryFrame,
+    Limited {
+        period: Duration,
+        next_due: Duration,
+    },
+}
+
+impl RecordingSchedule {
+    fn new(max_sampling_rate: Option<f64>) -> RecordingSchedule {
+        match max_sampling_rate {
+            Some(rate) => {
+                let period = Duration::from_secs_f64(1.0 / rate);
+                RecordingSchedule::Limited {
+                    period,
+                    next_due: Duration::ZERO,
+                }
+            }
+            None => RecordingSchedule::EveryFrame,
+        }
+    }
+
+    pub(crate) fn should_sample(&mut self, elapsed: Duration) -> bool {
+        match self {
+            RecordingSchedule::EveryFrame => true,
+            RecordingSchedule::Limited { period, next_due } => {
+                if elapsed < *next_due {
+                    return false;
+                }
+
+                *next_due = elapsed.saturating_add(*period);
+                true
+            }
+        }
+    }
 }
 
 /// Owns arming, scenario streaming, and simulator-clock scheduling state.
@@ -151,10 +197,16 @@ impl Replayer {
             "TESTPILOT: recording telemetry to {}",
             recorder.path().display()
         );
+        let recordings = config.record;
+        let recording_schedules = recordings
+            .iter()
+            .map(|recording| RecordingSchedule::new(recording.max_sampling_rate))
+            .collect();
         self.active = Some(ActiveScenario {
             playback,
-            recordings: config.record,
+            recordings,
             recorder,
+            recording_schedules,
             started_at,
         });
         println!("TESTPILOT: scenario cursors ready");
@@ -179,6 +231,7 @@ impl Replayer {
             elapsed,
             playback: &active.playback,
             recordings: &active.recordings,
+            recording_schedules: &mut active.recording_schedules,
             recorder: &mut active.recorder,
         }))
     }
@@ -353,7 +406,7 @@ unit = "radians"
         };
         assert_eq!(frame.recordings().len(), 1);
         assert_eq!(frame.recordings()[0].name, "pitch");
-        frame.record(&[0.125]).unwrap();
+        frame.record(&[Some(0.125)]).unwrap();
         replayer.reset().unwrap();
 
         let telemetry_path = fs::read_dir(&fixture.directory)
@@ -370,6 +423,169 @@ unit = "radians"
             fs::read_to_string(telemetry_path).unwrap(),
             "pitch.time,pitch.value\n0.05,0.125\n"
         );
+    }
+
+    #[test]
+    fn writes_sparse_rows_for_sample_limited_recordings() {
+        let fixture = Fixture::new();
+        fs::write(
+            &fixture.config_path,
+            r#"format_version = 1
+input_file = "scenario.csv"
+
+[inject.0]
+name = "sidestick_pitch_position"
+variable = "K:AXIS_ELEVATOR_SET"
+source_range = [-100.0, 100.0]
+simulator_range = [-1.0, 1.0]
+
+[record.0]
+name = "pitch"
+variable = "A:PLANE PITCH DEGREES"
+unit = "radians"
+max_sampling_rate = 1.0
+
+[record.1]
+name = "roll"
+variable = "A:PLANE BANK DEGREES"
+unit = "radians"
+"#,
+        )
+        .unwrap_or_else(|error| panic!("failed to rewrite fixture config: {error}"));
+        fs::write(
+            fixture.directory.join("scenario.csv"),
+            "sidestick_pitch_position.time,sidestick_pitch_position.value\n0,0\n1,10\n2,20\n",
+        )
+        .unwrap_or_else(|error| panic!("failed to write fixture scenario: {error}"));
+
+        let mut replayer = Replayer::with_config_path(fixture.config_path.clone());
+        replayer.start_scenario(time(10.0)).unwrap();
+
+        let ReplayerUpdate::Running(mut frame) = replayer.update_scenario(time(10.0)).unwrap()
+        else {
+            panic!("running update did not return interpolation data");
+        };
+        assert_eq!(frame.recordings().len(), 2);
+        assert_eq!(frame.recordings_and_schedules().1.len(), 2);
+        frame.record(&[Some(0.1), Some(10.0)]).unwrap();
+
+        let ReplayerUpdate::Running(mut frame) = replayer.update_scenario(time(10.5)).unwrap()
+        else {
+            panic!("running update did not return interpolation data");
+        };
+        frame.record(&[None, Some(20.0)]).unwrap();
+
+        let ReplayerUpdate::Running(mut frame) = replayer.update_scenario(time(11.0)).unwrap()
+        else {
+            panic!("running update did not return interpolation data");
+        };
+        frame.record(&[Some(0.2), Some(30.0)]).unwrap();
+        replayer.reset().unwrap();
+
+        let telemetry_path = fs::read_dir(&fixture.directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("telemetry_") && name.ends_with(".csv"))
+            })
+            .expect("telemetry file was not created beside the scenario");
+        assert_eq!(
+            fs::read_to_string(telemetry_path).unwrap(),
+            "pitch.time,pitch.value,roll.time,roll.value\n0,0.1,0,10\n,,0.5,20\n1,0.2,1,30\n"
+        );
+    }
+
+    #[test]
+    fn does_not_emit_rows_when_no_recordings_are_due() {
+        let fixture = Fixture::new();
+        fs::write(
+            &fixture.config_path,
+            r#"format_version = 1
+input_file = "scenario.csv"
+
+[inject.0]
+name = "sidestick_pitch_position"
+variable = "K:AXIS_ELEVATOR_SET"
+source_range = [-100.0, 100.0]
+simulator_range = [-1.0, 1.0]
+
+[record.0]
+name = "pitch"
+variable = "A:PLANE PITCH DEGREES"
+unit = "radians"
+max_sampling_rate = 1.0
+
+[record.1]
+name = "roll"
+variable = "A:PLANE BANK DEGREES"
+unit = "radians"
+max_sampling_rate = 1.0
+"#,
+        )
+        .unwrap_or_else(|error| panic!("failed to rewrite fixture config: {error}"));
+        fs::write(
+            fixture.directory.join("scenario.csv"),
+            "sidestick_pitch_position.time,sidestick_pitch_position.value\n0,0\n1,10\n2,20\n",
+        )
+        .unwrap_or_else(|error| panic!("failed to write fixture scenario: {error}"));
+
+        let mut replayer = Replayer::with_config_path(fixture.config_path.clone());
+        replayer.start_scenario(time(10.0)).unwrap();
+
+        let ReplayerUpdate::Running(mut frame) = replayer.update_scenario(time(10.0)).unwrap()
+        else {
+            panic!("running update did not return interpolation data");
+        };
+        frame.record(&[Some(0.1), Some(10.0)]).unwrap();
+
+        let ReplayerUpdate::Running(_frame) = replayer.update_scenario(time(10.5)).unwrap() else {
+            panic!("running update did not return interpolation data");
+        };
+
+        let ReplayerUpdate::Running(mut frame) = replayer.update_scenario(time(11.0)).unwrap()
+        else {
+            panic!("running update did not return interpolation data");
+        };
+        frame.record(&[Some(0.2), Some(20.0)]).unwrap();
+        replayer.reset().unwrap();
+
+        let telemetry_path = fs::read_dir(&fixture.directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("telemetry_") && name.ends_with(".csv"))
+            })
+            .expect("telemetry file was not created beside the scenario");
+        assert_eq!(
+            fs::read_to_string(telemetry_path).unwrap(),
+            "pitch.time,pitch.value,roll.time,roll.value\n0,0.1,0,10\n1,0.2,1,20\n"
+        );
+    }
+
+    #[test]
+    fn schedules_sample_rate_limits_are_advanced_with_frame_elapsed_time() {
+        let mut schedule = super::RecordingSchedule::new(Some(1.0));
+
+        assert!(schedule.should_sample(Duration::ZERO));
+        assert!(!schedule.should_sample(Duration::from_millis(400)));
+        assert!(schedule.should_sample(Duration::from_secs(1)));
+        assert!(!schedule.should_sample(Duration::from_millis(1_600)));
+        assert!(schedule.should_sample(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn schedules_without_max_sampling_rate_sample_every_frame() {
+        let mut schedule = super::RecordingSchedule::new(None);
+
+        assert!(schedule.should_sample(Duration::ZERO));
+        assert!(schedule.should_sample(Duration::from_millis(100)));
+        assert!(schedule.should_sample(Duration::from_millis(200)));
     }
 
     #[test]

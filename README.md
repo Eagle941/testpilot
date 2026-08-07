@@ -58,6 +58,7 @@ simulator_range = [-16383.0, 16384.0]
 name = "pitch"
 variable = "A:PLANE PITCH DEGREES"
 unit = "radians"
+max_sampling_rate = 60.0
 
 [record.1]
 name = "roll"
@@ -224,12 +225,16 @@ the header is:
 pitch.time,pitch.value,roll.time,roll.value,elevator_position.time,elevator_position.value,aileron_position.time,aileron_position.value
 ```
 
-Every MSFS frame is sampled after that frame's input injection. The row repeats
-the same scenario-relative simulator elapsed time in seconds in every signal's
-`.time` column and writes the sampled response in the adjacent `.value` column.
-`pitch` and `roll` are aggregate MSFS aircraft attitudes; `elevator_position`
-and `aileron_position` are aggregate MSFS control-surface positions, not
-individual left/right A32NX surfaces.
+Each configured `record.N` signal can optionally set `max_sampling_rate`.
+Without this field, a signal is sampled every MSFS frame after that frame's input
+injection. When set to `N` hertz, that signal is sampled no more often than
+once per `1 / N` scenario seconds.
+
+Rows are only emitted when at least one configured signal is due. For a given row,
+due signals include their shared elapsed timestamp in `.time` and their value in
+`.value`; non-due signals emit empty cells in both columns. `pitch` and `roll` are
+aggregate MSFS aircraft attitudes. `elevator_position` and `aileron_position` are
+aggregate MSFS control-surface positions, not individual A32NX surfaces.
 
 Rows are written incrementally with deterministic numeric formatting and
 bounded buffering. Telemetry is flushed on completion and failure. Failures
