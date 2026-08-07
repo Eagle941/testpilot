@@ -38,7 +38,7 @@ jobs:
       - name: Check Rustdoc
         env:
             RUSTDOCFLAGS: -D warnings
-        run: cargo doc --locked --no-deps --all-features
+        run: cargo doc --locked --no-deps --all-features --document-private-items
       - name: Run tests
         run: cargo test --locked
 

@@ -10,8 +10,14 @@ use crate::playback::{AffineRange, LinearSegment, PlaybackError, Sample};
 use crate::error::ScenarioError;
 
 #[derive(Debug, Clone, Copy)]
+/// Pair of CSV column indexes used for one configured input signal.
+///
+/// `time_idx` points to `<signal>.time` and `value_idx` points to the adjacent
+/// `<signal>.value`.
 pub struct ColumnPair {
+    /// Zero-based column index of `<signal>.time`.
     pub time_idx: usize,
+    /// Zero-based column index of `<signal>.value`.
     pub value_idx: usize,
 }
 

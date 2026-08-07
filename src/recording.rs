@@ -51,6 +51,7 @@ impl TelemetryRecorder {
         &self.filename
     }
 
+    /// Computes the telemetry path from the UTC run start time and target directory.
     fn path_for(directory: impl AsRef<Path>, started_at: SystemTime) -> PathBuf {
         // `SystemTime` values for telemetry filenames come from `SystemTime::now()` in normal
         // execution, so they are expected to be well within supported UTC timestamp ranges.
@@ -120,6 +121,7 @@ impl TelemetryRecorder {
             })
     }
 
+    /// Writes the paired `<signal>.time`/`<signal>.value` CSV header columns.
     fn write_header(&mut self, recordings: &[RecordingConfig]) -> Result<(), RecordingError> {
         self.row_buffer.clear();
         for recording in recordings {
@@ -212,10 +214,10 @@ mod tests {
             contents,
             "pitch.time,pitch.value,roll.time,roll.value\n1.5,1.25,1.5,-0.5\n"
         );
-        assert!(matches!(
-            TelemetryRecorder::new(&directory, &recordings, started_at),
-            Err(RecordingError::CreateFile { .. })
-        ));
+        match TelemetryRecorder::new(&directory, &recordings, started_at) {
+            Err(RecordingError::CreateFile { .. }) => {}
+            _ => panic!("expected create-file failure"),
+        }
         drop(recorder);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -263,14 +265,14 @@ mod tests {
         let recordings = [recording("pitch")];
         let mut recorder = TelemetryRecorder::new(&directory, &recordings, UNIX_EPOCH).unwrap();
 
-        assert!(matches!(
-            recorder.write_frame(Duration::ZERO, &recordings, &[]),
-            Err(RecordingError::ValueCount { .. })
-        ));
-        assert!(matches!(
-            recorder.write_frame(Duration::ZERO, &recordings, &[Some(f64::NAN)]),
-            Err(RecordingError::NonFiniteValue { .. })
-        ));
+        match recorder.write_frame(Duration::ZERO, &recordings, &[]) {
+            Err(RecordingError::ValueCount { .. }) => {}
+            unexpected => panic!("expected frame value count failure, got: {unexpected:?}"),
+        }
+        match recorder.write_frame(Duration::ZERO, &recordings, &[Some(f64::NAN)]) {
+            Err(RecordingError::NonFiniteValue { .. }) => {}
+            unexpected => panic!("expected non-finite value failure, got: {unexpected:?}"),
+        }
         drop(recorder);
         fs::remove_dir_all(directory).unwrap();
     }

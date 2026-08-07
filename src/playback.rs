@@ -161,6 +161,7 @@ impl AffineRange {
         Ok(converted)
     }
 
+    /// Validates that a conversion range is finite and strictly increasing.
     fn validate_range(name: &'static str, range: [f64; 2]) -> Result<(), PlaybackError> {
         if !range.iter().all(|endpoint| endpoint.is_finite()) {
             return Err(PlaybackError::InvalidRange {
@@ -225,14 +226,19 @@ mod tests {
 
     #[test]
     fn rejects_invalid_samples_and_segments() {
-        assert!(matches!(
+        assert_eq!(
             Sample::new(Duration::ZERO, f64::INFINITY),
-            Err(PlaybackError::NonFiniteValue { .. })
-        ));
-        assert!(matches!(
+            Err(PlaybackError::NonFiniteValue {
+                value: f64::INFINITY
+            })
+        );
+        assert_eq!(
             LinearSegment::new(sample(1.0, 0.0), sample(1.0, 1.0)),
-            Err(PlaybackError::NonIncreasingSegment { .. })
-        ));
+            Err(PlaybackError::NonIncreasingSegment {
+                start: time(1.0),
+                end: time(1.0)
+            })
+        );
     }
 
     #[test]
@@ -240,10 +246,10 @@ mod tests {
         let segment = LinearSegment::new(sample(0.0, f64::MAX), sample(2.0, -f64::MAX))
             .unwrap_or_else(|error| panic!("valid segment rejected: {error}"));
 
-        assert!(matches!(
+        assert_eq!(
             segment.value_at(time(1.0)),
             Err(PlaybackError::ArithmeticOverflow)
-        ));
+        );
     }
 
     #[test]
@@ -251,14 +257,22 @@ mod tests {
         let segment = LinearSegment::new(sample(1.0, 0.0), sample(2.0, 1.0))
             .unwrap_or_else(|error| panic!("valid segment rejected: {error}"));
 
-        assert!(matches!(
+        assert_eq!(
             segment.value_at(time(0.99)),
-            Err(PlaybackError::TimeOutsideSegment { .. })
-        ));
-        assert!(matches!(
+            Err(PlaybackError::TimeOutsideSegment {
+                time: time(0.99),
+                start: time(1.0),
+                end: time(2.0),
+            })
+        );
+        assert_eq!(
             segment.value_at(time(2.01)),
-            Err(PlaybackError::TimeOutsideSegment { .. })
-        ));
+            Err(PlaybackError::TimeOutsideSegment {
+                time: time(2.01),
+                start: time(1.0),
+                end: time(2.0),
+            })
+        );
     }
 
     #[test]
@@ -271,35 +285,48 @@ mod tests {
         assert_eq!(conversion.source(), [-100.0, 100.0]);
         assert_eq!(conversion.target(), [-1.0, 1.0]);
         assert_eq!(conversion.convert(100.0), Ok(1.0));
-        assert!(matches!(
-            conversion.convert(f64::NAN),
-            Err(PlaybackError::NonFiniteValue { .. })
-        ));
-        assert!(matches!(
+        match conversion.convert(f64::NAN) {
+            Err(PlaybackError::NonFiniteValue { value }) if value.is_nan() => {}
+            unexpected => panic!("expected non-finite conversion error, got: {unexpected:?}"),
+        }
+        assert_eq!(
             conversion.convert(100.1),
-            Err(PlaybackError::ValueOutsideSourceRange { .. })
-        ));
+            Err(PlaybackError::ValueOutsideSourceRange {
+                value: 100.1,
+                minimum: -100.0,
+                maximum: 100.0
+            })
+        );
     }
 
     #[test]
     fn rejects_invalid_affine_ranges() {
-        assert!(matches!(
+        assert_eq!(
             AffineRange::new([0.0, 0.0], [-1.0, 1.0]),
-            Err(PlaybackError::InvalidRange { .. })
-        ));
-        assert!(matches!(
+            Err(PlaybackError::InvalidRange {
+                name: "source",
+                reason: "lower endpoint must be less than upper endpoint"
+            })
+        );
+        assert_eq!(
             AffineRange::new([0.0, f64::INFINITY], [-1.0, 1.0]),
-            Err(PlaybackError::InvalidRange { name: "source", .. })
-        ));
-        assert!(matches!(
+            Err(PlaybackError::InvalidRange {
+                name: "source",
+                reason: "endpoints must be finite"
+            })
+        );
+        assert_eq!(
             AffineRange::new([0.0, 1.0], [1.0, 1.0]),
-            Err(PlaybackError::InvalidRange { name: "target", .. })
-        ));
+            Err(PlaybackError::InvalidRange {
+                name: "target",
+                reason: "lower endpoint must be less than upper endpoint"
+            })
+        );
         let conversion = AffineRange::new([0.0, 1.0], [-f64::MAX, f64::MAX])
             .unwrap_or_else(|error| panic!("valid conversion rejected: {error}"));
-        assert!(matches!(
+        assert_eq!(
             conversion.convert(0.5),
             Err(PlaybackError::ArithmeticOverflow)
-        ));
+        );
     }
 }

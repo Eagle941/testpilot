@@ -1,9 +1,8 @@
 //! Replay lifecycle orchestration independent of the MSFS gauge API.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use crate::arm::PositiveTrigger;
 use crate::config::{CONFIG_PATH, RecordingConfig, ReplayConfig};
 use crate::cursor::{Frame, Scenario};
 use crate::error::{RecordingError, ReplayerError};
@@ -55,7 +54,9 @@ impl InterpolationFrame<'_> {
 pub enum ReplayerUpdate<'a> {
     /// Every cursor has data points available for interpolation after start-up.
     Running {
+        /// Frame-scoped playback and recording context.
         frame: InterpolationFrame<'a>,
+        /// Indicates this is the first frame after replay start.
         started_now: bool,
     },
     /// Every scenario cursor reached the end of its input series.
@@ -63,23 +64,35 @@ pub enum ReplayerUpdate<'a> {
 }
 
 /// Scenario playback and its simulator-clock origin.
+/// Active scenario execution state.
 struct ActiveScenario {
+    /// Parsed scenario with per-signal interpolation cursors.
     playback: Scenario,
+    /// Selected recording definitions for telemetry output.
     recordings: Vec<RecordingConfig>,
+    /// Open telemetry recorder for this run.
     recorder: TelemetryRecorder,
+    /// Per-recording sampling schedules.
     recording_schedules: Vec<RecordingSchedule>,
+    /// Scenario start time in simulator-clock coordinates.
     started_at: Duration,
 }
 
+/// Controls when each recording signal is sampled.
 pub enum RecordingSchedule {
+    /// Sample on every frame.
     EveryFrame,
+    /// Sample no more often than a configured interval period.
     Limited {
+        /// Minimum interval between samples.
         period: Duration,
+        /// Next due time in scenario elapsed seconds.
         next_due: Duration,
     },
 }
 
 impl RecordingSchedule {
+    /// Builds a schedule from an optional max sampling rate.
     fn new(max_sampling_rate: Option<f64>) -> RecordingSchedule {
         match max_sampling_rate {
             Some(rate) => {
@@ -93,6 +106,7 @@ impl RecordingSchedule {
         }
     }
 
+    /// Reports whether the signal should be sampled at the provided elapsed time.
     pub fn should_sample(&mut self, elapsed: Duration) -> bool {
         match self {
             RecordingSchedule::EveryFrame => true,
@@ -112,8 +126,6 @@ impl RecordingSchedule {
 pub struct Replayer {
     /// Filesystem path from which replay configuration is loaded.
     config_path: PathBuf,
-    /// Tracks arming zero-to-one transitions.
-    arm_state: PositiveTrigger,
     /// Active replay state, if a scenario is currently loaded.
     active: Option<ActiveScenario>,
 }
@@ -124,10 +136,10 @@ impl Replayer {
         Replayer::with_config_path(CONFIG_PATH)
     }
 
-    fn with_config_path(config_path: impl Into<PathBuf>) -> Replayer {
+    /// Constructs a replayer using an explicit config path.
+    pub(crate) fn with_config_path(config_path: impl Into<PathBuf>) -> Replayer {
         Replayer {
             config_path: config_path.into(),
-            arm_state: PositiveTrigger::default(),
             active: None,
         }
     }
@@ -138,11 +150,10 @@ impl Replayer {
     /// Simulator time is used once a scenario is loaded.
     pub fn pre_update(
         &mut self,
-        armed_value: f64,
+        init: bool,
         simulation_time: Duration,
     ) -> anyhow::Result<Option<ReplayerUpdate<'_>>> {
-        let starting = self.arm_state.start(armed_value);
-        if starting {
+        if init {
             self.start_scenario(simulation_time)?;
         }
         if self.active.is_none() {
@@ -154,7 +165,7 @@ impl Replayer {
             ReplayerUpdate::Running {
                 frame,
                 started_now: false,
-            } if starting => ReplayerUpdate::Running {
+            } if init => ReplayerUpdate::Running {
                 frame,
                 started_now: true,
             },
@@ -167,13 +178,13 @@ impl Replayer {
     /// Calling this repeatedly is safe. Replay state is released even when the
     /// final telemetry flush fails.
     pub fn reset(&mut self) -> Result<(), RecordingError> {
-        self.arm_state = PositiveTrigger::default();
         let Some(mut active) = self.active.take() else {
             return Ok(());
         };
         active.recorder.flush()
     }
 
+    /// Opens config/scenario, initializes cursors, and opens telemetry output.
     fn start_scenario(&mut self, started_at: Duration) -> anyhow::Result<()> {
         if self.active.is_some() {
             return Err(ReplayerError::ScenarioAlreadyLoaded.into());
@@ -190,15 +201,7 @@ impl Replayer {
                 })?;
         let scenario_path = config_directory.join(&config.input_file);
         let playback = Scenario::new(&scenario_path, &config)?;
-        #[cfg(target_arch = "wasm32")]
-        let telemetry_directory = std::path::Path::new("/work");
-        #[cfg(not(target_arch = "wasm32"))]
-        let telemetry_directory =
-            scenario_path
-                .parent()
-                .ok_or_else(|| ReplayerError::ScenarioPathWithoutParent {
-                    path: scenario_path.clone(),
-                })?;
+        let telemetry_directory = self.telemetry_directory(&scenario_path)?;
         println!("TESTPILOT: reading host UTC timestamp");
         let recording_started_at = SystemTime::now();
         println!(
@@ -233,6 +236,25 @@ impl Replayer {
         Ok(())
     }
 
+    #[cfg(target_arch = "wasm32")]
+    /// Returns the telemetry output directory for wasm execution.
+    #[cfg(target_arch = "wasm32")]
+    fn telemetry_directory(&self, _scenario_path: &Path) -> Result<PathBuf, ReplayerError> {
+        Ok(Path::new("/work").to_path_buf())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Returns the telemetry output directory for host execution.
+    fn telemetry_directory(&self, scenario_path: &Path) -> Result<PathBuf, ReplayerError> {
+        scenario_path
+            .parent()
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| ReplayerError::ScenarioPathWithoutParent {
+                path: scenario_path.to_path_buf(),
+            })
+    }
+
+    /// Advances playback to `simulation_time` and builds the current frame update.
     fn update_scenario(&mut self, simulation_time: Duration) -> anyhow::Result<ReplayerUpdate<'_>> {
         let active = self.active.as_mut().ok_or(ReplayerError::UpdateWhileIdle)?;
         let elapsed = simulation_time.checked_sub(active.started_at).ok_or(
@@ -343,7 +365,7 @@ unit = "radians"
         let mut replayer = Replayer::with_config_path(fixture.config_path.clone());
 
         let update = replayer
-            .pre_update(0.0, time(42.0))
+            .pre_update(false, time(42.0))
             .unwrap_or_else(|error| panic!("idle update failed: {error:#}"));
 
         assert!(update.is_none());
@@ -372,10 +394,10 @@ unit = "radians"
             .start_scenario(time(101.0))
             .expect_err("overlapping replay should fail");
 
-        assert!(matches!(
-            error.downcast_ref::<ReplayerError>(),
-            Some(ReplayerError::ScenarioAlreadyLoaded)
-        ));
+        match error.downcast_ref::<ReplayerError>() {
+            Some(ReplayerError::ScenarioAlreadyLoaded) => {}
+            unexpected => panic!("expected overlapping replay error, got: {unexpected:?}"),
+        }
         assert!(replayer.active.is_some());
     }
 
@@ -411,7 +433,10 @@ unit = "radians"
         assert_eq!(frame.elapsed(), time(0.0625));
 
         let update = replayer.update_scenario(time(100.2)).unwrap();
-        assert!(matches!(update, ReplayerUpdate::Completed));
+        match update {
+            ReplayerUpdate::Completed => {}
+            _ => panic!("expected completed update"),
+        }
         assert!(replayer.active.is_some());
         replayer.reset().unwrap();
         assert!(replayer.active.is_none());
@@ -627,10 +652,10 @@ max_sampling_rate = 1.0
             Err(error) => error,
         };
 
-        assert!(matches!(
-            error.downcast_ref::<ReplayerError>(),
-            Some(ReplayerError::UpdateWhileIdle)
-        ));
+        match error.downcast_ref::<ReplayerError>() {
+            Some(ReplayerError::UpdateWhileIdle) => {}
+            unexpected => panic!("expected update-while-idle error, got: {unexpected:?}"),
+        }
     }
 
     #[test]
@@ -638,28 +663,26 @@ max_sampling_rate = 1.0
         let fixture = Fixture::new();
         let mut replayer = Replayer::with_config_path(fixture.config_path.clone());
 
-        assert!(matches!(
-            replayer.pre_update(1.0, time(99.0)).unwrap(),
+        match replayer.pre_update(true, time(99.0)).unwrap() {
             Some(ReplayerUpdate::Running {
-                started_now: true,
-                ..
-            })
-        ));
+                started_now: true, ..
+            }) => {}
+            _ => panic!("expected running update with start flag true"),
+        }
         assert_eq!(
             replayer.active.as_ref().map(|active| active.started_at),
             Some(time(99.0))
         );
-        assert!(matches!(
-            replayer.pre_update(1.0, time(99.05)).unwrap(),
+        match replayer.pre_update(false, time(99.05)).unwrap() {
             Some(ReplayerUpdate::Running {
-                started_now: false,
-                ..
-            })
-        ));
-        assert!(matches!(
-            replayer.pre_update(1.0, time(99.2)).unwrap(),
-            Some(ReplayerUpdate::Completed)
-        ));
+                started_now: false, ..
+            }) => {}
+            _ => panic!("expected running update with start flag false"),
+        }
+        match replayer.pre_update(false, time(99.2)).unwrap() {
+            Some(ReplayerUpdate::Completed) => {}
+            _ => panic!("expected completed update"),
+        }
         assert!(replayer.active.is_some());
     }
 
@@ -675,20 +698,20 @@ max_sampling_rate = 1.0
             Err(error) => error,
         };
 
-        assert!(matches!(
-            error.downcast_ref::<ReplayerError>(),
+        match error.downcast_ref::<ReplayerError>() {
             Some(ReplayerError::SimulationTimeMovedBackwards {
                 started_at,
                 current,
-            }) if *started_at == time(10.0) && *current == time(9.5)
-        ));
+            }) if *started_at == time(10.0) && *current == time(9.5) => {}
+            _ => panic!("expected backwards-time error"),
+        }
     }
 
     #[test]
     fn reset_is_idempotent() {
         let fixture = Fixture::new();
         let mut replayer = Replayer::with_config_path(fixture.config_path.clone());
-        replayer.pre_update(1.0, Duration::ZERO).unwrap();
+        replayer.pre_update(true, Duration::ZERO).unwrap();
 
         replayer.reset().unwrap();
         replayer.reset().unwrap();

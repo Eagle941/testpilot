@@ -8,6 +8,7 @@
     not(test),
     deny(
         clippy::expect_used,
+        clippy::missing_docs_in_private_items,
         clippy::panic,
         clippy::todo,
         clippy::unimplemented,
@@ -17,12 +18,14 @@
 )]
 
 #[cfg(any(target_arch = "wasm32", test))]
+/// Arming state and transition tracking used by runtime start/stop control.
 mod arm;
 
 #[cfg(target_arch = "wasm32")]
+/// MSFS gauge entrypoint and event loop.
 mod gauge;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 mod gauge_runtime;
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -32,6 +35,7 @@ mod replayer;
 mod simulator;
 
 pub mod config;
+/// Scenario cursor abstraction, readers, and row interpolation sources.
 pub mod cursor;
 pub mod error;
 pub mod playback;

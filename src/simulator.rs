@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use crate::error::SimulatorError;
 
+/// Packed calculator code used to query simulation time.
 #[cfg(target_arch = "wasm32")]
 const SIMULATION_TIME_CODE: &str = "(E:SIMULATION TIME, seconds)";
 
@@ -92,9 +93,15 @@ fn build_calculator_code(
             value,
         });
     }
-    if !matches!(variable.as_bytes(), [b'K' | b'L', b':', _, ..])
-        || variable.as_bytes().contains(&0)
-    {
+    match variable.as_bytes() {
+        [b'K' | b'L', b':', _, ..] => {}
+        _ => {
+            return Err(SimulatorError::UnsupportedVariable {
+                variable: variable.to_owned(),
+            });
+        }
+    }
+    if variable.as_bytes().contains(&0) {
         return Err(SimulatorError::UnsupportedVariable {
             variable: variable.to_owned(),
         });
@@ -228,18 +235,24 @@ mod tests {
         build_read_calculator_code(&mut output, "L:EXAMPLE", None).unwrap();
         assert_eq!(output, "(L:EXAMPLE)");
 
-        assert!(matches!(
+        assert_eq!(
             build_read_calculator_code(&mut output, "A:TEST", None),
-            Err(SimulatorError::MissingReadUnit { .. })
-        ));
-        assert!(matches!(
+            Err(SimulatorError::MissingReadUnit {
+                variable: "A:TEST".to_owned(),
+            })
+        );
+        assert_eq!(
             build_read_calculator_code(&mut output, "L:TEST", Some("number")),
-            Err(SimulatorError::UnexpectedReadUnit { .. })
-        ));
-        assert!(matches!(
+            Err(SimulatorError::UnexpectedReadUnit {
+                variable: "L:TEST".to_owned(),
+            })
+        );
+        assert_eq!(
             build_read_calculator_code(&mut output, "K:EVENT", None),
-            Err(SimulatorError::UnsupportedReadVariable { .. })
-        ));
+            Err(SimulatorError::UnsupportedReadVariable {
+                variable: "K:EVENT".to_owned(),
+            })
+        );
     }
 
     #[test]
@@ -270,14 +283,17 @@ mod tests {
             "A:ELEVATOR POSITION",
             "L:BAD\0NAME",
         ] {
-            assert!(matches!(
+            assert_eq!(
                 build_calculator_code(&mut output, variable, 0.0),
-                Err(SimulatorError::UnsupportedVariable { .. })
-            ));
+                Err(SimulatorError::UnsupportedVariable {
+                    variable: variable.to_owned(),
+                })
+            );
         }
-        assert!(matches!(
-            build_calculator_code(&mut output, "L:TEST", f64::NAN),
-            Err(SimulatorError::NonFiniteWrite { .. })
-        ));
+        match build_calculator_code(&mut output, "L:TEST", f64::NAN) {
+            Err(SimulatorError::NonFiniteWrite { variable, value })
+                if variable == "L:TEST" && value.is_nan() => {}
+            unexpected => panic!("expected non-finite write error, got: {unexpected:?}"),
+        }
     }
 }

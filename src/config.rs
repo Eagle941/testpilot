@@ -42,6 +42,7 @@ impl ReplayConfig {
         Self::new(&contents)
     }
 
+    /// Builds a validated config from raw deserialized TOML data.
     fn parse_raw(raw: RawReplayConfig) -> Result<ReplayConfig, ConfigError> {
         if raw.format_version != FORMAT_VERSION {
             return Err(ConfigError::UnsupportedFormatVersion {
@@ -60,6 +61,7 @@ impl ReplayConfig {
         })
     }
 
+    /// Parses and validates all injection entries.
     fn parse_injections(
         entries: BTreeMap<String, RawInjectionConfig>,
     ) -> Result<Vec<InjectionConfig>, ConfigError> {
@@ -74,6 +76,7 @@ impl ReplayConfig {
         Ok(result)
     }
 
+    /// Parses and validates all recording entries.
     fn parse_recordings(
         entries: BTreeMap<String, RawRecordingConfig>,
     ) -> Result<Vec<RecordingConfig>, ConfigError> {
@@ -147,6 +150,7 @@ pub struct InjectionConfig {
 }
 
 impl InjectionConfig {
+    /// Builds a validated injection config from raw TOML fields.
     fn new(
         index: usize,
         raw: RawInjectionConfig,
@@ -217,6 +221,7 @@ pub struct RecordingConfig {
 }
 
 impl RecordingConfig {
+    /// Builds a validated recording config from raw TOML fields.
     fn new(
         index: usize,
         raw: RawRecordingConfig,
@@ -257,6 +262,7 @@ impl RecordingConfig {
         })
     }
 
+    /// Validates an optional max sampling rate (must be finite and > 0).
     fn validate_sampling_rate(index: usize, rate: f64) -> Result<f64, ConfigError> {
         if !rate.is_finite() {
             return Err(ConfigError::InvalidRecordingSamplingRate {
@@ -278,30 +284,45 @@ impl RecordingConfig {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Internal raw configuration as deserialized from TOML.
 struct RawReplayConfig {
+    /// Declared format version.
     format_version: u32,
+    /// Raw input filename provided in config.
     input_file: String,
     #[serde(default)]
+    /// Raw injection map section.
     inject: BTreeMap<String, RawInjectionConfig>,
     #[serde(default)]
+    /// Raw recording map section.
     record: BTreeMap<String, RawRecordingConfig>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Internal raw input signal configuration.
 struct RawInjectionConfig {
+    /// Raw signal name.
     name: String,
+    /// Raw destination variable string.
     variable: String,
+    /// Raw source range.
     source_range: [f64; 2],
+    /// Raw simulator range.
     simulator_range: [f64; 2],
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Internal raw recording signal configuration.
 struct RawRecordingConfig {
+    /// Raw signal name.
     name: String,
+    /// Raw source variable string.
     variable: String,
+    /// Optional raw recording unit.
     unit: Option<String>,
+    /// Optional raw max sampling rate.
     max_sampling_rate: Option<f64>,
 }
 
@@ -346,10 +367,10 @@ variable = "A:AILERON POSITION"
 unit = "position"
 "#;
 
-    fn assert_error(config: &str, predicate: impl FnOnce(&ConfigError) -> bool) {
+    fn assert_error(config: &str, assertion: impl FnOnce(&ConfigError)) {
         match ReplayConfig::new(config) {
             Ok(parsed) => panic!("configuration unexpectedly parsed: {parsed:?}"),
-            Err(error) => assert!(predicate(&error), "unexpected error: {error}"),
+            Err(error) => assertion(&error),
         }
     }
 
@@ -409,17 +430,20 @@ unit = "position"
             std::env::temp_dir().join(format!("replay-missing-config-{}.toml", std::process::id()));
         let _ = std::fs::remove_file(&path);
 
-        assert!(matches!(
-            ReplayConfig::read_config_file(&path),
-            Err(ConfigError::FileIo(_))
-        ));
+        match ReplayConfig::read_config_file(&path) {
+            Err(ConfigError::FileIo(_)) => {}
+            unexpected => panic!("expected file I/O error, got: {unexpected:?}"),
+        }
     }
 
     #[test]
     fn rejects_unsupported_version() {
         assert_error(
             &VALID_CONFIG.replacen("format_version = 1", "format_version = 2", 1),
-            |error| matches!(error, ConfigError::UnsupportedFormatVersion { .. }),
+            |error| match error {
+                ConfigError::UnsupportedFormatVersion { .. } => {}
+                _ => panic!("unexpected error: {error:?}"),
+            },
         );
     }
 
@@ -441,7 +465,10 @@ unit = "position"
     fn requires_non_empty_injection_name() {
         assert_error(
             &VALID_CONFIG.replacen("name = \"sidestick_pitch_position\"", "name = \"\"", 1),
-            |error| matches!(error, ConfigError::EmptyInjectionName { .. }),
+            |error| match error {
+                ConfigError::EmptyInjectionName { .. } => {}
+                _ => panic!("unexpected error: {error:?}"),
+            },
         );
     }
 
@@ -449,7 +476,10 @@ unit = "position"
     fn requires_injection_variable() {
         assert_error(
             &VALID_CONFIG.replacen("variable = \"K:AXIS_ELEVATOR_SET\"\n", "", 1),
-            |error| matches!(error, ConfigError::Toml(_)),
+            |error| match error {
+                ConfigError::Toml(_) => {}
+                _ => panic!("unexpected error: {error:?}"),
+            },
         );
     }
 
@@ -473,7 +503,10 @@ unit = "position"
     fn requires_non_empty_recording_name() {
         assert_error(
             &VALID_CONFIG.replacen("name = \"pitch\"", "name = \"\"", 1),
-            |error| matches!(error, ConfigError::EmptyRecordingName { .. }),
+            |error| match error {
+                ConfigError::EmptyRecordingName { .. } => {}
+                _ => panic!("unexpected error: {error:?}"),
+            },
         );
     }
 
@@ -481,11 +514,17 @@ unit = "position"
     fn requires_non_empty_recording_variable() {
         assert_error(
             &VALID_CONFIG.replacen("variable = \"A:PLANE PITCH DEGREES\"\n", "", 1),
-            |error| matches!(error, ConfigError::Toml(_)),
+            |error| match error {
+                ConfigError::Toml(_) => {}
+                _ => panic!("unexpected error: {error:?}"),
+            },
         );
         assert_error(
             &VALID_CONFIG.replacen("variable = \"A:PLANE PITCH DEGREES\"", "variable = \"\"", 1),
-            |error| matches!(error, ConfigError::EmptyRecordingVariable { .. }),
+            |error| match error {
+                ConfigError::EmptyRecordingVariable { .. } => {}
+                _ => panic!("unexpected error: {error:?}"),
+            },
         );
     }
 
@@ -493,15 +532,24 @@ unit = "position"
     fn validates_recording_units() {
         assert_error(
             &VALID_CONFIG.replacen("unit = \"radians\"\n", "", 1),
-            |error| matches!(error, ConfigError::MissingRecordingUnit { .. }),
+            |error| match error {
+                ConfigError::MissingRecordingUnit { .. } => {}
+                _ => panic!("unexpected error: {error:?}"),
+            },
         );
         assert_error(
             &VALID_CONFIG.replacen("unit = \"radians\"", "unit = \"\"", 1),
-            |error| matches!(error, ConfigError::EmptyRecordingUnit { .. }),
+            |error| match error {
+                ConfigError::EmptyRecordingUnit { .. } => {}
+                _ => panic!("unexpected error: {error:?}"),
+            },
         );
         assert_error(
             &VALID_CONFIG.replacen("A:PLANE PITCH DEGREES", "L:CUSTOM_RESPONSE", 1),
-            |error| matches!(error, ConfigError::UnexpectedRecordingUnit { .. }),
+            |error| match error {
+                ConfigError::UnexpectedRecordingUnit { .. } => {}
+                _ => panic!("unexpected error: {error:?}"),
+            },
         );
     }
 
@@ -526,7 +574,10 @@ unit = "position"
                     &format!("unit = \"radians\"\nmax_sampling_rate = {value}\n"),
                     1,
                 ),
-                |error| matches!(error, ConfigError::InvalidRecordingSamplingRate { .. }),
+                |error| match error {
+                    ConfigError::InvalidRecordingSamplingRate { .. } => {}
+                    _ => panic!("unexpected error: {error:?}"),
+                },
             );
         }
     }
@@ -535,26 +586,20 @@ unit = "position"
     fn rejects_non_numeric_and_non_contiguous_indexes() {
         assert_error(
             &VALID_CONFIG.replacen("[inject.0]", "[inject.first]", 1),
-            |error| {
-                matches!(
-                    error,
-                    ConfigError::InvalidIndex {
-                        section: "inject",
-                        ..
-                    }
-                )
+            |error| match error {
+                ConfigError::InvalidIndex {
+                    section: "inject", ..
+                } => {}
+                _ => panic!("unexpected error: {error:?}"),
             },
         );
         assert_error(
             &VALID_CONFIG.replacen("[record.1]", "[record.4]", 1),
-            |error| {
-                matches!(
-                    error,
-                    ConfigError::NonContiguousIndex {
-                        section: "record",
-                        ..
-                    }
-                )
+            |error| match error {
+                ConfigError::NonContiguousIndex {
+                    section: "record", ..
+                } => {}
+                _ => panic!("unexpected error: {error:?}"),
             },
         );
     }
@@ -567,11 +612,17 @@ unit = "position"
                 "name = \"sidestick_pitch_position\"",
                 1,
             ),
-            |error| matches!(error, ConfigError::DuplicateInjectionSignal { .. }),
+            |error| match error {
+                ConfigError::DuplicateInjectionSignal { .. } => {}
+                _ => panic!("unexpected error: {error:?}"),
+            },
         );
         assert_error(
             &VALID_CONFIG.replacen("name = \"roll\"", "name = \"pitch\"", 1),
-            |error| matches!(error, ConfigError::DuplicateRecordingSignal { .. }),
+            |error| match error {
+                ConfigError::DuplicateRecordingSignal { .. } => {}
+                _ => panic!("unexpected error: {error:?}"),
+            },
         );
     }
 
@@ -584,7 +635,10 @@ unit = "position"
         ] {
             assert_error(
                 &VALID_CONFIG.replacen("source_range = [-100.0, 100.0]", replacement, 1),
-                |error| matches!(error, ConfigError::InvalidInjectionRange { .. }),
+                |error| match error {
+                    ConfigError::InvalidInjectionRange { .. } => {}
+                    _ => panic!("unexpected error: {error:?}"),
+                },
             );
         }
         assert_error(
@@ -593,7 +647,10 @@ unit = "position"
                 "simulator_range = [-16384.0, 16384.0]",
                 1,
             ),
-            |error| matches!(error, ConfigError::UnsafeSimulatorRange { .. }),
+            |error| match error {
+                ConfigError::UnsafeSimulatorRange { .. } => {}
+                _ => panic!("unexpected error: {error:?}"),
+            },
         );
     }
 
@@ -605,7 +662,10 @@ unit = "position"
                 "input_file = \"scenario.csv\"\nunexpected = true",
                 1,
             ),
-            |error| matches!(error, ConfigError::Toml(_)),
+            |error| match error {
+                ConfigError::Toml(_) => {}
+                _ => panic!("unexpected error: {error:?}"),
+            },
         );
         for unknown_field in [
             "time_column = \"custom.time\"",
@@ -618,7 +678,10 @@ unit = "position"
                     &format!("source_range = [-100.0, 100.0]\n{unknown_field}"),
                     1,
                 ),
-                |error| matches!(error, ConfigError::Toml(_)),
+                |error| match error {
+                    ConfigError::Toml(_) => {}
+                    _ => panic!("unexpected error: {error:?}"),
+                },
             );
         }
         for removed_field in ["unit = \"degrees\"", "range = [-180.0, 180.0]"] {
@@ -628,7 +691,10 @@ unit = "position"
                     &format!("variable = \"A:PLANE PITCH DEGREES\"\n{removed_field}"),
                     1,
                 ),
-                |error| matches!(error, ConfigError::Toml(_)),
+                |error| match error {
+                    ConfigError::Toml(_) => {}
+                    _ => panic!("unexpected error: {error:?}"),
+                },
             );
         }
     }

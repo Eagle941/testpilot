@@ -2,6 +2,7 @@
 //!
 //! File-system and simulator-facing variants retain underlying failures as
 //! inspectable error sources.
+#![allow(missing_docs)]
 
 use std::io;
 use std::num::ParseFloatError;
@@ -81,7 +82,7 @@ pub enum ConfigError {
 }
 
 /// Replay lifecycle and simulator-clock failures.
-#[derive(Debug, Error)]
+#[derive(Debug, PartialEq, Error)]
 pub enum ReplayerError {
     #[error("a replay scenario is already loaded")]
     ScenarioAlreadyLoaded,
@@ -103,7 +104,7 @@ pub enum ReplayerError {
 }
 
 /// MSFS calculator-code and simulator-variable failures.
-#[derive(Debug, Error)]
+#[derive(Debug, PartialEq, Error)]
 pub enum SimulatorError {
     #[error("failed to read simulator time")]
     SimulationTimeUnavailable,
@@ -268,6 +269,9 @@ pub enum GaugeError {
         source: SimulatorError,
     },
 
+    #[error(transparent)]
+    Simulator(#[from] SimulatorError),
+
     #[error("failed to record telemetry frame: {0}")]
     RecordFrame(#[from] RecordingError),
 }
@@ -342,6 +346,7 @@ pub enum PlaybackError {
     ArithmeticOverflow,
 }
 
+/// Formats an optional CSV line context suffix for parse failures.
 fn format_line(line: Option<u64>) -> String {
     line.map_or_else(String::new, |line| format!(" at CSV line {line}"))
 }
