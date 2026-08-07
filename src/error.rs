@@ -268,6 +268,9 @@ pub enum GaugeError {
         source: SimulatorError,
     },
 
+    #[error(transparent)]
+    Simulator(#[from] SimulatorError),
+
     #[error("failed to record telemetry frame: {0}")]
     RecordFrame(#[from] RecordingError),
 }

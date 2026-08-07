@@ -1,34 +1,32 @@
 //! MSFS-specific replay runtime used by the gauge entry point.
 
-use msfs::legacy::NamedVariable;
-
-use crate::error::{GaugeError, RecordingError};
+use crate::arm::ArmingMonitor;
+use crate::error::GaugeError;
 use crate::replayer::{InterpolationFrame, Replayer, ReplayerUpdate};
 use crate::simulator::{MsfsSimulator, SimulatorAdapter};
 
-const ARMED_VARIABLE: &str = "REPLAYER_ARMED";
+const ARMED_VARIABLE: &str = "L:REPLAYER_ARMED";
 
 /// Owns the MSFS variables and replay state used by the gauge event loop.
 pub struct GaugeRuntime {
-    /// Cached local variable used for scenario arming.
-    armed_variable: NamedVariable,
     /// Replay orchestrator.
     replayer: Replayer,
+    arming: ArmingMonitor,
     /// Adapter around msfs-rs legacy calculator code.
     simulator: MsfsSimulator,
 }
 
 impl GaugeRuntime {
     /// Creates an idle runtime and initializes the arming switch to `0.0`.
-    pub fn new() -> GaugeRuntime {
-        let armed_variable = NamedVariable::from(ARMED_VARIABLE);
-        armed_variable.set_value(0.0);
-
-        GaugeRuntime {
-            armed_variable,
+    pub fn new() -> Result<GaugeRuntime, GaugeError> {
+        let mut runtime = GaugeRuntime {
+            arming: ArmingMonitor::new(ARMED_VARIABLE),
             replayer: Replayer::new(),
             simulator: MsfsSimulator::new(),
-        }
+        };
+        runtime.arming.reset(&mut runtime.simulator)?;
+
+        Ok(runtime)
     }
 
     /// Handles one `MSFSEvent::PreUpdate` cycle.
@@ -41,9 +39,9 @@ impl GaugeRuntime {
     /// initialization logic can run exactly once per run.
     pub fn pre_update(&mut self) -> anyhow::Result<()> {
         let simulation_time = self.simulator.simulation_time()?;
-        let armed = self.armed_variable.get_value::<f64>();
+        let init_now = self.arming.ready_to_start(&mut self.simulator)?;
 
-        match self.replayer.pre_update(armed, simulation_time)? {
+        match self.replayer.pre_update(init_now, simulation_time)? {
             Some(ReplayerUpdate::Running { frame, started_now }) => {
                 Self::handle_running_frame(frame, started_now, &mut self.simulator)?;
             }
@@ -58,10 +56,11 @@ impl GaugeRuntime {
     ///
     /// This method is idempotent from the perspective of runtime state; if no
     /// scenario is active, it still resets arming state and returns `Ok(())`.
-    pub fn stop(&mut self) -> Result<(), RecordingError> {
-        let result = self.replayer.reset();
-        self.armed_variable.set_value(0.0);
-        result
+    pub fn stop(&mut self) -> Result<(), GaugeError> {
+        let recorder_result = self.replayer.reset().map_err(GaugeError::RecordFrame);
+        self.arming.reset(&mut self.simulator)?;
+
+        recorder_result
     }
 
     /// Processes one running frame from the replay engine.

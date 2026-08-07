@@ -3,8 +3,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
-use crate::arm::PositiveTrigger;
-use crate::config::{CONFIG_PATH, RecordingConfig, ReplayConfig};
+use crate::config::{RecordingConfig, ReplayConfig, CONFIG_PATH};
 use crate::cursor::{Frame, Scenario};
 use crate::error::{RecordingError, ReplayerError};
 use crate::recording::TelemetryRecorder;
@@ -112,8 +111,6 @@ impl RecordingSchedule {
 pub struct Replayer {
     /// Filesystem path from which replay configuration is loaded.
     config_path: PathBuf,
-    /// Tracks arming zero-to-one transitions.
-    arm_state: PositiveTrigger,
     /// Active replay state, if a scenario is currently loaded.
     active: Option<ActiveScenario>,
 }
@@ -127,7 +124,6 @@ impl Replayer {
     fn with_config_path(config_path: impl Into<PathBuf>) -> Replayer {
         Replayer {
             config_path: config_path.into(),
-            arm_state: PositiveTrigger::default(),
             active: None,
         }
     }
@@ -138,11 +134,10 @@ impl Replayer {
     /// Simulator time is used once a scenario is loaded.
     pub fn pre_update(
         &mut self,
-        armed_value: f64,
+        init: bool,
         simulation_time: Duration,
     ) -> anyhow::Result<Option<ReplayerUpdate<'_>>> {
-        let starting = self.arm_state.start(armed_value);
-        if starting {
+        if init {
             self.start_scenario(simulation_time)?;
         }
         if self.active.is_none() {
@@ -154,7 +149,7 @@ impl Replayer {
             ReplayerUpdate::Running {
                 frame,
                 started_now: false,
-            } if starting => ReplayerUpdate::Running {
+            } if init => ReplayerUpdate::Running {
                 frame,
                 started_now: true,
             },
@@ -167,7 +162,6 @@ impl Replayer {
     /// Calling this repeatedly is safe. Replay state is released even when the
     /// final telemetry flush fails.
     pub fn reset(&mut self) -> Result<(), RecordingError> {
-        self.arm_state = PositiveTrigger::default();
         let Some(mut active) = self.active.take() else {
             return Ok(());
         };
@@ -343,7 +337,7 @@ unit = "radians"
         let mut replayer = Replayer::with_config_path(fixture.config_path.clone());
 
         let update = replayer
-            .pre_update(0.0, time(42.0))
+            .pre_update(false, time(42.0))
             .unwrap_or_else(|error| panic!("idle update failed: {error:#}"));
 
         assert!(update.is_none());
@@ -639,7 +633,7 @@ max_sampling_rate = 1.0
         let mut replayer = Replayer::with_config_path(fixture.config_path.clone());
 
         assert!(matches!(
-            replayer.pre_update(1.0, time(99.0)).unwrap(),
+            replayer.pre_update(true, time(99.0)).unwrap(),
             Some(ReplayerUpdate::Running {
                 started_now: true,
                 ..
@@ -650,14 +644,14 @@ max_sampling_rate = 1.0
             Some(time(99.0))
         );
         assert!(matches!(
-            replayer.pre_update(1.0, time(99.05)).unwrap(),
+            replayer.pre_update(false, time(99.05)).unwrap(),
             Some(ReplayerUpdate::Running {
                 started_now: false,
                 ..
             })
         ));
         assert!(matches!(
-            replayer.pre_update(1.0, time(99.2)).unwrap(),
+            replayer.pre_update(false, time(99.2)).unwrap(),
             Some(ReplayerUpdate::Completed)
         ));
         assert!(replayer.active.is_some());
@@ -688,7 +682,7 @@ max_sampling_rate = 1.0
     fn reset_is_idempotent() {
         let fixture = Fixture::new();
         let mut replayer = Replayer::with_config_path(fixture.config_path.clone());
-        replayer.pre_update(1.0, Duration::ZERO).unwrap();
+        replayer.pre_update(true, Duration::ZERO).unwrap();
 
         replayer.reset().unwrap();
         replayer.reset().unwrap();

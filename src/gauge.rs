@@ -6,7 +6,7 @@ use crate::gauge_runtime::GaugeRuntime;
 
 #[msfs::gauge(name=testpilot)]
 async fn testpilot(mut gauge: msfs::Gauge) -> Result<(), Box<dyn Error>> {
-    let mut runtime = GaugeRuntime::new();
+    let mut runtime = GaugeRuntime::new()?;
 
     println!("TESTPILOT: waiting for L:REPLAYER_ARMED = 1");
     while let Some(event) = gauge.next_event().await {
