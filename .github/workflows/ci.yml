@@ -37,7 +37,7 @@ jobs:
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Check Rustdoc
         env:
-          RUSTDOCFLAGS: -D warnings
+            RUSTDOCFLAGS: -D warnings
         run: cargo doc --locked --no-deps --all-features
       - name: Run tests
         run: cargo test --locked
@@ -51,16 +51,18 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
-      - name: Cache Rust build data
-        uses: Swatinem/rust-cache@v2
+      - name: Cache Docker Rust build data
+        uses: actions/cache@v6
         with:
-            shared-key: "build-cache"
-            cache-all-crates: "true"
-            cache-directories: |
-                ~/.cargo/registry/index/
-                ~/.cargo/registry/cache/
-                ~/.cargo/git/db/
-                target/
+            path: |
+                target/cargo_home/registry/index/
+                target/cargo_home/registry/cache/
+                target/cargo_home/git/db/
+                target/release/
+                target/wasm32-wasip1/release/
+            key: msfs-wasm-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/dev-env/run.sh', 'scripts/build-wasm.sh') }}
+            restore-keys: |
+                msfs-wasm-${{ runner.os }}-
       # - name: Run WASM Clippy
       #   run: cargo clippy --locked --target wasm32-wasip1 --all-features -- -D warnings
       - name: Build packaged WASM module
@@ -68,6 +70,6 @@ jobs:
       - name: Upload WASM artifact
         uses: actions/upload-artifact@v7
         with:
-          name: testpilot-msfs-wasm
-          path: target/wasm32-wasip1/release/testpilot-msfs.wasm
-          if-no-files-found: error
+            name: testpilot-msfs-wasm
+            path: target/wasm32-wasip1/release/testpilot-msfs.wasm
+            if-no-files-found: error
