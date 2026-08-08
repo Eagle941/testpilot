@@ -235,14 +235,14 @@ generated from the host UTC date and time captured when the replay begins,
 using the Windows-safe form `telemetry_YYYYMMDDTHHMMSS.csv`. If that exact name
 already exists, the run fails rather than overwriting it.
 
-Each configured `record.N` signal contributes an adjacent
+Each configured `record.N` and `inject.N` signal contributes an adjacent
 `<signal>.time,<signal>.value` pair in numeric section order. This is the same
 rectangular paired-column shape used by scenario input, so a telemetry file can
 be selected directly as a later replay's input. With the complete MVP selection
 the header is:
 
 ```csv
-pitch.time,pitch.value,roll.time,roll.value,elevator_position.time,elevator_position.value,aileron_position.time,aileron_position.value
+pitch.time,pitch.value,roll.time,roll.value,elevator_position.time,elevator_position.value,aileron_position.time,aileron_position.value,sidestick_pitch_position.time,sidestick_pitch_position.value,sidestick_roll_position.time,sidestick_roll_position.value
 ```
 
 Each configured `record.N` signal can optionally set `max_sampling_rate`.
@@ -250,11 +250,15 @@ Without this field, a signal is sampled every MSFS frame after that frame's inpu
 injection. When set to `N` hertz, that signal is sampled no more often than
 once per `1 / N` scenario seconds.
 
-Rows are only emitted when at least one configured signal is due. For a given row,
-due signals include their shared elapsed timestamp in `.time` and their value in
-`.value`; non-due signals emit empty cells in both columns. `pitch` and `roll` are
-aggregate MSFS aircraft attitudes. `elevator_position` and `aileron_position` are
-aggregate MSFS control-surface positions, not individual A32NX surfaces.
+Rows are only emitted when at least one configured recording signal is due. For a
+given row, due signals include their shared elapsed timestamp in `.time` and their
+value in `.value`; non-due recording signals emit empty cells in both columns.
+Injection columns are always written on emitted rows using the injected simulator
+values for that frame (after interpolation and conversion).
+
+`pitch` and `roll` are aggregate MSFS aircraft attitudes. `elevator_position`
+and `aileron_position` are aggregate MSFS control-surface positions, not
+individual A32NX surfaces.
 
 Rows are written incrementally with deterministic numeric formatting and
 bounded buffering. Telemetry is flushed on completion and failure. Failures
@@ -332,7 +336,7 @@ configured controls follow the scenario. Each converted simulator value is
 written through legacy calculator code to its configured `K:` event or `L:`
 variable. Verify that a timestamped telemetry CSV is created in the
 package-specific `/work` mount and contains one paired time/value column set per
-configured recording.
+configured recording and one paired time/value column set per configured injection.
 
 ## MVP simulator mappings
 
@@ -343,8 +347,8 @@ aircraft versions.
 
 | Logical signal | Direction | Simulator interface | Native unit/conversion |
 | --- | --- | --- | --- |
-| `sidestick_pitch_position` | inject | `K:AXIS_ELEVATOR_SET`; readback `L:A32NX_SIDESTICK_POSITION_Y` | configured raw axis value in `[-16383, 16384]`, written directly to the event |
-| `sidestick_roll_position` | inject | `K:AXIS_AILERONS_SET`; readback `L:A32NX_SIDESTICK_POSITION_X` | configured raw axis value in `[-16383, 16384]`, written directly to the event |
+| `sidestick_pitch_position` | inject | `K:AXIS_ELEVATOR_SET` | configured raw axis value in `[-16383, 16384]`, written directly to the event |
+| `sidestick_roll_position` | inject | `K:AXIS_AILERONS_SET` | configured raw axis value in `[-16383, 16384]`, written directly to the event |
 | `pitch` | record | `A:PLANE PITCH DEGREES` | degrees |
 | `roll` | record | `A:PLANE BANK DEGREES` | degrees |
 | `elevator_position` | record | `A:ELEVATOR POSITION` | `Position 16k` |
