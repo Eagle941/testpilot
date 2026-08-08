@@ -1,6 +1,7 @@
 //! MSFS-specific replay runtime used by the gauge entry point.
 
 use crate::arm::ArmingMonitor;
+use crate::cursor::Frame;
 use crate::error::GaugeError;
 use crate::replayer::{InterpolationFrame, Replayer, ReplayerUpdate};
 use crate::simulator::{MsfsSimulator, SimulatorAdapter};
@@ -16,15 +17,26 @@ pub struct GaugeRuntime<S = MsfsSimulator> {
     arming: ArmingMonitor,
     /// Adapter around msfs-rs legacy calculator code.
     simulator: S,
+    /// Reusable converted injection values for the current frame.
+    injected_values: Vec<f64>,
+    /// Reusable sampled telemetry values for the current frame.
+    recorded_values: Vec<Option<f64>>,
 }
 
 impl<S: SimulatorAdapter> GaugeRuntime<S> {
     /// Creates a runtime from explicit replay and simulator components.
+    ///
+    /// # Arguments
+    ///
+    /// * `replayer` - Parsed replay state machine driving scenario playback.
+    /// * `simulator` - MSFS adapter used for all per-frame I/O.
     pub fn new(replayer: Replayer, simulator: S) -> Result<Self, GaugeError> {
         let mut runtime = Self {
             arming: ArmingMonitor::new(ARMED_VARIABLE),
             replayer,
             simulator,
+            injected_values: Vec::new(),
+            recorded_values: Vec::new(),
         };
         runtime.arming.reset(&mut runtime.simulator)?;
 
@@ -45,7 +57,16 @@ impl<S: SimulatorAdapter> GaugeRuntime<S> {
 
         match self.replayer.pre_update(init_now, simulation_time)? {
             Some(ReplayerUpdate::Running { frame, started_now }) => {
-                Self::handle_running_frame(frame, started_now, &mut self.simulator)?;
+                let simulator = &mut self.simulator;
+                let injected_values = &mut self.injected_values;
+                let recorded_values = &mut self.recorded_values;
+                Self::handle_running_frame(
+                    simulator,
+                    injected_values,
+                    recorded_values,
+                    frame,
+                    started_now,
+                )?;
             }
             Some(ReplayerUpdate::Completed) => self.stop()?,
             None => {}
@@ -75,17 +96,28 @@ impl<S: SimulatorAdapter> GaugeRuntime<S> {
     /// `Replayer::pre_update` returns an `InterpolationFrame` tied to mutable state
     /// inside `self.replayer`; passing the simulator explicitly avoids creating a
     /// second overlapping `&mut self` borrow in this hot path.
+    ///
+    /// # Arguments
+    ///
+    /// * `simulator` - Mutable simulator adapter used for this frame.
+    /// * `injected_values` - Reusable buffer where converted injection values for this
+    ///   frame are written.
+    /// * `recorded_values` - Reusable buffer of optional recorded values for this frame.
+    /// * `frame` - Active interpolation/sampling context.
+    /// * `started_now` - `true` only on the first frame of a newly started run.
     fn handle_running_frame(
+        simulator: &mut S,
+        injected_values: &mut Vec<f64>,
+        recorded_values: &mut Vec<Option<f64>>,
         mut frame: InterpolationFrame<'_>,
         started_now: bool,
-        simulator: &mut S,
     ) -> Result<(), GaugeError> {
         if started_now {
             Self::validate_recordings(simulator, &frame)?;
         }
 
-        let injected_values = Self::inject_inputs(simulator, &frame)?;
-        Self::record_outputs(simulator, &mut frame, &injected_values)?;
+        Self::inject_inputs(injected_values, simulator, &frame)?;
+        Self::record_outputs(recorded_values, simulator, injected_values, &mut frame)?;
 
         Ok(())
     }
@@ -99,6 +131,13 @@ impl<S: SimulatorAdapter> GaugeRuntime<S> {
     ///
     /// Validation runs only on the first running frame after a start transition so
     /// expensive per-run checks are separated from hot per-frame logic.
+    ///
+    /// # Arguments
+    ///
+    /// * `simulator` - Mutable simulator adapter used to validate each recording
+    ///   variable contract.
+    /// * `frame` - Frame context exposing configured recordings and telemetry signal
+    ///   metadata.
     fn validate_recordings(
         simulator: &mut S,
         frame: &InterpolationFrame<'_>,
@@ -118,58 +157,88 @@ impl<S: SimulatorAdapter> GaugeRuntime<S> {
     /// Interpolates and writes all configured input signals for this frame.
     ///
     /// Interpolation and conversion failures are surfaced as gauge-level errors.
+    ///
+    /// # Arguments
+    ///
+    /// * `injected_values` - Reusable mutable buffer filled with per-signal simulator
+    ///   values after interpolation and conversion.
+    /// * `simulator` - Mutable simulator adapter that receives each converted write.
+    /// * `frame` - Interpolation context providing elapsed time and input data.
     fn inject_inputs(
+        injected_values: &mut Vec<f64>,
         simulator: &mut S,
         frame: &InterpolationFrame<'_>,
-    ) -> Result<Vec<f64>, GaugeError> {
+    ) -> Result<(), GaugeError> {
         let elapsed = frame.elapsed();
-        let mut injected_values = Vec::with_capacity(frame.recordings().len());
-        for data_points in frame.data_points() {
-            let source_value =
-                data_points
-                    .value_at(elapsed)
-                    .map_err(|source| GaugeError::InterpolateSignal {
-                        signal: data_points.signal.to_owned(),
-                        source,
-                    })?;
-
-            let simulator_value =
-                data_points
-                    .conversion
-                    .convert(source_value)
-                    .map_err(|source| GaugeError::ConvertSignal {
-                        signal: data_points.signal.to_owned(),
-                        source,
-                    })?;
-
-            simulator
-                .write(data_points.variable, simulator_value)
-                .map_err(|source| GaugeError::InjectSignal {
-                    signal: data_points.signal.to_owned(),
-                    source,
-                })?;
-            injected_values.push(simulator_value);
+        let injection_count = frame.injection_count();
+        if injected_values.len() != injection_count {
+            injected_values.resize(injection_count, 0.0);
         }
+        injected_values
+            .iter_mut()
+            .zip(frame.data_points())
+            .try_for_each(|(slot, data_points): (&mut f64, Frame<'_>)| {
+                let source_value = data_points.value_at(elapsed).map_err(|source| {
+                    GaugeError::InterpolateSignal {
+                        signal: data_points.signal.to_owned(),
+                        source,
+                    }
+                })?;
 
-        Ok(injected_values)
+                let simulator_value =
+                    data_points
+                        .conversion
+                        .convert(source_value)
+                        .map_err(|source| GaugeError::ConvertSignal {
+                            signal: data_points.signal.to_owned(),
+                            source,
+                        })?;
+
+                simulator
+                    .write(data_points.variable, simulator_value)
+                    .map_err(|source| GaugeError::InjectSignal {
+                        signal: data_points.signal.to_owned(),
+                        source,
+                    })?;
+                *slot = simulator_value;
+                Ok::<(), GaugeError>(())
+            })?;
+
+        injected_values.truncate(injection_count);
+        Ok(())
     }
 
     /// Samples configured recordings when they are due and writes a telemetry row.
     ///
     /// Rows are written only when at least one recording is due on this frame.
+    ///
+    /// # Arguments
+    ///
+    /// * `recorded_values` - Reusable mutable buffer of sampled values for this frame.
+    /// * `simulator` - Mutable simulator adapter used for telemetry reads.
+    /// * `injected_values` - Per-frame converted input values serialized with the same
+    ///   telemetry row.
+    /// * `frame` - Mutable frame context containing recording schedules and recorder.
     fn record_outputs(
+        recorded_values: &mut Vec<Option<f64>>,
         simulator: &mut S,
-        frame: &mut InterpolationFrame<'_>,
         injected_values: &[f64],
+        frame: &mut InterpolationFrame<'_>,
     ) -> Result<(), GaugeError> {
         let elapsed = frame.elapsed();
-        let mut sampled_values = Vec::with_capacity(frame.recordings().len());
         let mut any_due = false;
         let (recordings, schedules) = frame.recordings_and_schedules();
+        let recording_count = recordings.len();
+        if recorded_values.len() != recording_count {
+            recorded_values.resize(recording_count, None);
+        } else {
+            recorded_values.fill(None);
+        }
 
-        for (recording, schedule) in recordings.iter().zip(schedules.iter_mut()) {
+        for (index, (recording, schedule)) in
+            recordings.iter().zip(schedules.iter_mut()).enumerate()
+        {
             if !schedule.should_sample(elapsed) {
-                sampled_values.push(None);
                 continue;
             }
 
@@ -180,11 +249,11 @@ impl<S: SimulatorAdapter> GaugeRuntime<S> {
                     signal: recording.name.clone(),
                     source,
                 })?;
-            sampled_values.push(Some(value));
+            recorded_values[index] = Some(value);
         }
 
         if any_due {
-            frame.record(&sampled_values, injected_values)?;
+            frame.record(recorded_values, injected_values)?;
         }
 
         Ok(())

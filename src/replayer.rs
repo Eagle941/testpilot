@@ -33,6 +33,11 @@ impl InterpolationFrame<'_> {
         self.playback.interpolation_rows()
     }
 
+    /// Returns the number of configured injection signals.
+    pub fn injection_count(&self) -> usize {
+        self.playback.signal_count()
+    }
+
     /// Returns configured telemetry signals in deterministic numeric order.
     pub const fn recordings(&self) -> &[RecordingConfig] {
         self.recordings
