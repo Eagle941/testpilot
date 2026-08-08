@@ -73,3 +73,34 @@ jobs:
             name: testpilot-msfs-wasm
             path: target/wasm32-wasip1/release/testpilot-msfs.wasm
             if-no-files-found: error
+
+  hot_path_benchmark:
+    name: Criterion Benchmarks
+    runs-on: ubuntu-latest
+    permissions:
+        contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Cache Rust build data
+        uses: Swatinem/rust-cache@v2
+        with:
+            shared-key: "criterion-cache"
+            cache-all-crates: "true"
+            cache-directories: |
+                ~/.cargo/registry/index/
+                ~/.cargo/registry/cache/
+                ~/.cargo/git/db/
+                target/
+      - name: Install Rust
+        run: |
+            curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain 1.93.0 --no-update-default-toolchain
+            . "$HOME/.cargo/env"
+      - name: Run benchmarks
+        run: cargo bench --locked --bench hot_path
+      - name: Upload benchmark outputs
+        uses: actions/upload-artifact@v7
+        with:
+            name: hot-path-benchmark-${{ github.sha }}
+            path: target/criterion
+            if-no-files-found: error

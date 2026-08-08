@@ -146,6 +146,8 @@ pub struct Cursor {
     next: Option<Sample>,
     /// Per-signal affine conversion from source to simulator units.
     conversion: AffineRange,
+    /// Reusable CSV record buffer for the currently consumed row.
+    row: StringRecord,
 }
 
 impl Cursor {
@@ -167,6 +169,7 @@ impl Cursor {
             previous: Sample::new(Duration::ZERO, 0.0)?,
             next: None,
             conversion,
+            row: StringRecord::new(),
         };
         cursor.previous = cursor.required_sample()?;
         cursor.next = Some(cursor.required_sample()?);
@@ -272,15 +275,15 @@ impl Cursor {
     /// If only one side of the pair is populated, parsing fails with
     /// [`ScenarioError::HalfPopulatedPair`].
     fn read_sample(&mut self) -> Result<Option<Sample>, ScenarioError> {
-        let mut record = StringRecord::new();
-        let has_record = self.reader.read_record(&mut record)?;
+        self.row.clear();
+        let has_record = self.reader.read_record(&mut self.row)?;
         if !has_record {
             return Ok(None);
         }
 
-        let line = record.position().map(Position::line);
-        let time_text = record.get(self.columns.time_idx).unwrap_or_default();
-        let value_text = record.get(self.columns.value_idx).unwrap_or_default();
+        let line = self.row.position().map(Position::line);
+        let time_text = self.row.get(self.columns.time_idx).unwrap_or_default();
+        let value_text = self.row.get(self.columns.value_idx).unwrap_or_default();
         if time_text.is_empty() != value_text.is_empty() {
             return Err(ScenarioError::HalfPopulatedPair {
                 signal: self.signal.clone(),
