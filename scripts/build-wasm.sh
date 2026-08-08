@@ -9,7 +9,8 @@ if ! command -v wasm-opt >/dev/null 2>&1; then
     exit 1
 fi
 
-cargo build --locked --release --target wasm32-wasip1
+# Calling rustc instead of `cargo build` to force `cdylib`
+cargo rustc --locked --release --target wasm32-wasip1 --lib --crate-type cdylib
 
 wasm-opt \
     -O1 \
