@@ -21,8 +21,11 @@ pub const FORMAT_VERSION: u32 = 1;
 /// Configuration path in the package-specific writable MSFS work mount.
 pub const CONFIG_PATH: &str = "/work/replayer_config.toml";
 
+/// Allowed top-level TOML fields in replay configuration.
 const ROOT_FIELDS: [&str; 4] = ["format_version", "input_file", "inject", "record"];
+/// Allowed fields for each `[inject.N]` section.
 const INJECT_SECTION_FIELDS: [&str; 4] = ["name", "variable", "source_range", "simulator_range"];
+/// Allowed fields for each `[record.N]` section.
 const RECORD_SECTION_FIELDS: [&str; 4] = ["name", "variable", "unit", "max_sampling_rate"];
 
 /// Validated replay configuration in deterministic processing order.
@@ -207,6 +210,7 @@ impl ReplayConfig {
         table.try_into().map_err(ConfigError::Toml)
     }
 
+    /// Converts a TOML value into a table used by section parsing.
     fn as_table(section: &str, value: Value) -> Result<Table, ConfigError> {
         match value {
             Value::Table(table) => Ok(table),
