@@ -21,6 +21,10 @@ pub const FORMAT_VERSION: u32 = 1;
 /// Configuration path in the package-specific writable MSFS work mount.
 pub const CONFIG_PATH: &str = "/work/replayer_config.toml";
 
+const ROOT_FIELDS: [&str; 4] = ["format_version", "input_file", "inject", "record"];
+const INJECT_SECTION_FIELDS: [&str; 4] = ["name", "variable", "source_range", "simulator_range"];
+const RECORD_SECTION_FIELDS: [&str; 4] = ["name", "variable", "unit", "max_sampling_rate"];
+
 /// Validated replay configuration in deterministic processing order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReplayConfig {
@@ -41,11 +45,7 @@ impl ReplayConfig {
                 "configuration root must be a table",
             ))
         })?;
-        Self::reject_unexpected_fields(
-            "root",
-            root,
-            &["format_version", "input_file", "inject", "record"],
-        )?;
+        Self::reject_unknown_fields("root", root, &ROOT_FIELDS)?;
 
         let raw: RawReplayConfig = value.try_into().map_err(ConfigError::Toml)?;
         Self::parse_raw(raw)
@@ -86,12 +86,9 @@ impl ReplayConfig {
         let mut result = Vec::with_capacity(entries.len());
 
         for (index, raw) in entries {
-            let section = format!("inject.{index}");
-            let injection: RawInjectionConfig = Self::parse_section_entry(
-                &section,
-                raw,
-                &["name", "variable", "source_range", "simulator_range"],
-            )?;
+            let section_name = format!("inject.{index}");
+            let injection: RawInjectionConfig =
+                Self::parse_indexed_section_entry(&section_name, raw, &INJECT_SECTION_FIELDS)?;
             result.push(InjectionConfig::new(index, injection, &mut signals)?);
         }
 
@@ -107,12 +104,9 @@ impl ReplayConfig {
         let mut result = Vec::with_capacity(entries.len());
 
         for (index, raw) in entries {
-            let section = format!("record.{index}");
-            let recording: RawRecordingConfig = Self::parse_section_entry(
-                &section,
-                raw,
-                &["name", "variable", "unit", "max_sampling_rate"],
-            )?;
+            let section_name = format!("record.{index}");
+            let recording: RawRecordingConfig =
+                Self::parse_indexed_section_entry(&section_name, raw, &RECORD_SECTION_FIELDS)?;
             result.push(RecordingConfig::new(index, recording, &mut signals)?);
         }
 
@@ -183,7 +177,7 @@ impl ReplayConfig {
     }
 
     /// Rejects fields not listed in the expected field set for a configuration section.
-    fn reject_unexpected_fields(
+    fn reject_unknown_fields(
         section: &str,
         fields: &Table,
         expected: &[&str],
@@ -199,25 +193,27 @@ impl ReplayConfig {
         Ok(())
     }
 
-    /// Parses and validates one table-based section entry.
-    fn parse_section_entry<T>(
-        section: &str,
+    /// Parses and validates one index-based configuration entry table.
+    fn parse_indexed_section_entry<T>(
+        section_name: &str,
         raw: Value,
         expected: &[&str],
     ) -> Result<T, ConfigError>
     where
         T: for<'de> serde::Deserialize<'de>,
     {
-        let table = match raw {
-            Value::Table(table) => table,
-            _ => {
-                return Err(ConfigError::Toml(toml::de::Error::custom(format!(
-                    "`{section}` must be a TOML table"
-                ))));
-            }
-        };
-        Self::reject_unexpected_fields(section, &table, expected)?;
+        let table = Self::as_table(section_name, raw)?;
+        Self::reject_unknown_fields(section_name, &table, expected)?;
         table.try_into().map_err(ConfigError::Toml)
+    }
+
+    fn as_table(section: &str, value: Value) -> Result<Table, ConfigError> {
+        match value {
+            Value::Table(table) => Ok(table),
+            _ => Err(ConfigError::Toml(toml::de::Error::custom(format!(
+                "`{section}` must be a TOML table"
+            )))),
+        }
     }
 }
 
