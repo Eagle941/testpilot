@@ -14,10 +14,13 @@ async fn testpilot(mut gauge: msfs::Gauge) -> Result<(), Box<dyn Error>> {
         match event {
             MSFSEvent::PreUpdate => {
                 if let Err(error) = runtime.pre_update() {
-                    // Pre-update failures are handled here and cleanup is deferred to a single
-                    // best-effort stop path below.
+                    // Pre-update failures are treated as recoverable runtime errors:
+                    // reset simulator state back to idle and continue waiting for the next
+                    // arming edge.
                     println!("TESTPILOT ERROR: {error:#}");
-                    break;
+                    if let Err(stop_error) = runtime.stop() {
+                        println!("TESTPILOT ERROR: recovery failed: {stop_error:#}");
+                    }
                 }
             }
             MSFSEvent::PreKill => break,

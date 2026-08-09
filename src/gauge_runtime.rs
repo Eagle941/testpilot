@@ -80,8 +80,9 @@ impl<S: SimulatorAdapter> GaugeRuntime<S> {
     /// This method is idempotent from the perspective of runtime state; if no
     /// scenario is active, it still resets arming state and returns `Ok(())`.
     pub fn stop(&mut self) -> Result<(), GaugeError> {
+        self.replayer.reset()?;
         self.arming.reset(&mut self.simulator)?;
-        Ok(self.replayer.reset()?)
+        Ok(())
     }
 
     /// Processes one running frame from the replay engine.
@@ -479,6 +480,24 @@ unit = "radians"
             }
         }
 
+        fn clear_telemetry_files(&self) {
+            for entry in fs::read_dir(&self.directory)
+                .unwrap_or_else(|error| panic!("failed to list fixture directory: {error}"))
+                .filter_map(Result::ok)
+            {
+                let path = entry.path();
+                if path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("telemetry_") && name.ends_with(".csv"))
+                {
+                    fs::remove_file(&path).unwrap_or_else(|error| {
+                        panic!("failed to remove old telemetry file {:?}: {error}", path)
+                    });
+                }
+            }
+        }
+
         fn telemetry_contents(&self) -> String {
             let path = telemetry_path(&self.directory);
             fs::read_to_string(path)
@@ -799,6 +818,104 @@ unit = "radians"
     }
 
     #[test]
+    fn scenario_restart_reloads_the_updated_config() {
+        let fixture = Fixture::new(CONFIG);
+        let mut simulator = FakeSimulator::new(duration(10.0));
+        simulator.queue_reads(
+            ARMED_VARIABLE,
+            [
+                1.0, // first start
+                0.0, // clear previous edge
+                1.0, // second start after stop
+            ],
+        );
+        simulator.queue_reads("A:PLANE PITCH DEGREES", [0.25, 0.35, 0.45, 0.55]);
+        simulator.queue_reads("L:ELEVATOR_POSITION", [0.5, 0.6, 0.7, 0.8]);
+        let mut runtime = runtime(&fixture, simulator);
+
+        runtime
+            .pre_update()
+            .unwrap_or_else(|error| panic!("first start failed: {error:#}"));
+        assert_eq!(
+            runtime
+                .simulator
+                .operations
+                .iter()
+                .filter(|operation| matches!(operation, Operation::Write { variable, .. } if variable == "K:AXIS_ELEVATOR_SET"))
+                .count(),
+            1
+        );
+
+        runtime.stop().unwrap();
+        runtime.simulator.clear_operations();
+        fixture.clear_telemetry_files();
+
+        fs::write(
+            &fixture.config_path,
+            r#"format_version = 1
+input_file = "scenario.csv"
+
+[inject.0]
+name = "sidestick_pitch_position"
+variable = "K:AXIS_ELEVATOR_SET"
+source_range = [-100.0, 100.0]
+simulator_range = [-1.0, 1.0]
+
+[inject.1]
+name = "sidestick_roll_position"
+variable = "K:AXIS_AILERONS_SET"
+source_range = [-100.0, 100.0]
+simulator_range = [-1.0, 1.0]
+
+[record.0]
+name = "pitch"
+variable = "A:PLANE PITCH DEGREES"
+unit = "radians"
+
+[record.1]
+name = "elevator_position"
+variable = "L:ELEVATOR_POSITION"
+"#,
+        )
+        .unwrap_or_else(|error| panic!("failed to rewrite fixture config: {error}"));
+        fs::write(
+            fixture.directory.join("scenario.csv"),
+            "sidestick_pitch_position.time,sidestick_pitch_position.value,sidestick_roll_position.time,sidestick_roll_position.value\n0,0,0,0\n1,10,0.2,20\n",
+        )
+        .unwrap_or_else(|error| panic!("failed to rewrite fixture scenario: {error}"));
+
+        runtime
+            .pre_update()
+            .unwrap_or_else(|error| panic!("first disarmed transition failed: {error:#}"));
+        assert!(
+            runtime
+                .simulator
+                .operations
+                .iter()
+                .all(|operation| !matches!(operation, Operation::Write { .. }))
+        );
+
+        runtime
+            .pre_update()
+            .unwrap_or_else(|error| panic!("second start failed: {error:#}"));
+        assert!(
+            runtime
+                .simulator
+                .operations
+                .iter()
+                .any(|operation| matches!(operation, Operation::Write { variable, .. } if variable == "K:AXIS_ELEVATOR_SET"))
+        );
+        assert!(
+            runtime
+                .simulator
+                .operations
+                .iter()
+                .any(|operation| matches!(operation, Operation::Write { variable, .. } if variable == "K:AXIS_AILERONS_SET"))
+        );
+        runtime.stop().unwrap();
+    }
+
+    #[test]
     fn recording_validation_failures_include_the_signal_and_prevent_injection() {
         let fixture = Fixture::new(CONFIG);
         let mut simulator = FakeSimulator::new(duration(40.0));
@@ -912,6 +1029,40 @@ unit = "radians"
             .expect("recording was not sampled");
         assert!(injection_index < sampling_index);
         runtime.simulator.failure = None;
+        runtime.stop().unwrap();
+    }
+
+    #[test]
+    fn clips_out_of_range_inputs_before_injection() {
+        let fixture = Fixture::new(INJECTED_VALUES_ONLY_CONFIG);
+        let mut simulator = FakeSimulator::new(duration(10.0));
+        simulator.queue_reads(ARMED_VARIABLE, [1.0]);
+        simulator.queue_reads("A:PLANE PITCH DEGREES", [0.0]);
+        fs::write(
+            fixture.directory.join("scenario.csv"),
+            "sidestick_pitch_position.time,sidestick_pitch_position.value\n0,250\n1,-250\n2,0\n",
+        )
+        .unwrap_or_else(|error| panic!("failed to rewrite fixture scenario: {error}"));
+        let mut runtime = runtime(&fixture, simulator);
+        runtime.simulator.clear_operations();
+
+        runtime
+            .pre_update()
+            .unwrap_or_else(|error| panic!("runtime should clamp out-of-range input: {error:#}"));
+
+        let write_value = runtime
+            .simulator
+            .operations
+            .iter()
+            .find_map(|operation| match operation {
+                Operation::Write {
+                    variable, value, ..
+                } if variable == "K:AXIS_ELEVATOR_SET" => Some(*value),
+                _ => None,
+            })
+            .expect("sidestick injection was not written");
+
+        assert_eq!(write_value, 1.0);
         runtime.stop().unwrap();
     }
 }

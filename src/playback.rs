@@ -108,9 +108,9 @@ impl LinearSegment {
 ///
 /// For example, a source range of `[-25.0, 25.0]` can be mapped to the
 /// simulator range `[-16383.0, 16384.0]`. Values outside the source range are
-/// rejected rather than clamped. This type converts value scales; it does not
-/// interpolate between time-series samples. In the playback pipeline,
-/// [`LinearSegment`] runs first and [`AffineRange`] runs second.
+/// clamped. This type converts value scales; it does not interpolate between
+/// time-series samples. In the playback pipeline, [`LinearSegment`] runs first
+/// and [`AffineRange`] runs second.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AffineRange {
     /// Inclusive source range, [minimum, maximum].
@@ -137,23 +137,17 @@ impl AffineRange {
         self.target
     }
 
-    /// Converts a finite source value without clamping it.
+    /// Converts a finite source value with clamping to the configured source range.
     ///
-    /// Values outside [`AffineRange::source`] are rejected.
+    /// Values outside [`AffineRange::source`] are clamped.
     pub fn convert(self, value: f64) -> Result<f64, PlaybackError> {
         if !value.is_finite() {
             return Err(PlaybackError::NonFiniteValue { value });
         }
-        if value < self.source[0] || value > self.source[1] {
-            return Err(PlaybackError::ValueOutsideSourceRange {
-                value,
-                minimum: self.source[0],
-                maximum: self.source[1],
-            });
-        }
+        let clamped = value.clamp(self.source[0], self.source[1]);
 
         let converted = self.target[0]
-            + (value - self.source[0]) * (self.target[1] - self.target[0])
+            + (clamped - self.source[0]) * (self.target[1] - self.target[0])
                 / (self.source[1] - self.source[0]);
         if !converted.is_finite() {
             return Err(PlaybackError::ArithmeticOverflow);
@@ -276,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn converts_affine_ranges_without_clamping() {
+    fn converts_affine_ranges_with_clamping() {
         let conversion = AffineRange::new([-100.0, 100.0], [-1.0, 1.0])
             .unwrap_or_else(|error| panic!("valid conversion rejected: {error}"));
 
@@ -289,14 +283,8 @@ mod tests {
             Err(PlaybackError::NonFiniteValue { value }) if value.is_nan() => {}
             unexpected => panic!("expected non-finite conversion error, got: {unexpected:?}"),
         }
-        assert_eq!(
-            conversion.convert(100.1),
-            Err(PlaybackError::ValueOutsideSourceRange {
-                value: 100.1,
-                minimum: -100.0,
-                maximum: 100.0
-            })
-        );
+        assert_eq!(conversion.convert(100.1), Ok(1.0));
+        assert_eq!(conversion.convert(-100.1), Ok(-1.0));
     }
 
     #[test]
