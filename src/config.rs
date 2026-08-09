@@ -9,6 +9,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use serde::de::Error as SerdeError;
+use toml::Value;
+use toml::value::Table;
 
 pub use crate::error::ConfigError;
 
@@ -32,7 +35,19 @@ pub struct ReplayConfig {
 impl ReplayConfig {
     /// Creates a replay configuration from TOML text.
     pub fn new(contents: &str) -> Result<ReplayConfig, ConfigError> {
-        let raw = toml::from_str(contents)?;
+        let value: Value = toml::from_str(contents)?;
+        let root = value.as_table().ok_or_else(|| {
+            ConfigError::Toml(toml::de::Error::custom(
+                "configuration root must be a table",
+            ))
+        })?;
+        Self::reject_unexpected_fields(
+            "root",
+            root,
+            &["format_version", "input_file", "inject", "record"],
+        )?;
+
+        let raw: RawReplayConfig = value.try_into().map_err(ConfigError::Toml)?;
         Self::parse_raw(raw)
     }
 
@@ -64,14 +79,20 @@ impl ReplayConfig {
 
     /// Parses and validates all injection entries.
     fn parse_injections(
-        entries: BTreeMap<String, RawInjectionConfig>,
+        entries: BTreeMap<String, Value>,
     ) -> Result<Vec<InjectionConfig>, ConfigError> {
         let entries = Self::ordered_entries("inject", entries)?;
         let mut signals = HashSet::with_capacity(entries.len());
         let mut result = Vec::with_capacity(entries.len());
 
         for (index, raw) in entries {
-            result.push(InjectionConfig::new(index, raw, &mut signals)?);
+            let section = format!("inject.{index}");
+            let injection: RawInjectionConfig = Self::parse_section_entry(
+                &section,
+                raw,
+                &["name", "variable", "source_range", "simulator_range"],
+            )?;
+            result.push(InjectionConfig::new(index, injection, &mut signals)?);
         }
 
         Ok(result)
@@ -79,14 +100,20 @@ impl ReplayConfig {
 
     /// Parses and validates all recording entries.
     fn parse_recordings(
-        entries: BTreeMap<String, RawRecordingConfig>,
+        entries: BTreeMap<String, Value>,
     ) -> Result<Vec<RecordingConfig>, ConfigError> {
         let entries = Self::ordered_entries("record", entries)?;
         let mut signals = HashSet::with_capacity(entries.len());
         let mut result = Vec::with_capacity(entries.len());
 
         for (index, raw) in entries {
-            result.push(RecordingConfig::new(index, raw, &mut signals)?);
+            let section = format!("record.{index}");
+            let recording: RawRecordingConfig = Self::parse_section_entry(
+                &section,
+                raw,
+                &["name", "variable", "unit", "max_sampling_rate"],
+            )?;
+            result.push(RecordingConfig::new(index, recording, &mut signals)?);
         }
 
         Ok(result)
@@ -153,6 +180,44 @@ impl ReplayConfig {
         }
 
         Ok(indexed)
+    }
+
+    /// Rejects fields not listed in the expected field set for a configuration section.
+    fn reject_unexpected_fields(
+        section: &str,
+        fields: &Table,
+        expected: &[&str],
+    ) -> Result<(), ConfigError> {
+        for field in fields.keys() {
+            if !expected.contains(&field.as_str()) {
+                return Err(ConfigError::UnexpectedField {
+                    section: section.to_owned(),
+                    field: field.to_owned(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Parses and validates one table-based section entry.
+    fn parse_section_entry<T>(
+        section: &str,
+        raw: Value,
+        expected: &[&str],
+    ) -> Result<T, ConfigError>
+    where
+        T: for<'de> serde::Deserialize<'de>,
+    {
+        let table = match raw {
+            Value::Table(table) => table,
+            _ => {
+                return Err(ConfigError::Toml(toml::de::Error::custom(format!(
+                    "`{section}` must be a TOML table"
+                ))));
+            }
+        };
+        Self::reject_unexpected_fields(section, &table, expected)?;
+        table.try_into().map_err(ConfigError::Toml)
     }
 }
 
@@ -303,7 +368,6 @@ impl RecordingConfig {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 /// Internal raw configuration as deserialized from TOML.
 struct RawReplayConfig {
     /// Declared format version.
@@ -312,14 +376,13 @@ struct RawReplayConfig {
     input_file: String,
     #[serde(default)]
     /// Raw injection map section.
-    inject: BTreeMap<String, RawInjectionConfig>,
+    inject: BTreeMap<String, Value>,
     #[serde(default)]
     /// Raw recording map section.
-    record: BTreeMap<String, RawRecordingConfig>,
+    record: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 /// Internal raw input signal configuration.
 struct RawInjectionConfig {
     /// Raw signal name.
@@ -333,7 +396,6 @@ struct RawInjectionConfig {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 /// Internal raw recording signal configuration.
 struct RawRecordingConfig {
     /// Raw signal name.
@@ -694,40 +756,41 @@ unit = "position"
                 1,
             ),
             |error| match error {
-                ConfigError::Toml(_) => {}
+                ConfigError::UnexpectedField { section, field }
+                    if section == "root" && field == "unexpected" => {}
                 _ => panic!("unexpected error: {error:?}"),
             },
         );
-        for unknown_field in [
-            "time_column = \"custom.time\"",
-            "value_column = \"custom.value\"",
-            "interpolation = \"linear\"",
+        for (unknown_field, source_text) in [
+            ("time_column", "time_column = \"custom.time\""),
+            ("value_column", "value_column = \"custom.value\""),
+            ("interpolation", "interpolation = \"linear\""),
         ] {
             assert_error(
                 &VALID_CONFIG.replacen(
                     "source_range = [-100.0, 100.0]",
-                    &format!("source_range = [-100.0, 100.0]\n{unknown_field}"),
+                    &format!("source_range = [-100.0, 100.0]\n{source_text}"),
                     1,
                 ),
                 |error| match error {
-                    ConfigError::Toml(_) => {}
+                    ConfigError::UnexpectedField { section, field }
+                        if section == "inject.0" && field == unknown_field => {}
                     _ => panic!("unexpected error: {error:?}"),
                 },
             );
         }
-        for removed_field in ["unit = \"degrees\"", "range = [-180.0, 180.0]"] {
-            assert_error(
-                &VALID_CONFIG.replacen(
-                    "variable = \"A:PLANE PITCH DEGREES\"",
-                    &format!("variable = \"A:PLANE PITCH DEGREES\"\n{removed_field}"),
-                    1,
-                ),
-                |error| match error {
-                    ConfigError::Toml(_) => {}
-                    _ => panic!("unexpected error: {error:?}"),
-                },
-            );
-        }
+        let removed_field = "range = [-180.0, 180.0]";
+        assert_error(
+            &VALID_CONFIG.replacen(
+                "variable = \"A:PLANE PITCH DEGREES\"",
+                &format!("variable = \"A:PLANE PITCH DEGREES\"\n{removed_field}"),
+                1,
+            ),
+            |error| match error {
+                ConfigError::UnexpectedField { section, .. } if section == "record.0" => {}
+                _ => panic!("unexpected error: {error:?}"),
+            },
+        );
     }
 
     #[test]

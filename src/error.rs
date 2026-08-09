@@ -20,6 +20,9 @@ pub enum ConfigError {
     #[error("invalid TOML configuration: {0}")]
     Toml(#[from] toml::de::Error),
 
+    #[error("unexpected field `{field}` in section `{section}`")]
+    UnexpectedField { section: String, field: String },
+
     #[error("unsupported format_version {found}; expected {expected}")]
     UnsupportedFormatVersion { found: u32, expected: u32 },
 

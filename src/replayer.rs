@@ -408,6 +408,98 @@ unit = "radians"
     }
 
     #[test]
+    fn scenario_restart_reloads_the_updated_config() {
+        let fixture = Fixture::new();
+        let mut replayer = Replayer::with_config_path(fixture.config_path.clone());
+
+        let update = replayer
+            .pre_update(true, time(10.0))
+            .unwrap_or_else(|error| panic!("first start failed: {error:#}"));
+        assert!(matches!(
+            update,
+            Some(ReplayerUpdate::Running {
+                started_now: true,
+                ..
+            })
+        ));
+        assert_eq!(
+            replayer
+                .active
+                .as_ref()
+                .expect("scenario was not started")
+                .playback
+                .signal_count(),
+            1
+        );
+
+        replayer.reset().unwrap();
+        for entry in fs::read_dir(&fixture.directory)
+            .expect("failed to read fixture directory")
+            .filter_map(Result::ok)
+        {
+            let path = entry.path();
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("telemetry_") && name.ends_with(".csv"))
+            {
+                fs::remove_file(&path)
+                    .unwrap_or_else(|error| panic!("failed to remove old telemetry: {error}"));
+            }
+        }
+
+        fs::write(
+            &fixture.config_path,
+            r#"format_version = 1
+input_file = "scenario.csv"
+
+[inject.0]
+name = "sidestick_pitch_position"
+variable = "K:AXIS_ELEVATOR_SET"
+source_range = [-100.0, 100.0]
+simulator_range = [-1.0, 1.0]
+
+[inject.1]
+name = "sidestick_roll_position"
+variable = "K:AXIS_AILERONS_SET"
+source_range = [-100.0, 100.0]
+simulator_range = [-1.0, 1.0]
+
+[record.0]
+name = "pitch"
+variable = "A:PLANE PITCH DEGREES"
+unit = "radians"
+"#,
+        )
+        .unwrap_or_else(|error| panic!("failed to rewrite fixture config: {error}"));
+        fs::write(
+            fixture.directory.join("scenario.csv"),
+            "sidestick_pitch_position.time,sidestick_pitch_position.value,sidestick_roll_position.time,sidestick_roll_position.value\n0,0,0,0\n0.1,10,0.2,20\n",
+        )
+        .unwrap_or_else(|error| panic!("failed to rewrite fixture scenario: {error}"));
+
+        let update = replayer
+            .pre_update(true, time(20.0))
+            .unwrap_or_else(|error| panic!("second start failed: {error:#}"));
+        assert!(matches!(
+            update,
+            Some(ReplayerUpdate::Running {
+                started_now: true,
+                ..
+            })
+        ));
+        assert_eq!(
+            replayer
+                .active
+                .as_ref()
+                .expect("scenario was not restarted")
+                .playback
+                .signal_count(),
+            2
+        );
+    }
+
+    #[test]
     fn start_scenario_rejects_an_overlapping_replay() {
         let fixture = Fixture::new();
         let mut replayer = Replayer::with_config_path(fixture.config_path.clone());
