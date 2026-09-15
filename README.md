@@ -345,6 +345,28 @@ variable. Verify that a timestamped telemetry CSV is created in the
 package-specific `/work` mount and contains one paired time/value column set per
 configured recording and one paired time/value column set per configured injection.
 
+### Gauge reload validation
+
+On `PreKill`, the gauge stops replay and performs best-effort telemetry flushing
+and arming reset. It ignores further playback updates while awaiting event-stream
+closure on `PostKill`, then performs final best-effort cleanup and returns. This
+keeps `msfs-rs` from polling an already completed async gauge during reload.
+
+Manual validation (requires MSFS; not established by host tests):
+
+- Record the MSFS 2020 build and A32NX channel/version or commit used, together
+  with the locked `msfs-rs` revision
+  `2f697b9aac9fa3c00474f901a7f7ee4218cf534b`.
+- Install the packaged WASM and use `example/replayer_config.toml` with
+  `example/scenario.csv`. Check the initial flight load and several aircraft
+  reloads: each should reach the arming wait message without a WASM exception.
+- Arm a replay and reload before it finishes. Verify injection stops,
+  `L:REPLAYER_ARMED` resets to `0`, and the partial telemetry CSV remains readable
+  with its buffered rows flushed. The new instance must wait for a fresh arm.
+- Inspect `telemetry_YYYYMMDDTHHMMSS.csv` in the package-specific `/work` mount.
+  On Microsoft Store installations this is
+  `%LOCALAPPDATA%\Packages\Microsoft.FlightSimulator_8wekyb3d8bbwe\LocalState\packages\flybywire-aircraft-a320-neo\work`.
+
 ## MVP simulator mappings
 
 The default configuration stores the following low-level simulator identifiers
