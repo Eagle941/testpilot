@@ -211,7 +211,8 @@ impl<S: SimulatorAdapter> GaugeRuntime<S> {
 
     /// Samples configured recordings when they are due and writes a telemetry row.
     ///
-    /// Rows are written only when at least one recording is due on this frame.
+    /// Rows are written when at least one recording is due on this frame, or every
+    /// frame when no recordings are configured, to retain the injected values.
     ///
     /// # Arguments
     ///
@@ -253,7 +254,7 @@ impl<S: SimulatorAdapter> GaugeRuntime<S> {
             recorded_values[index] = Some(value);
         }
 
-        if any_due {
+        if any_due || recording_count == 0 {
             frame.record(recorded_values, injected_values)?;
         }
 
@@ -660,6 +661,72 @@ unit = "radians"
              0,0.25,0,0.75,0,0\n\
              0.5,0.5,0.5,1,0.5,0.5\n"
         );
+    }
+
+    #[test]
+    fn replays_without_recordings_and_logs_injected_values() {
+        let (injections_only, _) = CONFIG.split_once("[record.0]").unwrap();
+        for suffix in ["", "[record]\n"] {
+            let fixture = Fixture::new(&format!("{injections_only}{suffix}"));
+            let mut simulator = FakeSimulator::new(duration(100.0));
+            simulator.queue_reads(ARMED_VARIABLE, [1.0, 1.0, 1.0, 1.0, 1.0, 0.0]);
+            let mut runtime = runtime(&fixture, simulator);
+
+            for (elapsed, value) in [(0.0, 0.0), (0.5, 0.5), (1.0, 1.0), (1.5, 0.5)] {
+                runtime.simulator.clear_operations();
+                runtime.simulator.time = duration(100.0 + elapsed);
+                runtime.pre_update().unwrap();
+                // Exact operations also exclude recording validation and sampling.
+                assert_eq!(
+                    runtime.simulator.operations,
+                    vec![
+                        Operation::Read {
+                            variable: ARMED_VARIABLE.to_owned(),
+                            unit: None,
+                        },
+                        Operation::Write {
+                            variable: "K:AXIS_ELEVATOR_SET".to_owned(),
+                            value,
+                        },
+                    ]
+                );
+            }
+
+            runtime.simulator.clear_operations();
+            runtime.simulator.time = duration(102.1);
+            runtime.pre_update().unwrap();
+            assert_eq!(
+                runtime.simulator.operations,
+                vec![
+                    Operation::Read {
+                        variable: ARMED_VARIABLE.to_owned(),
+                        unit: None,
+                    },
+                    Operation::Write {
+                        variable: ARMED_VARIABLE.to_owned(),
+                        value: 0.0,
+                    },
+                ]
+            );
+            let contents = fixture.telemetry_contents();
+            assert_eq!(
+                contents,
+                "sidestick_pitch_position.time,sidestick_pitch_position.value\n\
+                 0,0\n0.5,0.5\n1,1\n1.5,0.5\n"
+            );
+
+            runtime.simulator.clear_operations();
+            runtime.simulator.time = duration(103.0);
+            runtime.pre_update().unwrap();
+            assert_eq!(
+                runtime.simulator.operations,
+                vec![Operation::Read {
+                    variable: ARMED_VARIABLE.to_owned(),
+                    unit: None,
+                }]
+            );
+            assert_eq!(fixture.telemetry_contents(), contents);
+        }
     }
 
     #[test]

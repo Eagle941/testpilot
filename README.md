@@ -109,6 +109,9 @@ prefix so the adapter can select the appropriate `msfs-rs` interface. Each
 recorded `A:` variable also requires a non-empty `unit`; units are rejected for
 other recording prefixes.
 
+At least one `inject.N` entry is required. Recordings are optional: omit all
+`record.N` entries or use an empty `[record]` table to replay inputs alone.
+
 For the MVP, the module reads the lowercase filename
 `/work/replayer_config.toml` from the package-specific writable MSFS mount.
 Relative `input_file` paths are resolved from `/work`. `format_version` governs
@@ -250,11 +253,15 @@ Without this field, a signal is sampled every MSFS frame after that frame's inpu
 injection. When set to `N` hertz, that signal is sampled no more often than
 once per `1 / N` scenario seconds.
 
-Rows are only emitted when at least one configured recording signal is due. For a
-given row, due signals include their shared elapsed timestamp in `.time` and their
+When recordings are configured, rows are only emitted when at least one recording
+signal is due. For a given row, due signals include their shared elapsed timestamp
+in `.time` and their
 value in `.value`; non-due recording signals emit empty cells in both columns.
 Injection columns are always written on emitted rows using the injected simulator
 values for that frame (after interpolation and conversion).
+
+With no recordings configured, the timestamped telemetry file contains only
+injection columns and a row for every replay frame.
 
 `pitch` and `roll` are aggregate MSFS aircraft attitudes. `elevator_position`
 and `aileron_position` are aggregate MSFS control-surface positions, not
