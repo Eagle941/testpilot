@@ -272,6 +272,52 @@ bounded buffering. Telemetry is flushed on completion and failure. Failures
 retain the partial file under its normal timestamped name rather than deleting
 or renaming it. Future abort handling must provide the same behavior.
 
+## Hot-path benchmarks
+
+Run the host Criterion suite with:
+
+```sh
+cargo bench --locked --features bench-support --bench hot_path
+```
+
+Use `-- full_frame` to select only the full-frame measurements, or `-- --test`
+to smoke-test the suite and its correctness checks without collecting timings.
+Criterion writes results under `target/criterion`; CI uploads that directory.
+
+The `full_frame` group calls the production `GaugeRuntime::pre_update` with a
+fake simulator, a controllable simulator clock, and real scenario/telemetry CSV
+files. It reports time per frame and elements per second (one element is one
+frame). The workload uses two independently sampled, irregular input series and
+four recorded responses:
+
+| Case | Workload |
+| --- | --- |
+| `every_frame` | Approximately 60 Hz updates, recording every frame |
+| `late_frames` | Same selection, with a 250 ms step every 32nd frame |
+| `recordings_30hz` | Approximately 60 Hz updates, recordings limited to 30 Hz |
+| `without_recordings` | Two injections, logging only their converted values |
+
+Each timing batch contains up to 256 frames. Fixture creation, parsing the
+configuration, the arming frame, final flushing, and teardown are excluded.
+Timed work includes cursor advancement and CSV reads, interpolation and range
+conversion, fake-adapter dispatch, recording schedules, and buffered telemetry
+writes. The loop and fake clock/counters also contribute to the measurement.
+These are host measurements with filesystem caching; they do not measure actual
+MSFS API calls, calculator-code formatting, WASM execution, or durable disk sync.
+
+Untimed checks verify injection/read counts and final injection values for every
+batch. Separate pre-measurement checks validate the CSV schema, row counts,
+timestamps, and values for full and partial batches. Files are closed and temporary
+directories removed between batches, keeping disk use bounded.
+
+The existing interpolation, cursor, and telemetry component benchmarks remain
+available. The cursor result measures 128 advances per iteration; full-frame and
+telemetry results are per frame. Initialization and cleanup are excluded from
+the cursor and telemetry timings, so older results are not directly comparable.
+Compare results on the same machine and filesystem; CI has no timing threshold.
+The `bench-support` feature exposes an opt-in measurement facade and is not needed
+by the MSFS build.
+
 ## MSFS WASM build
 
 The MSFS WASM module uses:

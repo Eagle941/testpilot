@@ -97,7 +97,7 @@ jobs:
             curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain 1.93.0 --no-update-default-toolchain
             . "$HOME/.cargo/env"
       - name: Run benchmarks
-        run: cargo bench --locked --bench hot_path
+        run: cargo bench --locked --features bench-support --bench hot_path
       - name: Upload benchmark outputs
         uses: actions/upload-artifact@v7
         with:

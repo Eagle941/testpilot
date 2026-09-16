@@ -1,5 +1,6 @@
 //! MSFS simulator-variable writes through legacy calculator code.
 
+#[cfg(any(target_arch = "wasm32", test))]
 use std::fmt::Write;
 use std::time::Duration;
 
@@ -27,6 +28,7 @@ pub trait SimulatorAdapter {
 /// MSFS implementation backed by legacy calculator code.
 pub struct MsfsSimulator {
     /// Reusable calculator-code scratch buffer for write/read commands.
+    #[cfg(any(target_arch = "wasm32", test))]
     calculator_code_buffer: String,
 }
 
@@ -34,6 +36,7 @@ impl MsfsSimulator {
     /// Creates an adapter with a reusable calculator-code buffer.
     pub const fn new() -> MsfsSimulator {
         MsfsSimulator {
+            #[cfg(any(target_arch = "wasm32", test))]
             calculator_code_buffer: String::new(),
         }
     }
@@ -82,6 +85,7 @@ impl SimulatorAdapter for MsfsSimulator {
 ///
 /// The output buffer is cleared and reused. Invalid destinations and non-finite
 /// values are rejected before any calculator code is produced.
+#[cfg(any(target_arch = "wasm32", test))]
 fn build_calculator_code(
     output: &mut String,
     variable: &str,
@@ -117,6 +121,7 @@ fn build_calculator_code(
 }
 
 /// Formats a calculator-code read for an `A:` or `L:` simulator variable.
+#[cfg(any(target_arch = "wasm32", test))]
 fn build_read_calculator_code(
     output: &mut String,
     variable: &str,
