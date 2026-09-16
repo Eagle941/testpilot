@@ -26,6 +26,10 @@ struct ReadCommand {
 /// calls. The runtime clears it between runs to discard previous configurations.
 pub struct ReadCommandCache {
     /// Small configured recording set, searched without allocating lookup keys.
+    /// A Vec avoids hashing overhead for the usual four recordings. Host benchmarks
+    /// with mixed and shared-prefix names favored Vec at 4, 8 and 16 entries;
+    /// HashMap won at 32. Revisit if larger recording sets become typical; the
+    /// crossover depends on key lengths and the target platform.
     commands: Vec<ReadCommand>,
     /// Scratch space used only when preparing a previously unseen read.
     scratch: String,
