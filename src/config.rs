@@ -35,7 +35,7 @@ pub struct ReplayConfig {
     pub input_file: PathBuf,
     /// Injection definitions ordered by their numeric `inject.N` indexes.
     pub inject: Vec<InjectionConfig>,
-    /// Recording definitions ordered by their numeric `record.N` indexes.
+    /// Recording definitions ordered by their numeric `record.N` indexes; may be empty.
     pub record: Vec<RecordingConfig>,
 }
 
@@ -98,10 +98,13 @@ impl ReplayConfig {
         Ok(result)
     }
 
-    /// Parses and validates all recording entries.
+    /// Parses and validates recording entries, allowing an omitted or empty section.
     fn parse_recordings(
         entries: BTreeMap<String, Value>,
     ) -> Result<Vec<RecordingConfig>, ConfigError> {
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
         let entries = Self::ordered_entries("record", entries)?;
         let mut signals = HashSet::with_capacity(entries.len());
         let mut result = Vec::with_capacity(entries.len());
@@ -487,6 +490,29 @@ unit = "position"
         assert_eq!(config.record[3].name, "aileron_position");
         assert_eq!(config.record[3].variable, "A:AILERON POSITION");
         assert_eq!(config.record[3].unit.as_deref(), Some("position"));
+    }
+
+    #[test]
+    fn accepts_omitted_and_empty_recordings() {
+        let (injections_only, _) = VALID_CONFIG.split_once("[record.0]").unwrap();
+        for suffix in ["", "[record]\n"] {
+            let config = ReplayConfig::new(&format!("{injections_only}{suffix}")).unwrap();
+            assert_eq!(config.inject.len(), 2);
+            assert!(config.record.is_empty());
+        }
+    }
+
+    #[test]
+    fn rejects_omitted_and_empty_injections() {
+        for suffix in ["", "[inject]\n"] {
+            let contents = format!("format_version = 1\ninput_file = \"scenario.csv\"\n{suffix}");
+            assert_error(&contents, |error| {
+                assert!(matches!(
+                    error,
+                    ConfigError::EmptySection { section: "inject" }
+                ));
+            });
+        }
     }
 
     #[test]
