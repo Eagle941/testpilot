@@ -17,7 +17,7 @@
     )
 )]
 
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(any(target_arch = "wasm32", test, feature = "bench-support"))]
 /// Arming state and transition tracking used by runtime start/stop control.
 mod arm;
 
@@ -25,14 +25,17 @@ mod arm;
 /// MSFS gauge entrypoint and event loop.
 mod gauge;
 
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(any(target_arch = "wasm32", test, feature = "bench-support"))]
 mod gauge_runtime;
 
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(any(target_arch = "wasm32", test, feature = "bench-support"))]
 mod replayer;
 
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(any(target_arch = "wasm32", test, feature = "bench-support"))]
 mod simulator;
+
+#[cfg(feature = "bench-support")]
+pub mod bench_support;
 
 pub mod config;
 /// Scenario cursor abstraction, readers, and row interpolation sources.

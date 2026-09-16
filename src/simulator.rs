@@ -1,13 +1,91 @@
 //! MSFS simulator-variable writes through legacy calculator code.
 
+use std::ffi::{CStr, CString};
+#[cfg(any(target_arch = "wasm32", test, feature = "bench-support"))]
 use std::fmt::Write;
 use std::time::Duration;
 
 use crate::error::SimulatorError;
 
-/// Packed calculator code used to query simulation time.
-#[cfg(target_arch = "wasm32")]
-const SIMULATION_TIME_CODE: &str = "(E:SIMULATION TIME, seconds)";
+/// Static, NUL-terminated simulator-clock command; no per-frame conversion.
+pub(crate) const SIMULATION_TIME_CODE: &CStr = c"(E:SIMULATION TIME, seconds)";
+
+/// One validated read, keyed by both variable and unit to preserve unit semantics.
+struct ReadCommand {
+    /// Configured simulator source.
+    variable: String,
+    /// Configured aircraft-variable unit, if any.
+    unit: Option<String>,
+    /// Owned command bytes passed unchanged to msfs-rs on each read.
+    code: CString,
+}
+
+/// Owned read commands reused for one replay configuration.
+///
+/// Entries contain text only, so dropping or clearing the cache needs no simulator
+/// calls. The runtime clears it between runs to discard previous configurations.
+pub struct ReadCommandCache {
+    /// Small configured recording set, searched without allocating lookup keys.
+    /// A Vec avoids hashing overhead for the usual four recordings. Host benchmarks
+    /// with mixed and shared-prefix names favored Vec at 4, 8 and 16 entries;
+    /// HashMap won at 32. Revisit if larger recording sets become typical; the
+    /// crossover depends on key lengths and the target platform.
+    commands: Vec<ReadCommand>,
+    /// Scratch space used only when preparing a previously unseen read.
+    scratch: String,
+}
+
+impl ReadCommandCache {
+    /// Creates an empty cache without allocating.
+    pub const fn new() -> Self {
+        Self {
+            commands: Vec::new(),
+            scratch: String::new(),
+        }
+    }
+
+    /// Releases cached commands while retaining the vector's capacity.
+    pub fn clear(&mut self) {
+        self.commands.clear();
+    }
+
+    /// Returns validated NUL-terminated code, preparing it once on a cache miss.
+    pub fn get(&mut self, variable: &str, unit: Option<&str>) -> Result<&CStr, SimulatorError> {
+        if variable == "L:REPLAYER_ARMED" && unit.is_none() {
+            return Ok(c"(L:REPLAYER_ARMED)");
+        }
+        let index = match self
+            .commands
+            .iter()
+            .position(|command| command.variable == variable && command.unit.as_deref() == unit)
+        {
+            Some(index) => index,
+            None => {
+                build_read_calculator_code(&mut self.scratch, variable, unit)?;
+                let code = CString::new(self.scratch.as_str()).map_err(|source| {
+                    SimulatorError::CalculatorCodeNul {
+                        variable: variable.to_owned(),
+                        source,
+                    }
+                })?;
+                let index = self.commands.len();
+                self.commands.push(ReadCommand {
+                    variable: variable.to_owned(),
+                    unit: unit.map(str::to_owned),
+                    code,
+                });
+                index
+            }
+        };
+        Ok(self.commands[index].code.as_c_str())
+    }
+}
+
+impl Default for ReadCommandCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Simulator operations required by replay injection.
 pub trait SimulatorAdapter {
@@ -22,19 +100,29 @@ pub trait SimulatorAdapter {
 
     /// Reads a finite value from a prefixed simulator source.
     fn read(&mut self, variable: &str, unit: Option<&str>) -> Result<f64, SimulatorError>;
+
+    /// Discards commands belonging to an earlier run or configuration.
+    fn clear_read_cache(&mut self) {}
 }
 
 /// MSFS implementation backed by legacy calculator code.
 pub struct MsfsSimulator {
-    /// Reusable calculator-code scratch buffer for write/read commands.
+    /// Reusable calculator-code scratch buffer for dynamic write commands.
+    #[cfg(any(target_arch = "wasm32", test))]
     calculator_code_buffer: String,
+    /// Validated recording commands owned until the run ends.
+    #[cfg(target_arch = "wasm32")]
+    read_commands: ReadCommandCache,
 }
 
 impl MsfsSimulator {
-    /// Creates an adapter with a reusable calculator-code buffer.
+    /// Creates an adapter with reusable write storage and a recording-command cache.
     pub const fn new() -> MsfsSimulator {
         MsfsSimulator {
+            #[cfg(any(target_arch = "wasm32", test))]
             calculator_code_buffer: String::new(),
+            #[cfg(target_arch = "wasm32")]
+            read_commands: ReadCommandCache::new(),
         }
     }
 }
@@ -42,7 +130,7 @@ impl MsfsSimulator {
 #[cfg(target_arch = "wasm32")]
 impl SimulatorAdapter for MsfsSimulator {
     fn simulation_time(&self) -> Result<Duration, SimulatorError> {
-        let value = msfs::legacy::execute_calculator_code::<f64>(SIMULATION_TIME_CODE)
+        let value = execute_read_code(SIMULATION_TIME_CODE)
             .ok_or(SimulatorError::SimulationTimeUnavailable)?;
         Duration::try_from_secs_f64(value)
             .map_err(|_| SimulatorError::InvalidSimulationTime { value })
@@ -59,13 +147,14 @@ impl SimulatorAdapter for MsfsSimulator {
     }
 
     fn validate_read(&mut self, variable: &str, unit: Option<&str>) -> Result<(), SimulatorError> {
-        build_read_calculator_code(&mut self.calculator_code_buffer, variable, unit)
+        self.read_commands.get(variable, unit)?;
+        Ok(())
     }
 
     fn read(&mut self, variable: &str, unit: Option<&str>) -> Result<f64, SimulatorError> {
-        self.validate_read(variable, unit)?;
-        let value = msfs::legacy::execute_calculator_code::<f64>(&self.calculator_code_buffer)
-            .ok_or_else(|| SimulatorError::CalculatorCodeReadFailed {
+        let code = self.read_commands.get(variable, unit)?;
+        let value =
+            execute_read_code(code).ok_or_else(|| SimulatorError::CalculatorCodeReadFailed {
                 variable: variable.to_owned(),
             })?;
         if !value.is_finite() {
@@ -76,13 +165,26 @@ impl SimulatorAdapter for MsfsSimulator {
         }
         Ok(value)
     }
+
+    fn clear_read_cache(&mut self) {
+        self.read_commands.clear();
+    }
+}
+
+/// Calls the same msfs-rs implementation as execute_calculator_code, using
+/// already-owned command bytes instead of allocating a CString on every read.
+/// This doc-hidden public trait is available in the revision pinned by Cargo.lock.
+#[cfg(target_arch = "wasm32")]
+fn execute_read_code(code: &CStr) -> Option<f64> {
+    <f64 as msfs::legacy::ExecuteCalculatorCodeImpl>::execute(code)
 }
 
 /// Formats one finite value write for a prefixed `K:` event or `L:` variable.
 ///
 /// The output buffer is cleared and reused. Invalid destinations and non-finite
 /// values are rejected before any calculator code is produced.
-fn build_calculator_code(
+#[cfg(any(target_arch = "wasm32", test, feature = "bench-support"))]
+pub(crate) fn build_calculator_code(
     output: &mut String,
     variable: &str,
     value: f64,
@@ -117,7 +219,8 @@ fn build_calculator_code(
 }
 
 /// Formats a calculator-code read for an `A:` or `L:` simulator variable.
-fn build_read_calculator_code(
+#[cfg(any(target_arch = "wasm32", test, feature = "bench-support"))]
+pub(crate) fn build_read_calculator_code(
     output: &mut String,
     variable: &str,
     unit: Option<&str>,
@@ -163,8 +266,65 @@ mod tests {
     use crate::error::SimulatorError;
 
     use super::{
-        MsfsSimulator, SimulatorAdapter, build_calculator_code, build_read_calculator_code,
+        MsfsSimulator, ReadCommandCache, SIMULATION_TIME_CODE, SimulatorAdapter,
+        build_calculator_code, build_read_calculator_code,
     };
+
+    #[test]
+    fn caches_commands_by_variable_and_unit_and_releases_old_configuration() {
+        let mut cache = ReadCommandCache::new();
+        let original = cache
+            .get("A:PLANE PITCH DEGREES", Some("degrees"))
+            .unwrap()
+            .as_ptr();
+        assert_eq!(
+            cache.get("A:PLANE PITCH DEGREES", Some("radians")).unwrap(),
+            c"(A:PLANE PITCH DEGREES, radians)"
+        );
+        assert_eq!(
+            cache
+                .get("A:PLANE PITCH DEGREES", Some("degrees"))
+                .unwrap()
+                .as_ptr(),
+            original
+        );
+        assert_eq!(cache.get("L:TEST", None).unwrap(), c"(L:TEST)");
+        assert_eq!(cache.commands.len(), 3);
+        cache.clear();
+        assert!(cache.commands.is_empty());
+        assert_eq!(
+            cache.get("A:NEW", Some("number")).unwrap(),
+            c"(A:NEW, number)"
+        );
+        assert_eq!(cache.commands.len(), 1);
+    }
+
+    #[test]
+    fn cached_reads_preserve_validation_and_static_commands() {
+        let mut cache = ReadCommandCache::new();
+        assert_eq!(SIMULATION_TIME_CODE, c"(E:SIMULATION TIME, seconds)");
+        assert_eq!(
+            cache.get("L:REPLAYER_ARMED", None).unwrap(),
+            c"(L:REPLAYER_ARMED)"
+        );
+        assert!(cache.commands.is_empty());
+        cache.get("A:TEST", Some("number")).unwrap();
+        for (variable, unit) in [
+            ("A:TEST", None),
+            ("A:TEST", Some("")),
+            ("A:TEST", Some("nu\0mber")),
+            ("L:REPLAYER_ARMED", Some("number")),
+            ("L:BAD\0NAME", None),
+            ("K:EVENT", None),
+        ] {
+            assert!(cache.get(variable, unit).is_err());
+        }
+        assert_eq!(cache.commands.len(), 1);
+        assert_eq!(
+            cache.get("A:TEST", Some("number")).unwrap(),
+            c"(A:TEST, number)"
+        );
+    }
 
     struct FakeSimulator {
         time: Duration,

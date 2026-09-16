@@ -158,7 +158,9 @@ impl Cursor {
     /// It reads and validates the first pair of samples during construction so
     /// playback can fail fast on empty or malformed columns.
     fn new(path: &Path, injection: &InjectionConfig) -> Result<Cursor, ScenarioError> {
-        let mut reader = ReaderBuilder::new().trim(Trim::All).from_path(path)?;
+        // Trim headers once; trim only this cursor's selected fields by borrowing
+        // below. CSV record-wide trimming allocates buffers for every data row.
+        let mut reader = ReaderBuilder::new().trim(Trim::Headers).from_path(path)?;
         let columns = Cursor::find_column_indices(reader.headers()?, injection)?;
         let conversion = AffineRange::new(injection.source_range, injection.simulator_range)?;
         let mut cursor = Cursor {
@@ -282,8 +284,16 @@ impl Cursor {
         }
 
         let line = self.row.position().map(Position::line);
-        let time_text = self.row.get(self.columns.time_idx).unwrap_or_default();
-        let value_text = self.row.get(self.columns.value_idx).unwrap_or_default();
+        let time_text = self
+            .row
+            .get(self.columns.time_idx)
+            .unwrap_or_default()
+            .trim();
+        let value_text = self
+            .row
+            .get(self.columns.value_idx)
+            .unwrap_or_default()
+            .trim();
         if time_text.is_empty() != value_text.is_empty() {
             return Err(ScenarioError::HalfPopulatedPair {
                 signal: self.signal.clone(),
