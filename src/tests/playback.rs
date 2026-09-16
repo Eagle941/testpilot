@@ -7,6 +7,44 @@ use crate::playback::Sample;
 use super::shared::*;
 
 #[test]
+fn streaming_cursor_preserves_whitespace_and_empty_pair_semantics() {
+    let path = std::env::temp_dir().join(format!("replay-whitespace-{}.csv", std::process::id()));
+    let header = HEADER
+        .trim_end()
+        .split(',')
+        .map(|s| format!("\u{2003}{s}\t"))
+        .collect::<Vec<_>>()
+        .join(",");
+    std::fs::write(
+        &path,
+        format!("{header}\n 0 ,\u{2003}1 ,0,2\n 1 ,3\t,1,4\n\u{2003},\t, 2 , 6 \n"),
+    )
+    .unwrap();
+    let mut scenario = Scenario::new(&path, &config()).unwrap();
+    let values: Vec<_> = scenario
+        .interpolation_rows()
+        .map(|row| row.value_at(time(0.5)).unwrap())
+        .collect();
+    assert_eq!(values, [2.0, 3.0]);
+    scenario.advance(time(1.5)).unwrap();
+    let values: Vec<_> = scenario
+        .interpolation_rows()
+        .map(|row| row.value_at(time(1.5)).unwrap())
+        .collect();
+    assert_eq!(values, [3.0, 5.0]);
+    drop(scenario);
+
+    std::fs::write(&path, format!("{HEADER}0,1,0,2\n1,3,1,4\n\u{2003},5,2,6\n")).unwrap();
+    let mut scenario = Scenario::new(&path, &config()).unwrap();
+    assert!(matches!(
+        scenario.advance(time(1.5)),
+        Err(crate::error::ScenarioError::HalfPopulatedPair { line: Some(4), .. })
+    ));
+    drop(scenario);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn initializes_rows_and_catches_up_across_multiple_intervals() {
     let path = std::env::temp_dir().join(format!(
         "replay-incremental-scenario-{}.csv",

@@ -1,5 +1,6 @@
 //! Bounded-memory telemetry CSV creation and streaming serialization.
 
+use std::fmt::Write;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -15,6 +16,10 @@ pub struct TelemetryRecorder {
     filename: PathBuf,
     /// CSV writer bound to the telemetry file.
     writer: Writer<File>,
+    /// Reused timestamp text shared by every populated pair in a frame.
+    time_buffer: String,
+    /// Reused value text, retaining the existing f64 Display representation.
+    number_buffer: String,
     /// Reused row buffer to avoid per-frame allocations.
     row_buffer: StringRecord,
     /// Recording column labels in deterministic output order.
@@ -44,6 +49,8 @@ impl TelemetryRecorder {
             filename: path,
             writer: WriterBuilder::new().has_headers(false).from_writer(file),
             row_buffer: StringRecord::new(),
+            time_buffer: String::with_capacity(64),
+            number_buffer: String::with_capacity(64),
             recording_signal_names: recording_names.to_vec(),
             injected_signal_names: injected_names.to_vec(),
         };
@@ -93,19 +100,22 @@ impl TelemetryRecorder {
         }
 
         self.row_buffer.clear();
-        let time = elapsed.as_secs_f64().to_string();
+        self.time_buffer.clear();
+        write!(&mut self.time_buffer, "{}", elapsed.as_secs_f64())?;
 
         for (recording_name, value) in self.recording_signal_names.iter().zip(recording_values) {
             match value {
                 Some(value) => {
-                    self.row_buffer.push_field(&time);
+                    self.row_buffer.push_field(&self.time_buffer);
                     if !value.is_finite() {
                         return Err(RecordingError::NonFiniteValue {
                             signal: recording_name.clone(),
                             value: *value,
                         });
                     }
-                    self.row_buffer.push_field(&value.to_string());
+                    self.number_buffer.clear();
+                    write!(&mut self.number_buffer, "{value}")?;
+                    self.row_buffer.push_field(&self.number_buffer);
                 }
                 None => {
                     self.row_buffer.push_field("");
@@ -114,14 +124,16 @@ impl TelemetryRecorder {
             }
         }
         for (injected_name, value) in self.injected_signal_names.iter().zip(injected_values) {
-            self.row_buffer.push_field(&time);
+            self.row_buffer.push_field(&self.time_buffer);
             if !value.is_finite() {
                 return Err(RecordingError::NonFiniteValue {
                     signal: injected_name.clone(),
                     value: *value,
                 });
             }
-            self.row_buffer.push_field(&value.to_string());
+            self.number_buffer.clear();
+            write!(&mut self.number_buffer, "{value}")?;
+            self.row_buffer.push_field(&self.number_buffer);
         }
         self.writer
             .write_record(&self.row_buffer)
@@ -272,6 +284,41 @@ mod tests {
              0,1,0,2,0,0.25\n\
              ,,0.5,3,0.5,0.5\n"
         );
+        drop(recorder);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn reused_buffers_preserve_display_for_extreme_and_shorter_values() {
+        let directory = fixture_directory();
+        fs::create_dir_all(&directory).unwrap();
+        let mut recorder = TelemetryRecorder::new(
+            &directory,
+            &["read".into()],
+            &["injected".into()],
+            UNIX_EPOCH,
+        )
+        .unwrap();
+        let values = [
+            f64::MAX,
+            f64::MIN_POSITIVE,
+            f64::from_bits(1),
+            -0.0,
+            -12345.6789,
+            1.0,
+        ];
+        let mut expected = String::from("read.time,read.value,injected.time,injected.value\n");
+        for (index, value) in values.into_iter().enumerate() {
+            let elapsed = Duration::from_nanos((index + 1) as u64);
+            recorder
+                .write_frame(elapsed, &[Some(value)], &[value])
+                .unwrap();
+            let time = elapsed.as_secs_f64().to_string();
+            let value = value.to_string();
+            writeln!(&mut expected, "{time},{value},{time},{value}").unwrap();
+        }
+        recorder.flush().unwrap();
+        assert_eq!(fs::read_to_string(recorder.path()).unwrap(), expected);
         drop(recorder);
         fs::remove_dir_all(directory).unwrap();
     }

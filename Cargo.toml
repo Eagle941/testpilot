@@ -8,6 +8,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 bench-support = []
+bench-allocations = ["bench-support"]
 
 [dependencies]
 anyhow = "1"
@@ -32,5 +33,10 @@ strip = true
 
 [[bench]]
 name = "hot_path"
+harness = false
+required-features = ["bench-support"]
+
+[[bench]]
+name = "hot_path_diagnostics"
 harness = false
 required-features = ["bench-support"]

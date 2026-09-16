@@ -112,6 +112,13 @@ pub enum ReplayerError {
 /// MSFS calculator-code and simulator-variable failures.
 #[derive(Debug, PartialEq, Error)]
 pub enum SimulatorError {
+    #[error("calculator code for `{variable}` contains an interior NUL: {source}")]
+    CalculatorCodeNul {
+        variable: String,
+        #[source]
+        source: std::ffi::NulError,
+    },
+
     #[error("failed to read simulator time")]
     SimulationTimeUnavailable,
 
@@ -285,6 +292,8 @@ pub enum GaugeError {
 /// Telemetry file creation, serialization, and finalization failures.
 #[derive(Debug, Error)]
 pub enum RecordingError {
+    #[error("numeric formatting failed: {0}")]
+    FormatNumber(#[from] std::fmt::Error),
     #[error("host time is before the Unix epoch")]
     ClockBeforeUnixEpoch,
 

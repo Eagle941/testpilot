@@ -80,6 +80,7 @@ impl<S: SimulatorAdapter> GaugeRuntime<S> {
     /// This method is idempotent from the perspective of runtime state; if no
     /// scenario is active, it still resets arming state and returns `Ok(())`.
     pub fn stop(&mut self) -> Result<(), GaugeError> {
+        self.simulator.clear_read_cache();
         self.replayer.reset()?;
         self.arming.reset(&mut self.simulator)?;
         Ok(())
@@ -114,6 +115,7 @@ impl<S: SimulatorAdapter> GaugeRuntime<S> {
         started_now: bool,
     ) -> Result<(), GaugeError> {
         if started_now {
+            simulator.clear_read_cache();
             Self::validate_recordings(simulator, &frame)?;
         }
 
@@ -365,6 +367,7 @@ unit = "radians"
         reads: HashMap<String, VecDeque<f64>>,
         operations: Vec<Operation>,
         failure: Option<Failure>,
+        cache_clears: usize,
     }
 
     impl FakeSimulator {
@@ -374,6 +377,7 @@ unit = "radians"
                 reads: HashMap::new(),
                 operations: Vec::new(),
                 failure: None,
+                cache_clears: 0,
             }
         }
 
@@ -400,6 +404,10 @@ unit = "radians"
     }
 
     impl SimulatorAdapter for FakeSimulator {
+        fn clear_read_cache(&mut self) {
+            self.cache_clears += 1;
+        }
+
         fn simulation_time(&self) -> Result<Duration, SimulatorError> {
             if self.should_fail(&Failure::SimulationTime) {
                 return Err(SimulatorError::SimulationTimeUnavailable);
@@ -903,6 +911,7 @@ unit = "radians"
         runtime
             .pre_update()
             .unwrap_or_else(|error| panic!("first start failed: {error:#}"));
+        assert_eq!(runtime.simulator.cache_clears, 1);
         assert_eq!(
             runtime
                 .simulator
@@ -916,6 +925,7 @@ unit = "radians"
         runtime.stop().unwrap();
         runtime.simulator.clear_operations();
         fixture.clear_telemetry_files();
+        assert_eq!(runtime.simulator.cache_clears, 2);
 
         fs::write(
             &fixture.config_path,
@@ -965,6 +975,7 @@ variable = "L:ELEVATOR_POSITION"
         runtime
             .pre_update()
             .unwrap_or_else(|error| panic!("second start failed: {error:#}"));
+        assert_eq!(runtime.simulator.cache_clears, 3);
         assert!(
             runtime
                 .simulator

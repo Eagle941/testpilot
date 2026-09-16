@@ -1,11 +1,12 @@
 use std::cell::Cell;
 use std::fs;
 use std::hint::black_box;
+use std::io::{BufWriter, Write};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use criterion::{Criterion, Throughput};
-use testpilot::bench_support::{SimulatorAdapter, new_runtime};
+use testpilot::bench_support::{GaugeRuntime, SimulatorAdapter, new_runtime};
 use testpilot::error::SimulatorError;
 
 use super::TempDirectory;
@@ -29,14 +30,37 @@ const NAMES: [&str; 6] = [
 ];
 
 #[derive(Clone, Copy)]
-enum Workload {
+pub enum Workload {
     EveryFrame,
     LateFrames,
     Limited,
     NoRecordings,
 }
 
+pub const WORKLOADS: [(&str, Workload); 4] = [
+    ("every_frame", Workload::EveryFrame),
+    ("late_frames", Workload::LateFrames),
+    ("recordings_30hz", Workload::Limited),
+    ("without_recordings", Workload::NoRecordings),
+];
+
 impl Workload {
+    fn elapsed_after(self, frames: u64) -> Duration {
+        let late = if matches!(self, Self::LateFrames) {
+            frames / 32
+        } else {
+            0
+        };
+        let nanos = u128::from(frames) * FRAME_STEP.as_nanos()
+            + u128::from(late) * (Duration::from_millis(250) - FRAME_STEP).as_nanos();
+        Duration::new(
+            (nanos / 1_000_000_000)
+                .try_into()
+                .expect("supported scenario duration"),
+            (nanos % 1_000_000_000) as u32,
+        )
+    }
+
     fn recordings(self) -> usize {
         if matches!(self, Self::NoRecordings) {
             0
@@ -85,8 +109,15 @@ fn responses(seconds: f64) -> [f64; 4] {
 }
 
 fn expected_injections(seconds: f64) -> [f64; 2] {
-    // Analytic ramps remain linear between all irregular source samples.
     [seconds / 10.0 - 0.5, 0.5 - seconds / 20.0].map(|value| value * 16_383.5 + 0.5)
+}
+
+fn input_values(seconds: f64) -> [f64; 2] {
+    // Triangular ramps keep sustained runs in range. Both sampling grids include
+    // every eight-second turning point. Before eight seconds these match the
+    // original short-batch ramps exactly apart from floating-point rounding.
+    let distance = ((seconds % 16.0) - 8.0).abs();
+    [0.3 - distance / 10.0, 0.1 + distance / 20.0]
 }
 
 impl SimulatorAdapter for FakeSimulator {
@@ -176,6 +207,125 @@ fn scenario_csv() -> String {
         roll_ms += if row % 2 == 0 { 7 } else { 13 };
     }
     csv
+}
+
+/// One armed replay, owning its files for the entire warm-up/profile interval.
+/// Field order closes the runtime's handles before deleting the directory on unwind.
+pub struct SustainedRun {
+    runtime: GaugeRuntime<FakeSimulator>,
+    state: Rc<State>,
+    workload: Workload,
+    frame: u64,
+    budget: u64,
+    directory: TempDirectory,
+}
+
+impl SustainedRun {
+    pub fn new(workload: Workload, frames: u64) -> Self {
+        assert!(frames > 0);
+        let directory = TempDirectory::new();
+        let config_path = directory.0.join("replayer_config.toml");
+        fs::write(&config_path, config(workload)).expect("write configuration");
+        let mut writer = BufWriter::new(
+            fs::File::create(directory.0.join("scenario.csv")).expect("create scenario"),
+        );
+        writeln!(
+            writer,
+            "{}.time,{}.value,{}.time,{}.value",
+            NAMES[4], NAMES[4], NAMES[5], NAMES[5]
+        )
+        .expect("write header");
+        let end_ms = workload.elapsed_after(frames).as_millis() + 32;
+        let mut pitch_ms = 0_u128;
+        let mut roll_ms = 0_u128;
+        let mut even = true;
+        loop {
+            let pitch_time = pitch_ms as f64 / 1000.0;
+            let roll_time = roll_ms as f64 / 1000.0;
+            writeln!(
+                writer,
+                "{pitch_time},{},{roll_time},{}",
+                input_values(pitch_time)[0],
+                input_values(roll_time)[1]
+            )
+            .expect("write sample");
+            if pitch_ms > end_ms {
+                break;
+            }
+            pitch_ms += if even { 5 } else { 11 };
+            roll_ms += if even { 7 } else { 13 };
+            even = !even;
+        }
+        writer.flush().expect("flush scenario");
+        drop(writer);
+        let state = Rc::new(State::default());
+        let mut runtime =
+            new_runtime(config_path, FakeSimulator(Rc::clone(&state))).expect("runtime");
+        state.armed.set(1.0);
+        runtime.pre_update().expect("arm at time zero");
+        Self {
+            runtime,
+            state,
+            workload,
+            frame: 0,
+            budget: frames,
+            directory,
+        }
+    }
+
+    pub fn advance(&mut self, frames: u64) {
+        let last = self
+            .frame
+            .checked_add(frames)
+            .expect("frame count overflow");
+        assert!(
+            last <= self.budget,
+            "fixture must outlast the measured replay"
+        );
+        for frame in self.frame + 1..=last {
+            self.state
+                .time
+                .set(self.state.time.get() + self.workload.step(frame));
+            self.runtime.pre_update().expect("sustained frame");
+        }
+        self.frame = last;
+    }
+
+    pub fn finish(mut self) {
+        assert_eq!(self.state.writes.get(), [self.frame + 1; 2]);
+        assert_eq!(self.state.clock_reads.get(), self.frame + 1);
+        assert_eq!(self.state.arm_reads.get(), self.frame + 1);
+        let samples = if matches!(self.workload, Workload::Limited) {
+            self.frame / 2 + 1
+        } else {
+            self.frame + 1
+        };
+        assert_eq!(
+            self.state.reads.get(),
+            if self.workload.recordings() == 0 {
+                [0; 4]
+            } else {
+                [samples; 4]
+            }
+        );
+        for (actual, expected) in self.state.last_injected.get().into_iter().zip(
+            input_values(self.state.time.get().as_secs_f64()).map(|value| value * 16_383.5 + 0.5),
+        ) {
+            assert_close(actual, expected);
+        }
+        self.runtime
+            .stop()
+            .expect("stop and flush sustained replay");
+        assert_eq!(self.state.armed.get(), 0.0);
+        drop(self.runtime);
+        drop(self.directory);
+    }
+}
+
+/// Stable sampling-profiler boundary containing only sustained frame execution.
+#[inline(never)]
+pub fn profile_frames(run: &mut SustainedRun, frames: u64) {
+    run.advance(frames);
 }
 
 fn assert_close(actual: f64, expected: f64) {
@@ -312,12 +462,7 @@ pub fn benchmark_full_frame(c: &mut Criterion) {
     group.sample_size(20);
     group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(3));
-    for (name, workload) in [
-        ("every_frame", Workload::EveryFrame),
-        ("late_frames", Workload::LateFrames),
-        ("recordings_30hz", Workload::Limited),
-        ("without_recordings", Workload::NoRecordings),
-    ] {
+    for (name, workload) in WORKLOADS {
         let config = config(workload);
         // Full CSV verification is outside measurement and covers partial batches too.
         for frames in [1, 3, BATCH_FRAMES] {

@@ -3,9 +3,12 @@ use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
+// Shared helpers also contain entry points used only by the diagnostics binary.
+#[allow(dead_code)]
 mod support;
 
 use criterion::{Criterion, criterion_group, criterion_main};
+use support::boundary::benchmark_boundary;
 use support::{TempDirectory, full_frame::benchmark_full_frame};
 
 use testpilot::cursor::{Frame, Scenario};
@@ -160,6 +163,7 @@ criterion_group!(
     benchmark_frame_interpolation,
     benchmark_scenario_advance,
     benchmark_telemetry_writer,
-    benchmark_full_frame
+    benchmark_full_frame,
+    benchmark_boundary
 );
 criterion_main!(benches);

@@ -98,9 +98,15 @@ jobs:
             . "$HOME/.cargo/env"
       - name: Run benchmarks
         run: cargo bench --locked --features bench-support --bench hot_path
+      - name: Report hot-path allocations
+        run: cargo bench --locked --features bench-allocations --bench hot_path_diagnostics -- allocations --output target/hot-path-allocations.csv
+      - name: Smoke-test sustained profiling
+        run: cargo bench --locked --features bench-support --bench hot_path_diagnostics -- --test
       - name: Upload benchmark outputs
         uses: actions/upload-artifact@v7
         with:
             name: hot-path-benchmark-${{ github.sha }}
-            path: target/criterion
+            path: |
+                target/criterion
+                target/hot-path-allocations.csv
             if-no-files-found: error

@@ -318,6 +318,85 @@ Compare results on the same machine and filesystem; CI has no timing threshold.
 The `bench-support` feature exposes an opt-in measurement facade and is not needed
 by the MSFS build.
 
+### Allocation measurements
+
+Run the separate diagnostics binary to count allocations after warm-up:
+
+```sh
+cargo bench --locked --features bench-allocations --bench hot_path_diagnostics -- allocations --output target/hot-path-allocations.csv
+```
+
+Each full-frame workload uses one replay with 1,024 warm-up frames followed by
+4,096 counted frames. The report also includes boundary preparation for one
+normal frame (eight calculator calls). Use `--frames N`, `--warmup N`, and
+`--workload every_frame` to adjust the run. Fixture generation, arming, warm-up,
+final flushing, validation, and report writing are outside the counted interval.
+
+The CSV reports successful allocation calls, reallocation calls, deallocation
+calls, total requested bytes, and per-frame allocation-call/byte averages.
+Requested bytes include the full new size of each reallocation; this is allocation
+traffic, not peak memory or net growth. Only operations through Rust's global
+allocator on the measuring thread are counted. No timing results are collected in
+this mode. The allocator checks itself with a known allocation/reallocation/free
+sequence before collecting results. CI uploads this CSV alongside Criterion data.
+
+### Sustained CPU profiling
+
+Use one uninterrupted replay to collect a CPU profile:
+
+```sh
+cargo bench --locked --features bench-support --bench hot_path_diagnostics -- profile --frames 1000000 --workload every_frame
+```
+
+The fixture is generated incrementally and both input series remain bounded using
+triangular ramps with eight-second turning points. After 1,024 warm-up frames,
+the binary prints `PROFILE_BEGIN` with its PID and runs the requested frames inside
+the non-inlined `profile_frames` function. `PROFILE_END` marks the end of the loop;
+final verification and cleanup follow. Configure an external profiler to select
+this function or the marked interval so setup and teardown are excluded. Increase
+`--frames` when a longer sampling interval is needed. No sleeps are used.
+
+This build contains no allocation-counting wrapper: omit `bench-allocations` for
+CPU profiling. The diagnostics binary rejects profile mode when that feature is
+enabled. Its elapsed time is a diagnostic, not a Criterion confidence interval.
+For symbols, set `CARGO_PROFILE_BENCH_DEBUG=1` and
+`CARGO_PROFILE_BENCH_STRIP=none` before building the profiling executable.
+
+Memory remains bounded, but temporary scenario and telemetry disk use grows with
+the requested frame count. Files are closed and removed after the run; forcibly
+terminating the process may leave its `replay-bench-*` directory in the system
+temporary directory. Run `hot_path_diagnostics --help` for options. CI smoke-tests
+sustained playback across all four workloads.
+
+### Simulator-boundary preparation
+
+```sh
+cargo bench --locked --features bench-support --bench hot_path -- boundary
+```
+
+The `boundary` group measures axis-command formatting alone, then formatting plus
+the `CString` conversion performed by the locked `msfs-rs` implementation. The
+uncached read cases and `prepare_frame` retain the original preparation path for
+comparison. `prepare_cached_frame` measures the current production path: static
+clock and arming commands, cached recording commands (including lookup), and two
+dynamic axis writes. Scratch capacity and the cache are warmed before measurement;
+per-call allocation and destruction are included. Both paths use production
+formatters exposed through the opt-in benchmark facade. Allocation diagnostics
+report both frame-preparation paths separately from the fake-adapter workloads.
+
+The production cursor trims headers once and borrows trimmed slices of its selected
+time/value fields. Telemetry reuses timestamp and value formatting buffers. These
+changes preserve whitespace acceptance and the existing numeric output format.
+Recording command text is cached by variable and unit, prepared during validation,
+and cleared at run start and stop. Reads use the locked `msfs-rs` public
+`ExecuteCalculatorCodeImpl` trait to pass an existing C string to the same executor;
+they do not cache returned values or precompile simulator code. Recheck this
+doc-hidden trait when updating the dependency.
+
+These measurements stop before simulator execution and exclude FFI dispatch,
+calculator evaluation, and aircraft-system work. Interpret them alongside the
+full-frame results; their sum is not a measured in-simulator frame time.
+
 ## MSFS WASM build
 
 The MSFS WASM module uses:
@@ -412,6 +491,21 @@ Manual validation (requires MSFS; not established by host tests):
 - Inspect `telemetry_YYYYMMDDTHHMMSS.csv` in the package-specific `/work` mount.
   On Microsoft Store installations this is
   `%LOCALAPPDATA%\Packages\Microsoft.FlightSimulator_8wekyb3d8bbwe\LocalState\packages\flybywire-aircraft-a320-neo\work`.
+
+### Manual validation of command caching
+
+Use the MSFS build, A32NX version, locked `msfs-rs` revision, example scenario, and
+output location recorded in the gauge reload validation above. Version fields must
+be recorded from the actual simulator installation; host benchmarks do not validate
+them. This change has not yet been tested in MSFS.
+
+Run the example replay and check that time advances, all four recorded values
+continue changing with aircraft state, and input/telemetry ordering is unchanged.
+After completion, change a recording variable or its unit and rearm (in a later
+UTC second to avoid filename collision); confirm the new schema and units take
+effect. Repeat with no recordings and reload during a run. Confirm arming resets,
+partial telemetry is flushed, and reload still reaches the idle wait without an
+exception.
 
 ## MVP simulator mappings
 
