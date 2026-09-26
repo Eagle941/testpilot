@@ -130,15 +130,32 @@ Aircraft-specific loading limits will be validated by the aircraft initialisatio
 This optional addition uses `format_version = 1`; omitting the section retains
 immediate playback on arming. No timeout, tolerance or unit fields are configurable.
 
-**Simulator initialisation is not implemented yet.** Aircraft detection is implemented;
-the A32NX component's submission
-and readback operations contain TODO comments and return typed errors rather
-than panicking. Enabling this section on a detected A32NX currently fails safely
+**Aircraft target submission is not implemented yet.** Aircraft detection and
+actual mass/balance readback are implemented. Submission still returns a typed
+unimplemented error. Enabling this section on a detected A32NX currently fails safely
 on arming, even if the aircraft already meets the targets. Unsupported or
 unidentified aircraft log that initialisation was skipped and start replay immediately,
 without enforcing mass/CG targets. The readiness gate is implemented and
-tested with a fake simulator. Future integration must change and read actual
+tested with a fake simulator. Future submission integration must change actual
 aircraft loading/fuel/balance, not merely flight-management entries.
+
+Readback uses these A32NX local variables, with no SDK unit conversion:
+
+| Field | Variable | Native unit |
+| --- | --- | --- |
+| `zfw` | `L:A32NX_AIRFRAME_ZFW` | kg |
+| `gw` | `L:A32NX_AIRFRAME_GW` | kg |
+| `gwcg` | `L:A32NX_AIRFRAME_GW_CG_PERCENT_MAC` | percent MAC |
+
+Each call reads a fresh ZFW, GW and GWCG snapshot in that order, independently of
+configured telemetry. Read failures and non-finite values propagate as typed
+readback errors containing the simulator variable; no partial snapshot is returned.
+The values come from actual payload and fuel in the
+[A32NX airframe calculation](https://github.com/flybywiresim/aircraft/blob/2baa2b35eadaf4c78e172ce41bbe6b40b4aeafb2/fbw-a32nx/src/wasm/systems/a320_systems/src/airframe/mod.rs).
+The [airframe output implementation](https://github.com/flybywiresim/aircraft/blob/2baa2b35eadaf4c78e172ce41bbe6b40b4aeafb2/fbw-common/src/wasm/systems/systems/src/airframe/mod.rs)
+publishes masses rounded to 1 kg and CG rounded to 0.01 percentage points of MAC.
+Readback preserves those values without additional rounding. Until submission is
+implemented, the normal arming path fails before reaching readback.
 
 Aircraft support is checked once on each arm frame requesting initialisation,
 using `(A:ATC MODEL, string)` and the existence of `L:A32NX_IS_READY`.
@@ -488,6 +505,16 @@ the same path; host tests exercise that failure without requiring MSFS.
 Also check an A20N aircraft without `A32NX_IS_READY`: initialisation must be
 skipped and the existence check must leave that variable absent. A failed lookup
 has the same skip behavior, covered by host tests.
+
+For readback validation, use a diagnostic build that calls `A32nxInitialiser::readback`
+directly without submitting targets or injecting controls. Compare its three values
+with the same local variables in the simulator, then change actual payload and fuel
+and verify subsequent reads follow the published values in kg and percent MAC.
+Record the A32NX source revision (mapping verified at
+`2baa2b35eadaf4c78e172ce41bbe6b40b4aeafb2`) and `msfs-rs` revision
+`2f697b9aac9fa3c00474f901a7f7ee4218cf534b` alongside the MSFS build and scenario.
+This diagnostic check produces no replay telemetry; normal replay output remains
+in `/work` as described above.
 
 Successful loading, actual-aircraft convergence, timeout and control release
 require manual validation after implementing verified A32NX initialisation mappings.

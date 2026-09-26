@@ -43,7 +43,7 @@ pub trait AircraftInitialiser {
     ) -> Result<AircraftMassBalance, InitialisationError>;
 }
 
-/// A32NX loading component. Simulator mappings remain deliberately unimplemented.
+/// A32NX detection and actual mass/balance readback; target submission remains unimplemented.
 pub struct A32nxInitialiser;
 
 impl AircraftInitialiser for A32nxInitialiser {
@@ -76,11 +76,20 @@ impl AircraftInitialiser for A32nxInitialiser {
 
     fn readback(
         &mut self,
-        _simulator: &mut dyn SimulatorAdapter,
+        simulator: &mut dyn SimulatorAdapter,
     ) -> Result<AircraftMassBalance, InitialisationError> {
-        // TODO: Verify and implement actual A32NX ZFW/GW/GWCG readback in kg and percent MAC.
-        Err(InitialisationError::NotImplemented {
-            operation: "readback",
+        // A32NX publishes actual airframe masses in kg and CG in percent MAC.
+        // L: reads use their native numeric scale without an SDK unit conversion.
+        Ok(AircraftMassBalance {
+            zfw: simulator
+                .read("L:A32NX_AIRFRAME_ZFW", None)
+                .map_err(InitialisationError::Readback)?,
+            gw: simulator
+                .read("L:A32NX_AIRFRAME_GW", None)
+                .map_err(InitialisationError::Readback)?,
+            gwcg: simulator
+                .read("L:A32NX_AIRFRAME_GW_CG_PERCENT_MAC", None)
+                .map_err(InitialisationError::Readback)?,
         })
     }
 }

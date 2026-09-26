@@ -627,12 +627,20 @@ unit = "radians"
                     variable: variable.to_owned(),
                 });
             }
-            self.reads
+            let value = self
+                .reads
                 .get_mut(variable)
                 .and_then(VecDeque::pop_front)
                 .ok_or_else(|| SimulatorError::CalculatorCodeReadFailed {
                     variable: variable.to_owned(),
-                })
+                })?;
+            if !value.is_finite() {
+                return Err(SimulatorError::NonFiniteRead {
+                    variable: variable.to_owned(),
+                    value,
+                });
+            }
+            Ok(value)
         }
     }
 
@@ -861,7 +869,7 @@ unit = "radians"
                 Box::new(A32nxInitialiser),
             )
             .unwrap();
-            runtime.pre_update().unwrap(); // Neither real initialisation TODO may be reached.
+            runtime.pre_update().unwrap(); // Unsupported aircraft must skip loading operations.
             assert!(runtime.initialisation.is_none());
             simulator.borrow_mut().time = duration(100.5);
             runtime.pre_update().unwrap();
@@ -948,7 +956,94 @@ unit = "radians"
     }
 
     #[test]
-    fn a32nx_initialisation_stubs_fail_safely_without_replay_or_telemetry() {
+    fn a32nx_readback_reads_fresh_actual_values_in_native_units_without_writes() {
+        use crate::aircraft_initialisation::AircraftInitialiser;
+
+        let mut simulator = FakeSimulator::new(Duration::ZERO);
+        simulator.queue_reads("L:A32NX_AIRFRAME_ZFW", [60000.0, 60100.0]);
+        simulator.queue_reads("L:A32NX_AIRFRAME_GW", [65000.0, 65100.0]);
+        simulator.queue_reads("L:A32NX_AIRFRAME_GW_CG_PERCENT_MAC", [25.0, 25.01]);
+        for expected in [
+            MATCHED,
+            AircraftMassBalance {
+                zfw: 60100.0,
+                gw: 65100.0,
+                gwcg: 25.01,
+            },
+        ] {
+            simulator.clear_operations();
+            assert_eq!(A32nxInitialiser.readback(&mut simulator).unwrap(), expected);
+            assert_eq!(
+                simulator.operations,
+                [
+                    "L:A32NX_AIRFRAME_ZFW",
+                    "L:A32NX_AIRFRAME_GW",
+                    "L:A32NX_AIRFRAME_GW_CG_PERCENT_MAC",
+                ]
+                .map(|variable| Operation::Read {
+                    variable: variable.to_owned(),
+                    unit: None,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn a32nx_readback_reports_each_failed_variable_and_stops_reading() {
+        use crate::aircraft_initialisation::AircraftInitialiser;
+
+        let variables = [
+            "L:A32NX_AIRFRAME_ZFW",
+            "L:A32NX_AIRFRAME_GW",
+            "L:A32NX_AIRFRAME_GW_CG_PERCENT_MAC",
+        ];
+        for (failed_index, failed_variable) in variables.iter().enumerate() {
+            // None exercises an SDK read failure; non-finite values exercise
+            // the SimulatorAdapter finite-value contract used by MsfsSimulator.
+            for invalid in [
+                None,
+                Some(f64::NAN),
+                Some(f64::INFINITY),
+                Some(f64::NEG_INFINITY),
+            ] {
+                let mut simulator = FakeSimulator::new(Duration::ZERO);
+                for (variable, actual) in variables.into_iter().zip([60000.0, 65000.0, 25.0]) {
+                    let value = if variable == *failed_variable {
+                        invalid.unwrap_or(actual)
+                    } else {
+                        actual
+                    };
+                    simulator.queue_reads(variable, [value]);
+                }
+                if invalid.is_none() {
+                    simulator.failure = Some(Failure::Read((*failed_variable).to_owned()));
+                }
+                let error = A32nxInitialiser.readback(&mut simulator).unwrap_err();
+                match (invalid, error) {
+                    (
+                        None,
+                        InitialisationError::Readback(SimulatorError::CalculatorCodeReadFailed {
+                            variable,
+                        }),
+                    )
+                    | (
+                        Some(_),
+                        InitialisationError::Readback(SimulatorError::NonFiniteRead {
+                            variable,
+                            ..
+                        }),
+                    ) => {
+                        assert_eq!(variable, *failed_variable);
+                    }
+                    unexpected => panic!("unexpected readback error: {unexpected:?}"),
+                }
+                assert_eq!(simulator.operations.len(), failed_index + 1);
+            }
+        }
+    }
+
+    #[test]
+    fn a32nx_submission_stub_fails_safely_without_replay_or_telemetry() {
         let fixture = initialisation_fixture();
         let mut simulator = FakeSimulator::new(duration(100.0));
         simulator.queue_reads(ARMED_VARIABLE, [1.0]);
@@ -969,14 +1064,6 @@ unit = "radians"
             error.downcast_ref::<InitialisationError>(),
             Some(InitialisationError::NotImplemented {
                 operation: "submission"
-            })
-        ));
-        assert!(matches!(
-            runtime
-                .aircraft_initialiser
-                .readback(runtime.simulator.as_mut()),
-            Err(InitialisationError::NotImplemented {
-                operation: "readback"
             })
         ));
         runtime.stop().unwrap();
