@@ -1,9 +1,9 @@
 format_version = 1
 input_file = "scenario.csv"
 
-# Optional actual aircraft mass/balance targets. Readback is implemented, but
-# submission is a safe TODO stub: detected A32NX aircraft currently fail on arming;
-# unsupported or unidentified aircraft skip initialisation and start replay.
+# Optional actual aircraft mass/balance targets. Detected A32NX aircraft load
+# these targets on arming and wait for readiness before replay; unsupported or
+# unidentified aircraft skip initialisation and start replay.
 # [initialisation]
 # zfw = 60000.0 # kg
 # gw = 65000.0  # kg

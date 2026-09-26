@@ -95,8 +95,17 @@ pub enum ConfigError {
 /// Initialisation submission, readback, readiness and deadline failures.
 #[derive(Debug, Error)]
 pub enum InitialisationError {
-    #[error("aircraft initialisation {operation} is not implemented")]
-    NotImplemented { operation: &'static str },
+    #[error("invalid A32NX loading targets {targets:?}: {reason}")]
+    InvalidLoadingTargets {
+        targets: crate::config::InitialisationConfig,
+        reason: &'static str,
+    },
+    #[error(
+        "A32NX loading targets {targets:?} are unreachable within passenger, cargo and baggage constraints"
+    )]
+    UnreachableLoading {
+        targets: crate::config::InitialisationConfig,
+    },
     #[error(
         "aircraft initialisation timed out after 30 simulator seconds; targets (kg, kg, % MAC): {targets:?}; latest actual values: {latest:?}"
     )]

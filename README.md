@@ -20,7 +20,8 @@ Current source layout:
 - `src/` contains the crate modules:
   - `lib.rs` (crate entry, tests module wiring)
   - `config.rs`, `playback.rs`, `recording.rs`, `cursor.rs`, `replayer.rs`, `simulator.rs`,
-    `gauge.rs`, `gauge_runtime.rs`, `initialisation.rs`, `aircraft_initialisation.rs`, and `error.rs`.
+    `gauge.rs`, `gauge_runtime.rs`, `initialisation.rs`, `aircraft_initialisation.rs`,
+    `aircraft_initialisation/a32nx.rs`, and `error.rs`.
 - `src/tests/` contains helper modules used by host-side tests (`playback`, `shared`, `validation`).
 - `example/` contains `replayer_config.toml` and `scenario.csv`.
 - `scripts/` contains build, dev, and install helpers.
@@ -126,20 +127,34 @@ gwcg = 25.0  # gross-weight centre of gravity, percent MAC
 
 All three fields are required when the section is present. Values must be numeric
 and finite; masses must be positive and `gw >= zfw`. Unknown fields are rejected.
-Aircraft-specific loading limits will be validated by the aircraft initialisation component.
+Aircraft-specific loading limits are validated by the aircraft initialisation component.
 This optional addition uses `format_version = 1`; omitting the section retains
 immediate playback on arming. No timeout, tolerance or unit fields are configurable.
 
-**Loading-value calculation is not implemented yet.** Aircraft detection,
-loading writes and actual mass/balance readback are implemented. Submission first
-calculates native loading values; that calculation currently returns a typed
-unimplemented error before any loading writes. Enabling this section on a detected A32NX currently fails safely
-on arming, even if the aircraft already meets the targets. Unsupported or
+Aircraft detection, loading calculation, loading writes and actual mass/balance
+readback are implemented. Submission calculates all native loading values before
+writing any of them. Invalid or unreachable targets return a typed error with the
+requested targets and stop initialisation without loading writes. Unsupported or
 unidentified aircraft log that initialisation was skipped and start replay immediately,
 without enforcing mass/CG targets. The readiness gate is implemented and
 tested with a fake simulator.
 
-Once loading-value calculation is implemented, submission writes passenger stations
+The calculation is a reduced Rust port of the author's local Python load-calculator
+prototype (`tools/a32nx-load-calculator/calculate.py`). It uses
+84 kg per passenger and a 20 kg baggage allowance per passenger, included in cargo.
+ZFW must be 42,500–64,300 kg and GW must be between ZFW and 79,000 kg. Fuel is
+`GW - ZFW`, using the calculator's fixed density of 3.039075693483925 kg/US gal.
+It fills AUX, MAIN, then CENTER, with symmetric wing loads and a total capacity
+of 6,267 US gal. Subtracting fuel and empty-aircraft moments from the requested
+gross-weight moment determines the required payload moment; ZFWCG is derived.
+The solver tries passenger totals nearest the EFB preference (lower totals first
+on ties), chooses feasible integer seating closest to the EFB distribution
+(lexicographic A/B/C/D tie break), then interpolates between the cargo moment
+extremes. It respects station capacities and baggage allowance. The search uses
+fixed-size storage and runs once on arming, before any loading writes.
+
+Submission first writes `L:A32NX_WB_PER_PAX_WEIGHT = 84` and
+`L:A32NX_WB_PER_BAG_WEIGHT = 20` (native kg), then passenger stations
 A/B/C/D, the four cargo stations, fuel left/right auxiliary tanks, left/right main
 tanks, centre tank, total fuel and desired percentage, in that order. It then sets
 `L:A32NX_BOARDING_RATE = 0` and `L:A32NX_EFB_REFUEL_RATE_SETTING = 2`
@@ -155,8 +170,13 @@ The mappings are verified against A32NX revision
 [cabin station identifiers](https://github.com/flybywiresim/aircraft/blob/2baa2b35eadaf4c78e172ce41bbe6b40b4aeafb2/fbw-a32nx/src/base/flybywire-aircraft-a320-neo/config/a32nx/a320-251n/cabin.json5),
 [boarding rates](https://github.com/flybywiresim/aircraft/blob/2baa2b35eadaf4c78e172ce41bbe6b40b4aeafb2/fbw-common/src/wasm/systems/systems/src/payload/mod.rs),
 and [refuelling implementation](https://github.com/flybywiresim/aircraft/blob/2baa2b35eadaf4c78e172ce41bbe6b40b4aeafb2/fbw-a32nx/src/systems/instruments/src/MCDU/legacy/A32NX_Core/A32NX_Refuel.ts).
-Passenger values encode seat flags; calculating these and cargo/fuel distribution
-from ZFW/GW/GWCG is deferred. No placeholder values are submitted.
+Passenger values encode seat flags using 31-bit words with a 32-bit stride,
+skipping bit 31. The passenger weight is consumed in native kg by the payload
+system; the bag weight is the EFB baggage setting. These weight interfaces were
+also checked in the supplied local A32NX checkout at
+`ce46d9dbc7a90bd9afddc75d61c64316a6f78d0d` in
+`fbw-common/src/wasm/systems/systems/src/payload/mod.rs` and
+`fbw-common/src/systems/instruments/src/EFB/Ground/Pages/Payload/NarrowBody/A320Payload.tsx`.
 
 Readback uses these A32NX local variables, with no SDK unit conversion:
 
@@ -173,8 +193,7 @@ The values come from actual payload and fuel in the
 [A32NX airframe calculation](https://github.com/flybywiresim/aircraft/blob/2baa2b35eadaf4c78e172ce41bbe6b40b4aeafb2/fbw-a32nx/src/wasm/systems/a320_systems/src/airframe/mod.rs).
 The [airframe output implementation](https://github.com/flybywiresim/aircraft/blob/2baa2b35eadaf4c78e172ce41bbe6b40b4aeafb2/fbw-common/src/wasm/systems/systems/src/airframe/mod.rs)
 publishes masses rounded to 1 kg and CG rounded to 0.01 percentage points of MAC.
-Readback preserves those values without additional rounding. Until loading-value calculation is
-implemented, the normal arming path fails before reaching readback.
+Readback preserves those values without additional rounding.
 
 Aircraft support is checked once on each arm frame requesting initialisation,
 using `(A:ATC MODEL, string)` and the existence of `L:A32NX_IS_READY`.
@@ -510,10 +529,13 @@ commented out, verify the existing scenario still starts on arming and records i
 the `/work` location above. Then enable the example's three targets and reload
 using the A32NX. Record the `ATC MODEL` string, and repeat with a custom livery
 whose title differs. With either accepted A20N model string and `A32NX_IS_READY`
-registered (whether zero or one), arming must report the
-unimplemented loading-value calculation error, reset `L:REPLAYER_ARMED`
-to `0`, and produce no replay control writes or telemetry file. Further arming
-must not restart the failed gauge; reload it for another attempt.
+registered (whether zero or one), arming must submit loading once and wait for
+the actual mass/CG targets before producing replay controls or telemetry. Disable
+GSX payload/fuel synchronisation and finish existing boarding/refuelling first;
+avoid editing EFB loads during the test. Change GWCG to an unreachable value such
+as 99 and verify arming reports a loading error, resets `L:REPLAYER_ARMED` to `0`,
+and produces no loading writes, replay control writes or telemetry file. Further
+arming must not restart the failed gauge; reload it for another attempt.
 
 With an aircraft reporting a different model, such as C172,
 use an input/recording configuration valid for that aircraft and arm with
@@ -535,8 +557,8 @@ Record the A32NX source revision (mapping verified at
 This diagnostic check produces no replay telemetry; normal replay output remains
 in `/work` as described above.
 
-After implementing loading-value calculation, repeat the example with initialisation
-enabled and verify all desired values are written before both instant rate settings
+Repeat the example with initialisation enabled and verify the 84/20 kg weight
+settings and all desired values are written before both instant rate settings
 and both start requests. Check actual-aircraft convergence, timeout and control
 release, and the generated telemetry in `/work` after readiness. Successful loading
 still requires this manual validation.

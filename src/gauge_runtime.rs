@@ -899,6 +899,9 @@ unit = "radians"
             .string_reads
             .extend([Ok("unknown".to_owned()), Ok("A20N".to_owned())]);
         simulator.queue_reads("L:A32NX_IS_READY", [0.0]);
+        simulator.queue_reads("L:A32NX_AIRFRAME_ZFW", [59000.0]);
+        simulator.queue_reads("L:A32NX_AIRFRAME_GW", [64000.0]);
+        simulator.queue_reads("L:A32NX_AIRFRAME_GW_CG_PERCENT_MAC", [25.0]);
         let replayer = Replayer::with_config_path(fixture.config_path.clone());
         let simulator = Rc::new(RefCell::new(simulator));
         let mut runtime = GaugeRuntime::new(
@@ -911,13 +914,8 @@ unit = "radians"
         runtime.stop().unwrap();
         fixture.clear_telemetry_files();
         runtime.pre_update().unwrap();
-        let error = runtime.pre_update().unwrap_err();
-        assert!(matches!(
-            error.downcast_ref::<InitialisationError>(),
-            Some(InitialisationError::NotImplemented {
-                operation: "loading-value calculation"
-            })
-        ));
+        runtime.pre_update().unwrap();
+        assert!(runtime.initialisation.is_some());
         assert_eq!(
             simulator
                 .borrow_mut()
@@ -1043,8 +1041,10 @@ unit = "radians"
     }
 
     #[test]
-    fn a32nx_loading_calculation_stub_fails_safely_without_replay_or_telemetry() {
-        let fixture = initialisation_fixture();
+    fn unreachable_a32nx_loading_fails_safely_without_replay_or_telemetry() {
+        let fixture = Fixture::new(&format!(
+            "{CONFIG}\n[initialisation]\nzfw = 60000.0\ngw = 65000.0\ngwcg = 99.0\n"
+        ));
         let mut simulator = FakeSimulator::new(duration(100.0));
         simulator.queue_reads(ARMED_VARIABLE, [1.0]);
         simulator
@@ -1062,9 +1062,7 @@ unit = "radians"
         let error = runtime.pre_update().unwrap_err();
         assert!(matches!(
             error.downcast_ref::<InitialisationError>(),
-            Some(InitialisationError::NotImplemented {
-                operation: "loading-value calculation"
-            })
+            Some(InitialisationError::UnreachableLoading { .. })
         ));
         runtime.stop().unwrap();
         assert!(runtime.initialisation.is_none());
