@@ -21,6 +21,9 @@
 /// Arming state and transition tracking used by runtime start/stop control.
 mod arm;
 
+#[cfg(any(target_arch = "wasm32", test))]
+mod aircraft_initialisation;
+
 #[cfg(target_arch = "wasm32")]
 /// MSFS gauge entrypoint and event loop.
 mod gauge;
@@ -38,6 +41,7 @@ pub mod config;
 /// Scenario cursor abstraction, readers, and row interpolation sources.
 pub mod cursor;
 pub mod error;
+pub mod initialisation;
 pub mod playback;
 pub mod recording;
 

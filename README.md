@@ -20,7 +20,8 @@ Current source layout:
 - `src/` contains the crate modules:
   - `lib.rs` (crate entry, tests module wiring)
   - `config.rs`, `playback.rs`, `recording.rs`, `cursor.rs`, `replayer.rs`, `simulator.rs`,
-    `gauge.rs`, `gauge_runtime.rs`, and `error.rs`.
+    `gauge.rs`, `gauge_runtime.rs`, `initialisation.rs`, `aircraft_initialisation.rs`,
+    `aircraft_initialisation/a32nx.rs`, and `error.rs`.
 - `src/tests/` contains helper modules used by host-side tests (`playback`, `shared`, `validation`).
 - `example/` contains `replayer_config.toml` and `scenario.csv`.
 - `scripts/` contains build, dev, and install helpers.
@@ -32,6 +33,21 @@ Current source layout:
 - Replay scheduling and frame orchestration: `src/replayer.rs`
 - MSFS simulation adapter and live loop: `src/simulator.rs`, `src/gauge.rs`, `src/gauge_runtime.rs`
 - Telemetry output: `src/recording.rs`
+
+`GaugeRuntime` coordinates arming, aircraft detection, initialisation and playback start.
+`Replayer` prepares scenario cursors, starts playback explicitly, and advances
+frames using a supplied simulator timestamp; it does not receive a simulator
+adapter. `SimulatorAdapter` provides only low-level reads, writes, validation and
+the clock, including a generic aircraft-string read operation. The separate
+`A32nxInitialiser` component owns aircraft detection, loading submission and
+mass/balance readback behind the small `AircraftInitialiser` interface, allowing
+runtime tests to substitute it independently. The runtime has one explicit
+constructor taking the replayer, a `Box<dyn SimulatorAdapter>` and a
+`Box<dyn AircraftInitialiser>`. Neither `GaugeRuntime` nor `AircraftInitialiser`
+has generic type parameters; initialisation methods receive a
+`&mut dyn SimulatorAdapter`. Tests retain shared handles to fake state for clock
+control and operation assertions. `Initialisation` contains only
+the simulator-independent tolerance and deadline checks.
 
 ## MVP scope
 
@@ -100,6 +116,119 @@ The repository provides this default as `example/replayer_config.toml`. The
 installation script copies it to `/work/replayer_config.toml` together with the
 default scenario.
 
+An optional section can demand actual aircraft mass and balance before replay:
+
+```toml
+[initialisation]
+zfw = 60000.0 # zero-fuel weight, kg
+gw = 65000.0  # gross weight, kg
+gwcg = 25.0  # gross-weight centre of gravity, percent MAC
+```
+
+All three fields are required when the section is present. Values must be numeric
+and finite; masses must be positive and `gw >= zfw`. Unknown fields are rejected.
+Aircraft-specific loading limits are validated by the aircraft initialisation component.
+This optional addition uses `format_version = 1`; omitting the section retains
+immediate playback on arming. No timeout, tolerance or unit fields are configurable.
+
+Aircraft detection, loading calculation, loading writes and actual mass/balance
+readback are implemented. Submission calculates all native loading values before
+writing any of them. Invalid or unreachable targets return a typed error with the
+requested targets and stop initialisation without loading writes. Unsupported or
+unidentified aircraft log that initialisation was skipped and start replay immediately,
+without enforcing mass/CG targets. The readiness gate is implemented and
+tested with a fake simulator.
+
+The calculation is a reduced Rust port of the author's local Python load-calculator
+prototype (`tools/a32nx-load-calculator/calculate.py`). It uses
+84 kg per passenger and a 20 kg baggage allowance per passenger, included in cargo.
+ZFW must be 42,500–64,300 kg and GW must be between ZFW and 79,000 kg. Fuel is
+`GW - ZFW`, using the calculator's fixed density of 3.039075693483925 kg/US gal.
+It fills AUX, MAIN, then CENTER, with symmetric wing loads and a total capacity
+of 6,267 US gal. Subtracting fuel and empty-aircraft moments from the requested
+gross-weight moment determines the required payload moment; ZFWCG is derived.
+The solver tries passenger totals nearest the EFB preference (lower totals first
+on ties), chooses feasible integer seating closest to the EFB distribution
+(lexicographic A/B/C/D tie break), then interpolates between the cargo moment
+extremes. It respects station capacities and baggage allowance. The search uses
+fixed-size storage and runs once on arming, before any loading writes.
+
+Submission first writes `L:A32NX_WB_PER_PAX_WEIGHT = 84` and
+`L:A32NX_WB_PER_BAG_WEIGHT = 20` (native kg), then passenger stations
+A/B/C/D, the four cargo stations, fuel left/right auxiliary tanks, left/right main
+tanks, centre tank, total fuel and desired percentage, in that order. It then sets
+`L:A32NX_BOARDING_RATE = 0` and `L:A32NX_EFB_REFUEL_RATE_SETTING = 2`
+(instant loading), followed by `L:A32NX_BOARDING_STARTED_BY_USR = 1` and
+`L:A32NX_REFUEL_STARTED_BY_USR = 1`. Each write uses the existing `msfs-rs`
+calculator-code adapter. A failed write stops the sequence immediately and returns
+a typed submission error with the failing variable. Writes are sequential, not
+transactional: earlier successful writes remain applied after a later failure.
+
+The mappings are verified against A32NX revision
+`2baa2b35eadaf4c78e172ce41bbe6b40b4aeafb2`:
+[payload UI](https://github.com/flybywiresim/aircraft/blob/2baa2b35eadaf4c78e172ce41bbe6b40b4aeafb2/fbw-common/src/systems/instruments/src/EFB/Ground/Pages/Payload/NarrowBody/A320Payload.tsx),
+[cabin station identifiers](https://github.com/flybywiresim/aircraft/blob/2baa2b35eadaf4c78e172ce41bbe6b40b4aeafb2/fbw-a32nx/src/base/flybywire-aircraft-a320-neo/config/a32nx/a320-251n/cabin.json5),
+[boarding rates](https://github.com/flybywiresim/aircraft/blob/2baa2b35eadaf4c78e172ce41bbe6b40b4aeafb2/fbw-common/src/wasm/systems/systems/src/payload/mod.rs),
+and [refuelling implementation](https://github.com/flybywiresim/aircraft/blob/2baa2b35eadaf4c78e172ce41bbe6b40b4aeafb2/fbw-a32nx/src/systems/instruments/src/MCDU/legacy/A32NX_Core/A32NX_Refuel.ts).
+Passenger values encode seat flags using 31-bit words with a 32-bit stride,
+skipping bit 31. The passenger weight is consumed in native kg by the payload
+system; the bag weight is the EFB baggage setting. These weight interfaces were
+also checked in the supplied local A32NX checkout at
+`ce46d9dbc7a90bd9afddc75d61c64316a6f78d0d` in
+`fbw-common/src/wasm/systems/systems/src/payload/mod.rs` and
+`fbw-common/src/systems/instruments/src/EFB/Ground/Pages/Payload/NarrowBody/A320Payload.tsx`.
+
+Readback uses these A32NX local variables, with no SDK unit conversion:
+
+| Field | Variable | Native unit |
+| --- | --- | --- |
+| `zfw` | `L:A32NX_AIRFRAME_ZFW` | kg |
+| `gw` | `L:A32NX_AIRFRAME_GW` | kg |
+| `gwcg` | `L:A32NX_AIRFRAME_GW_CG_PERCENT_MAC` | percent MAC |
+
+Each call reads a fresh ZFW, GW and GWCG snapshot in that order, independently of
+configured telemetry. Read failures and non-finite values propagate as typed
+readback errors containing the simulator variable; no partial snapshot is returned.
+The values come from actual payload and fuel in the
+[A32NX airframe calculation](https://github.com/flybywiresim/aircraft/blob/2baa2b35eadaf4c78e172ce41bbe6b40b4aeafb2/fbw-a32nx/src/wasm/systems/a320_systems/src/airframe/mod.rs).
+The [airframe output implementation](https://github.com/flybywiresim/aircraft/blob/2baa2b35eadaf4c78e172ce41bbe6b40b4aeafb2/fbw-common/src/wasm/systems/systems/src/airframe/mod.rs)
+publishes masses rounded to 1 kg and CG rounded to 0.01 percentage points of MAC.
+Readback preserves those values without additional rounding.
+
+Aircraft support is checked once on each arm frame requesting initialisation,
+using `(A:ATC MODEL, string)` and the existence of `L:A32NX_IS_READY`.
+The supported model is `A20N`; the configured
+localisation key `TT:ATCCOM.AC_MODEL_A20N.0.text` is also accepted. Comparisons
+ignore case and surrounding whitespace. `A32nxInitialiser` owns both checks.
+For a matching model, the adapter calls `check_named_variable` with the unprefixed
+name `A32NX_IS_READY`. It does not register the variable or read its value: an
+existing variable with value zero still counts as supported. Detection ignores
+livery titles. This is a practical interface check, not guaranteed package identity.
+
+Detection has only `Supported` and `Unsupported` outcomes. Other models,
+unavailable, empty, or invalid string results, a missing readiness variable, or
+a failed existence lookup take the unsupported path and do
+not stop the run. No aircraft detection is performed when `[initialisation]` is
+absent. Configured replay input/recording errors and failures after supported
+initialisation begins retain their existing terminal error handling.
+
+Detection references (source verification does not establish in-simulator compatibility):
+
+- The SDK's [`check_named_variable`](https://docs.flightsimulator.com/html/Programming_Tools/WASM/Gauge_API/check_named_variable.htm)
+  returns an existing local variable ID or `-1`, without creating a variable.
+  The [A32NX flight-control module](https://github.com/flybywiresim/aircraft/blob/2baa2b35eadaf4c78e172ce41bbe6b40b4aeafb2/fbw-a32nx/src/wasm/fbw_a320/src/FlyByWireInterface.cpp#L303)
+  registers `A32NX_IS_READY`; its value is not needed for identification.
+- The MSFS 2020 SDK documents [`ATC MODEL` as a string](https://docs.flightsimulator.com/html/Programming_Tools/SimVars/Aircraft_SimVars/Aircraft_RadioNavigation_Variables.htm)
+  and [string results from the WASM calculator API](https://docs.flightsimulator.com/html/Programming_Tools/WASM/Gauge_API/execute_calculator_code.htm).
+- FlyByWire's [base aircraft configuration](https://github.com/flybywiresim/aircraft/blob/2baa2b35eadaf4c78e172ce41bbe6b40b4aeafb2/fbw-a32nx/src/base/flybywire-aircraft-a320-neo/SimObjects/AirPlanes/FlyByWire_A320_NEO/aircraft.cfg)
+  sets `atc_model` to the A20N localisation key. A [developer report](https://devsupport.flightsimulator.com/t/untranslated-values-returned-by-simconnect/3537)
+  describes MSFS returning the raw key through SimConnect; the matcher accepts
+  both that key and the A20N model code. Actual WASM readback remains to be
+  confirmed by the manual validation below.
+- The locked [`msfs-rs` revision](https://github.com/flybywiresim/msfs-rs/tree/2f697b9aac9fa3c00474f901a7f7ee4218cf534b)
+  exposes this API through `msfs::sys`. The adapter checks the returned pointer and
+  UTF-8 before copying the string, allowing detection failures to skip safely.
+
 `inject` and `record` section indexes are zero-based, contiguous, and define
 stable processing and output-column order. Missing indexes and empty or
 duplicate signal names are invalid. Each injection's CSV columns are derived
@@ -144,7 +273,26 @@ one read-only scenario cursor per injection. The MVP skips a full-file
 preflight pass and assumes the scenario is correctly formatted. Initialization
 reads the first two samples for every cursor. Subsequent simulator frames read
 forward until every cursor brackets the current scenario time or reaches EOF.
-Setting the LVAR back to `0` while running has no effect in the current MVP;
+When `[initialisation]` is present and aircraft detection reports support, the
+arm frame submits the targets once and enters an initialising state. Each simulator frame checks actual aircraft mass
+and balance. Playback starts immediately on the first frame where all three
+values simultaneously meet these inclusive absolute tolerances:
+
+- ZFW: within 100 kg of its target;
+- GW: within 100 kg of its target;
+- GWCG: within 0.01 percentage points of MAC (25.00 accepts 24.99 through 25.01).
+
+There is no dwell period or continuing readiness check once replay starts.
+The deadline is 30 elapsed simulator seconds from the arm frame, under the
+unpaused, 1x assumption. At or after 30 seconds, timeout takes precedence over
+readiness and reports the targets and latest available snapshot. Backwards
+simulator time, non-finite readback, and adapter failures terminate the run.
+Waiting does not inject replay controls, advance scenario cursors, or create
+telemetry. On readiness, the module creates telemetry using the current host
+UTC timestamp, starts scenario time at zero, and injects then samples that frame.
+Overlapping starts are rejected while initialising as well as while running.
+
+Setting the LVAR back to `0` while initialising or running has no effect in the current MVP;
 operator-requested abort handling is a future requirement.
 
 While running, replay commands take precedence over local pilot controls. The
@@ -155,11 +303,17 @@ autopilot modes. Scenarios requiring autopilot arbitration or mode changes are
 outside MVP scope.
 
 After the final sample, the module stops injecting, resets
-`L:REPLAYER_ARMED` to `0`, and returns control to the user. It does not restore
+`L:REPLAYER_ARMED` and its edge detector to `0`, and returns control to the user.
+A new arm can be recognised on the next frame without an intervening idle frame.
+It does not restore
 prior control positions or autopilot modes. On a failure, it performs the same
 best-effort cleanup, flushes and closes telemetry where possible, retains the
-partial telemetry file under its normal timestamped name, reports the error,
-and exits its WASM event loop without panicking. Operator-requested abort
+partial telemetry file under its normal timestamped name, and reports the error.
+Terminal failures stop processing further updates, including new arming requests;
+the gauge awaits event-stream closure before returning without panicking, including
+when the initial arming reset fails during gauge setup. Reload
+the gauge before another attempt. Initialisation failures create no telemetry file.
+Operator-requested abort
 handling and input interception remain to be implemented.
 
 ## Scenario CSV
@@ -366,6 +520,49 @@ Manual validation (requires MSFS; not established by host tests):
 - Inspect `telemetry_YYYYMMDDTHHMMSS.csv` in the package-specific `/work` mount.
   On Microsoft Store installations this is
   `%LOCALAPPDATA%\Packages\Microsoft.FlightSimulator_8wekyb3d8bbwe\LocalState\packages\flybywire-aircraft-a320-neo\work`.
+
+### Initialisation validation
+
+Record the MSFS 2020 build, A32NX channel/version or commit, and locked `msfs-rs`
+revision with each manual check. With the shipped example's initialisation section
+commented out, verify the existing scenario still starts on arming and records in
+the `/work` location above. Then enable the example's three targets and reload
+using the A32NX. Record the `ATC MODEL` string, and repeat with a custom livery
+whose title differs. With either accepted A20N model string and `A32NX_IS_READY`
+registered (whether zero or one), arming must submit loading once and wait for
+the actual mass/CG targets before producing replay controls or telemetry. Disable
+GSX payload/fuel synchronisation and finish existing boarding/refuelling first;
+avoid editing EFB loads during the test. Change GWCG to an unreachable value such
+as 99 and verify arming reports a loading error, resets `L:REPLAYER_ARMED` to `0`,
+and produces no loading writes, replay control writes or telemetry file. Further
+arming must not restart the failed gauge; reload it for another attempt.
+
+With an aircraft reporting a different model, such as C172,
+use an input/recording configuration valid for that aircraft and arm with
+`[initialisation]` enabled. Verify the console reports initialisation skipped,
+playback starts on that frame at time zero, and normal telemetry is created in
+`/work`. Verify another arm detects the aircraft again. An unreadable model takes
+the same path; host tests exercise that failure without requiring MSFS.
+Also check an A20N aircraft without `A32NX_IS_READY`: initialisation must be
+skipped and the existence check must leave that variable absent. A failed lookup
+has the same skip behavior, covered by host tests.
+
+For readback validation, use a diagnostic build that calls `A32nxInitialiser::readback`
+directly without submitting targets or injecting controls. Compare its three values
+with the same local variables in the simulator, then change actual payload and fuel
+and verify subsequent reads follow the published values in kg and percent MAC.
+Record the A32NX source revision (mapping verified at
+`2baa2b35eadaf4c78e172ce41bbe6b40b4aeafb2`) and `msfs-rs` revision
+`2f697b9aac9fa3c00474f901a7f7ee4218cf534b` alongside the MSFS build and scenario.
+This diagnostic check produces no replay telemetry; normal replay output remains
+in `/work` as described above.
+
+Repeat the example with initialisation enabled and verify the 84/20 kg weight
+settings and all desired values are written before both instant rate settings
+and both start requests. Check actual-aircraft convergence, timeout and control
+release, and the generated telemetry in `/work` after readiness. Successful loading
+still requires this manual validation.
+Host tests and WASM compilation do not establish that simulator compatibility.
 
 ## MVP simulator mappings
 

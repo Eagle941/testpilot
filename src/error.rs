@@ -14,6 +14,11 @@ use thiserror::Error;
 /// Validation failures for replay TOML contents.
 #[derive(Debug, Error)]
 pub enum ConfigError {
+    #[error("invalid initialisation.{field}: {reason}")]
+    InvalidInitialisation {
+        field: &'static str,
+        reason: &'static str,
+    },
     #[error(transparent)]
     FileIo(#[from] io::Error),
 
@@ -85,6 +90,40 @@ pub enum ConfigError {
 
     #[error("signal `{name}` is used in both inject and record sections")]
     DuplicateSignalAcrossSections { name: String },
+}
+
+/// Initialisation submission, readback, readiness and deadline failures.
+#[derive(Debug, Error)]
+pub enum InitialisationError {
+    #[error("invalid A32NX loading targets {targets:?}: {reason}")]
+    InvalidLoadingTargets {
+        targets: crate::config::InitialisationConfig,
+        reason: &'static str,
+    },
+    #[error(
+        "A32NX loading targets {targets:?} are unreachable within passenger, cargo and baggage constraints"
+    )]
+    UnreachableLoading {
+        targets: crate::config::InitialisationConfig,
+    },
+    #[error(
+        "aircraft initialisation timed out after 30 simulator seconds; targets (kg, kg, % MAC): {targets:?}; latest actual values: {latest:?}"
+    )]
+    Timeout {
+        targets: crate::config::InitialisationConfig,
+        latest: Option<crate::initialisation::AircraftMassBalance>,
+    },
+    #[error("initialisation simulator time moved backwards from {previous:?} to {current:?}")]
+    ClockMovedBackwards {
+        previous: Duration,
+        current: Duration,
+    },
+    #[error("initialisation readback {field} must be finite, got {value}")]
+    NonFiniteReadback { field: &'static str, value: f64 },
+    #[error("failed to submit aircraft initialisation targets: {0}")]
+    Submit(#[source] SimulatorError),
+    #[error("failed to read actual aircraft mass and balance: {0}")]
+    Readback(#[source] SimulatorError),
 }
 
 /// Replay lifecycle and simulator-clock failures.

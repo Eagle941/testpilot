@@ -65,6 +65,12 @@ Keep simulator-independent logic separate from MSFS bindings. Prefer modules wit
 
 The configuration parser, time-series parser, scheduler, interpolation, and serialization code should run and be testable on the host without MSFS. Keep direct `msfs-rs` calls behind a small adapter or boundary so tests can use a fake simulator implementation.
 
+Keep `SimulatorAdapter` limited to generic simulator I/O and the clock. Put
+aircraft detection, loading submission and mass/balance readback in a separate aircraft
+initialisation component. `GaugeRuntime` coordinates arming, readiness checks
+and playback start; `Replayer` prepares and advances the scenario without
+receiving a simulator adapter. Keep tolerance and deadline checks pure.
+
 Run-time memory use must not grow with the full scenario or telemetry duration. Stream or process input and output in bounded chunks with only the lookahead required for interpolation. Do not load an arbitrarily long time series or retain all recorded samples in memory.
 
 Prefer a library/WASM entry point appropriate for `msfs-rs` rather than a conventional long-running native `main` loop. Follow the current `msfs-rs` gauge/module lifecycle and examples when establishing entry points and Cargo crate settings.
@@ -93,6 +99,12 @@ Use an explicit, documented configuration format. The configuration must define:
 - each recorded parameter's logical name and prefixed simulator `variable`; recordings using the `A:` prefix require an MSFS `unit`, while recordings using any other prefix must not specify `unit`;
 - optional metadata needed to reproduce the test.
 
+An optional `[initialisation]` table contains all three numeric targets: `zfw`
+and `gw` in kilograms, and `gwcg` in percent MAC. Require finite values, positive
+masses, and `gw >= zfw`; reject missing or unknown fields. Keep this backwards
+compatible optional addition under `format_version = 1`. Actual aircraft loading
+limits belong to the simulator adapter, not speculative parser limits.
+
 Do not add configuration fields for behavior fixed by the format or supported signal catalog. In particular, the MVP configuration does not contain a scenario time unit, time origin, telemetry section, parameter type, or interpolation parameter. Document fixed time-unit, time-origin, signal-type, interpolation, telemetry sampling, and sampling-order semantics in the format specification.
 
 For the MVP, load configuration from the hardcoded `/work/replayer_config.toml` path in the package-specific writable MSFS mount and resolve relative input paths from `/work`. The configuration filename is lowercase. The configuration `format_version` governs both the TOML and scenario CSV contract.
@@ -117,7 +129,7 @@ For independently sampled series, use a standard rectangular CSV with adjacent `
 
 Do not impose a fixed duration, row-count, or file-size limit. Design parsing and playback so scenarios can use the available disk capacity without requiring proportional RAM. The MVP skips a full-file preflight pass and assumes the scenario is correctly formatted.
 
-Open the scenario independently once per configured injection so each signal has its own sequential file position and bounded two-sample lookahead. During initialization on the arm frame, read each cursor's CSV header and first two data rows, then interpolate and inject the first frame at scenario time zero. On each subsequent frame, read each cursor forward until its samples bracket the current scenario time or the series reaches EOF; this may consume multiple rows after a late frame. Never load the complete scenario into memory. File access, CSV parsing, or numeric parsing errors encountered during playback must include useful file, line, column, or signal context and terminate safely without panicking.
+Open the scenario independently once per configured injection so each signal has its own sequential file position and bounded two-sample lookahead. During preparation on the arm frame, read each cursor's CSV header and first two data rows. If `[initialisation]` is absent, interpolate and inject the first frame immediately at scenario time zero; otherwise detect aircraft support on the arm frame. Supported aircraft must pass the initialisation gate before starting scenario time, injection, and telemetry. Unsupported or unidentified aircraft log that initialisation was skipped and start playback immediately. On each subsequent playback frame, read each cursor forward until its samples bracket the current scenario time or the series reaches EOF; this may consume multiple rows after a late frame. Never load the complete scenario into memory. File access, CSV parsing, or numeric parsing errors encountered during playback must include useful file, line, column, or signal context and terminate safely without panicking.
 
 ## Input Injection and Safety
 
@@ -128,7 +140,7 @@ Open the scenario independently once per configured injection so each signal has
 - Read simulator identifiers only from the trusted replay configuration, never from scenario CSV column names or values.
 - Before playback, verify that required simulator/A32NX interfaces can be resolved where the API permits it.
 - Stop or fail safely when a required injection fails. Do not continue a test while presenting it as valid.
-- Arm and start a run by setting the library-owned `L:REPLAYER_ARMED` local variable to `1`. Initialize and reset it to `0` while idle and after any terminal run state. Reject overlapping runs. Setting it to `0` while running has no effect in the current MVP; operator-requested abort handling is a future requirement.
+- Arm a run by setting the library-owned `L:REPLAYER_ARMED` local variable to `1`. Without `[initialisation]`, start playback immediately; otherwise let `A32nxInitialiser` detect support once per arm using `ATC MODEL` and the existence of `L:A32NX_IS_READY`. Match `A20N` or its configured `TT:ATCCOM.AC_MODEL_A20N.0.text` key, ignoring case and surrounding whitespace. For a matching model, use the non-registering `check_named_variable` lookup for `A32NX_IS_READY`; require existence without reading its value, so zero is accepted. Do not inspect livery titles. A missing variable or failed lookup counts as unsupported. Keep model matching and the existence requirement inside `A32nxInitialiser`. Detection has only supported and unsupported outcomes; unidentified aircraft and detection read failures count as unsupported, log that initialisation was skipped, and start playback immediately without enforcing mass/CG targets. Do not detect when the section is absent. For supported aircraft, submit actual aircraft loading targets once, then check actual ZFW, GW and gross-weight CG each frame. Start when all three simultaneously satisfy inclusive tolerances of 100 kg, 100 kg and 0.01 percentage points of MAC, without a dwell period. Fail at or after 30 elapsed simulator seconds from the arm frame, with timeout taking precedence over readiness. No replay controls or telemetry are produced while waiting; replay time zero and the telemetry filename's host UTC timestamp are established only when playback starts. Use actual aircraft state, not flight-management entries. Until verified simulator integration exists, use TODO comments and typed unimplemented errors, never `todo!()` panics. Initialize and reset arming to `0` while idle and after any terminal run state. Reject overlapping runs during initialisation and playback. Setting arming to `0` while initialising or running has no effect in the current MVP; operator-requested abort handling is a future requirement.
 - While running, replay commands must override local pilot controls using a verified A32NX-compatible input-bypass mechanism. Do not rely on racing competing input events.
 - Treat autopilot configuration as a precondition established by the operator before arming. The MVP does not engage, disengage, change, or restore autopilot modes; scenarios requiring autopilot arbitration are outside scope.
 - On completion or failure, stop injection, reset `L:REPLAYER_ARMED` to `0`, and give control back to the user. Do not restore prior positions or autopilot modes unless a verified restoration mechanism is deliberately added later. Future abort handling and input interception must provide the same cleanup guarantees.
@@ -157,7 +169,7 @@ Output must be a machine-readable CSV saved in the package-specific writable `/w
 - Convert typed errors to `anyhow::Error` only at application or orchestration boundaries that combine unrelated error domains. Do not use `anyhow!`, `bail!`, `Context`, or `with_context`; encode actionable context in typed error variants instead.
 - Do not wrap an error inside another variant of the same error enum merely to add context. Use `map_err` only when converting to a different error layer or adding structured domain information.
 - Report terminal errors through the logging/error facilities available in `msfs-rs`.
-- On a terminal failure, perform best-effort control release, flush and close but do not delete partial telemetry, then return from the WASM event loop/module entry point without panicking.
+- On a terminal failure, perform best-effort control release, flush and close but do not delete partial telemetry, and stop processing simulator updates or further arming requests. Await gauge event-stream closure before returning from the WASM entry point, preserving the `msfs-rs` reload lifecycle without panicking. Initialisation failures release prepared cursors and reset arming without creating telemetry.
 - Model the implemented run lifecycle explicitly, for example: idle, loading, ready, running, stopping, completed, and failed. Add an aborted state when operator-requested abort handling is implemented.
 - Make start, stop, and cleanup operations idempotent where practical.
 - Reject overlapping runs unless concurrency is deliberately implemented and tested.
@@ -207,3 +219,5 @@ Do not report simulator or A32NX compatibility based only on a successful host b
 - Update tests and format documentation when changing parsing, scheduling, injection, or output behavior.
 - Treat changes to timing, units, interpolation, signal mapping, sampling order, and output columns as behavior changes and call them out clearly.
 - Do not add dependencies unless they work on the required WASM target and materially simplify the implementation.
+
+@RTK.md

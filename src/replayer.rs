@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use crate::config::{CONFIG_PATH, RecordingConfig, ReplayConfig};
+use crate::config::{CONFIG_PATH, InitialisationConfig, RecordingConfig, ReplayConfig};
 use crate::cursor::{Frame, Scenario};
 use crate::error::{RecordingError, ReplayerError};
 use crate::recording::TelemetryRecorder;
@@ -72,7 +72,16 @@ pub enum ReplayerUpdate<'a> {
     Completed,
 }
 
-/// Scenario playback and its simulator-clock origin.
+/// Prepared input cursors and configuration, without a telemetry file or replay clock.
+struct PreparedScenario {
+    /// Parsed configuration for this run.
+    config: ReplayConfig,
+    /// Bounded input cursors positioned at their first samples.
+    playback: Scenario,
+    /// Directory where telemetry will be created once playback starts.
+    telemetry_directory: PathBuf,
+}
+
 /// Active scenario execution state.
 struct ActiveScenario {
     /// Parsed scenario with per-signal interpolation cursors.
@@ -85,6 +94,8 @@ struct ActiveScenario {
     recording_schedules: Vec<RecordingSchedule>,
     /// Scenario start time in simulator-clock coordinates.
     started_at: Duration,
+    /// Whether the next frame is the first frame of playback.
+    first_frame_pending: bool,
 }
 
 /// Controls when each recording signal is sampled.
@@ -131,12 +142,14 @@ impl RecordingSchedule {
     }
 }
 
-/// Owns arming, scenario streaming, and simulator-clock scheduling state.
+/// Owns scenario preparation, streaming, recording and playback-clock state.
 pub struct Replayer {
     /// Filesystem path from which replay configuration is loaded.
     config_path: PathBuf,
     /// Active replay state, if a scenario is currently loaded.
     active: Option<ActiveScenario>,
+    /// Prepared scenario awaiting an explicit start, without active replay output.
+    prepared: Option<PreparedScenario>,
 }
 
 impl Replayer {
@@ -150,36 +163,20 @@ impl Replayer {
         Replayer {
             config_path: config_path.into(),
             active: None,
+            prepared: None,
         }
     }
 
-    /// Processes one gauge update.
-    ///
-    /// The arming frame opens and initializes the configured cursor set.
-    /// Simulator time is used once a scenario is loaded.
+    /// Advances an explicitly started replay using the supplied simulator timestamp.
+    /// Preparation alone does not advance cursors or create telemetry.
     pub fn pre_update(
         &mut self,
-        init: bool,
         simulation_time: Duration,
     ) -> anyhow::Result<Option<ReplayerUpdate<'_>>> {
-        if init {
-            self.start_scenario(simulation_time)?;
-        }
         if self.active.is_none() {
             return Ok(None);
         }
-
-        let update = self.update_scenario(simulation_time)?;
-        Ok(Some(match update {
-            ReplayerUpdate::Running {
-                frame,
-                started_now: false,
-            } if init => ReplayerUpdate::Running {
-                frame,
-                started_now: true,
-            },
-            update => update,
-        }))
+        self.update_scenario(simulation_time).map(Some)
     }
 
     /// Flushes telemetry and releases all replay state.
@@ -187,15 +184,17 @@ impl Replayer {
     /// Calling this repeatedly is safe. Replay state is released even when the
     /// final telemetry flush fails.
     pub fn reset(&mut self) -> Result<(), RecordingError> {
+        self.prepared = None;
         let Some(mut active) = self.active.take() else {
             return Ok(());
         };
         active.recorder.flush()
     }
 
-    /// Opens config/scenario, initializes cursors, and opens telemetry output.
-    fn start_scenario(&mut self, started_at: Duration) -> anyhow::Result<()> {
-        if self.active.is_some() {
+    /// Opens config/scenario and initialises cursors without starting the replay clock.
+    /// Returns any aircraft targets to the caller that coordinates startup.
+    pub fn prepare_scenario(&mut self) -> anyhow::Result<Option<InitialisationConfig>> {
+        if self.active.is_some() || self.prepared.is_some() {
             return Err(ReplayerError::ScenarioAlreadyLoaded.into());
         }
 
@@ -211,6 +210,29 @@ impl Replayer {
         let scenario_path = config_directory.join(&config.input_file);
         let playback = Scenario::new(&scenario_path, &config)?;
         let telemetry_directory = self.telemetry_directory(&scenario_path)?;
+        let targets = config.initialisation;
+        println!(
+            "TESTPILOT: opened {} with {} signal cursors",
+            scenario_path.display(),
+            playback.signal_count()
+        );
+        self.prepared = Some(PreparedScenario {
+            config,
+            playback,
+            telemetry_directory,
+        });
+        Ok(targets)
+    }
+
+    /// Creates output and starts scenario time when the caller authorises playback.
+    /// The caller is responsible for checking any aircraft readiness requirements.
+    pub fn start_prepared(&mut self, started_at: Duration) -> anyhow::Result<()> {
+        let PreparedScenario {
+            config,
+            playback,
+            telemetry_directory,
+            ..
+        } = self.prepared.take().ok_or(ReplayerError::UpdateWhileIdle)?;
         println!("TESTPILOT: reading host UTC timestamp");
         let recording_started_at = SystemTime::now();
         println!(
@@ -228,17 +250,12 @@ impl Replayer {
             .map(|recording| recording.name.clone())
             .collect();
         let recorder = TelemetryRecorder::new(
-            telemetry_directory,
+            &telemetry_directory,
             &recording_names,
             &injected_names,
             recording_started_at,
         )?;
 
-        println!(
-            "TESTPILOT: opened {} with {} signal cursors",
-            scenario_path.display(),
-            playback.signal_count()
-        );
         println!(
             "TESTPILOT: recording telemetry to {}",
             recorder.path().display()
@@ -254,14 +271,21 @@ impl Replayer {
             recorder,
             recording_schedules,
             started_at,
+            first_frame_pending: true,
         });
         println!("TESTPILOT: scenario cursors ready");
         Ok(())
     }
 
+    /// Starts an ungated scenario directly in lifecycle unit tests.
+    #[cfg(test)]
+    fn start_scenario(&mut self, started_at: Duration) -> anyhow::Result<()> {
+        self.prepare_scenario()?;
+        self.start_prepared(started_at)
+    }
+
     #[cfg(target_arch = "wasm32")]
     /// Returns the telemetry output directory for wasm execution.
-    #[cfg(target_arch = "wasm32")]
     fn telemetry_directory(&self, _scenario_path: &Path) -> Result<PathBuf, ReplayerError> {
         Ok(Path::new("/work").to_path_buf())
     }
@@ -292,6 +316,8 @@ impl Replayer {
             return Ok(ReplayerUpdate::Completed);
         }
 
+        let started_now = active.first_frame_pending;
+        active.first_frame_pending = false;
         Ok(ReplayerUpdate::Running {
             frame: InterpolationFrame {
                 elapsed,
@@ -300,7 +326,7 @@ impl Replayer {
                 recording_schedules: &mut active.recording_schedules,
                 recorder: &mut active.recorder,
             },
-            started_now: false,
+            started_now,
         })
     }
 }
@@ -388,10 +414,52 @@ unit = "radians"
         let mut replayer = Replayer::with_config_path(fixture.config_path.clone());
 
         let update = replayer
-            .pre_update(false, time(42.0))
+            .pre_update(time(42.0))
             .unwrap_or_else(|error| panic!("idle update failed: {error:#}"));
 
         assert!(update.is_none());
+    }
+
+    #[test]
+    fn preparation_waits_for_explicit_start_without_a_simulator_dependency() {
+        let fixture = Fixture::new();
+        let contents = fs::read_to_string(&fixture.config_path).unwrap();
+        fs::write(
+            &fixture.config_path,
+            format!("{contents}\n[initialisation]\nzfw = 60000\ngw = 65000\ngwcg = 25\n"),
+        )
+        .unwrap();
+        let mut replayer = Replayer::with_config_path(fixture.config_path.clone());
+        let targets = replayer.prepare_scenario().unwrap().unwrap();
+        assert_eq!(
+            (targets.zfw, targets.gw, targets.gwcg),
+            (60000.0, 65000.0, 25.0)
+        );
+        assert!(replayer.pre_update(time(100.0)).unwrap().is_none());
+        assert!(replayer.pre_update(time(120.0)).unwrap().is_none());
+        assert_eq!(fs::read_dir(&fixture.directory).unwrap().count(), 2);
+        let error = replayer.prepare_scenario().unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<ReplayerError>(),
+            Some(&ReplayerError::ScenarioAlreadyLoaded)
+        );
+
+        replayer.start_prepared(time(125.0)).unwrap();
+        let Some(ReplayerUpdate::Running { frame, started_now }) =
+            replayer.pre_update(time(125.0)).unwrap()
+        else {
+            panic!("expected first replay frame");
+        };
+        assert!(started_now);
+        assert_eq!(frame.elapsed(), Duration::ZERO);
+        assert!(matches!(
+            replayer.pre_update(time(125.05)).unwrap(),
+            Some(ReplayerUpdate::Running {
+                started_now: false,
+                ..
+            })
+        ));
+        replayer.reset().unwrap();
     }
 
     #[test]
@@ -412,8 +480,9 @@ unit = "radians"
         let fixture = Fixture::new();
         let mut replayer = Replayer::with_config_path(fixture.config_path.clone());
 
+        replayer.start_scenario(time(10.0)).unwrap();
         let update = replayer
-            .pre_update(true, time(10.0))
+            .pre_update(time(10.0))
             .unwrap_or_else(|error| panic!("first start failed: {error:#}"));
         assert!(matches!(
             update,
@@ -478,8 +547,9 @@ unit = "radians"
         )
         .unwrap_or_else(|error| panic!("failed to rewrite fixture scenario: {error}"));
 
+        replayer.start_scenario(time(20.0)).unwrap();
         let update = replayer
-            .pre_update(true, time(20.0))
+            .pre_update(time(20.0))
             .unwrap_or_else(|error| panic!("second start failed: {error:#}"));
         assert!(matches!(
             update,
@@ -783,7 +853,8 @@ max_sampling_rate = 1.0
         let fixture = Fixture::new();
         let mut replayer = Replayer::with_config_path(fixture.config_path.clone());
 
-        match replayer.pre_update(true, time(99.0)).unwrap() {
+        replayer.start_scenario(time(99.0)).unwrap();
+        match replayer.pre_update(time(99.0)).unwrap() {
             Some(ReplayerUpdate::Running {
                 started_now: true, ..
             }) => {}
@@ -793,13 +864,13 @@ max_sampling_rate = 1.0
             replayer.active.as_ref().map(|active| active.started_at),
             Some(time(99.0))
         );
-        match replayer.pre_update(false, time(99.05)).unwrap() {
+        match replayer.pre_update(time(99.05)).unwrap() {
             Some(ReplayerUpdate::Running {
                 started_now: false, ..
             }) => {}
             _ => panic!("expected running update with start flag false"),
         }
-        match replayer.pre_update(false, time(99.2)).unwrap() {
+        match replayer.pre_update(time(99.2)).unwrap() {
             Some(ReplayerUpdate::Completed) => {}
             _ => panic!("expected completed update"),
         }
@@ -831,7 +902,7 @@ max_sampling_rate = 1.0
     fn reset_is_idempotent() {
         let fixture = Fixture::new();
         let mut replayer = Replayer::with_config_path(fixture.config_path.clone());
-        replayer.pre_update(true, Duration::ZERO).unwrap();
+        replayer.start_scenario(Duration::ZERO).unwrap();
 
         replayer.reset().unwrap();
         replayer.reset().unwrap();

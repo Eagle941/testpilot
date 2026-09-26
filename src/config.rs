@@ -22,15 +22,62 @@ pub const FORMAT_VERSION: u32 = 1;
 pub const CONFIG_PATH: &str = "/work/replayer_config.toml";
 
 /// Allowed top-level TOML fields in replay configuration.
-const ROOT_FIELDS: [&str; 4] = ["format_version", "input_file", "inject", "record"];
+const ROOT_FIELDS: [&str; 5] = [
+    "format_version",
+    "input_file",
+    "initialisation",
+    "inject",
+    "record",
+];
 /// Allowed fields for each `[inject.N]` section.
 const INJECT_SECTION_FIELDS: [&str; 4] = ["name", "variable", "source_range", "simulator_range"];
 /// Allowed fields for each `[record.N]` section.
 const RECORD_SECTION_FIELDS: [&str; 4] = ["name", "variable", "unit", "max_sampling_rate"];
 
+/// Demanded actual aircraft mass and balance, independent of flight-management entries.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InitialisationConfig {
+    /// Zero-fuel weight in kilograms.
+    pub zfw: f64,
+    /// Gross weight in kilograms.
+    pub gw: f64,
+    /// Gross-weight centre of gravity in percent mean aerodynamic chord.
+    pub gwcg: f64,
+}
+
+impl InitialisationConfig {
+    /// Checks finite targets and basic mass consistency; aircraft limits belong to the adapter.
+    fn validate(&self) -> Result<(), ConfigError> {
+        for (field, value) in [("zfw", self.zfw), ("gw", self.gw), ("gwcg", self.gwcg)] {
+            if !value.is_finite() {
+                return Err(ConfigError::InvalidInitialisation {
+                    field,
+                    reason: "must be finite",
+                });
+            }
+            if field != "gwcg" && value <= 0.0 {
+                return Err(ConfigError::InvalidInitialisation {
+                    field,
+                    reason: "must be positive",
+                });
+            }
+        }
+        if self.gw < self.zfw {
+            return Err(ConfigError::InvalidInitialisation {
+                field: "gw",
+                reason: "must be at least zfw",
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Validated replay configuration in deterministic processing order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReplayConfig {
+    /// Optional demanded aircraft mass and balance before playback.
+    pub initialisation: Option<InitialisationConfig>,
     /// Scenario CSV path exactly as specified by `input_file`.
     pub input_file: PathBuf,
     /// Injection definitions ordered by their numeric `inject.N` indexes.
@@ -49,6 +96,9 @@ impl ReplayConfig {
             ))
         })?;
         Self::reject_unknown_fields("root", root, &ROOT_FIELDS)?;
+        if let Some(section) = root.get("initialisation").and_then(Value::as_table) {
+            Self::reject_unknown_fields("initialisation", section, &["zfw", "gw", "gwcg"])?;
+        }
 
         let raw: RawReplayConfig = value.try_into().map_err(ConfigError::Toml)?;
         Self::parse_raw(raw)
@@ -72,8 +122,12 @@ impl ReplayConfig {
         let inject = Self::parse_injections(raw.inject)?;
         let record = Self::parse_recordings(raw.record)?;
         Self::validate_signal_names(&inject, &record)?;
+        if let Some(initialisation) = &raw.initialisation {
+            initialisation.validate()?;
+        }
 
         Ok(ReplayConfig {
+            initialisation: raw.initialisation,
             input_file: PathBuf::from(raw.input_file),
             inject,
             record,
@@ -373,6 +427,8 @@ impl RecordingConfig {
 #[derive(Debug, Deserialize)]
 /// Internal raw configuration as deserialized from TOML.
 struct RawReplayConfig {
+    /// Optional aircraft initialisation targets.
+    initialisation: Option<InitialisationConfig>,
     /// Declared format version.
     format_version: u32,
     /// Raw input filename provided in config.
@@ -414,6 +470,68 @@ struct RawRecordingConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initialisation_is_optional_and_requires_complete_finite_targets() {
+        assert_eq!(
+            ReplayConfig::new(VALID_CONFIG).unwrap().initialisation,
+            None
+        );
+        let parse =
+            |body: &str| ReplayConfig::new(&format!("{VALID_CONFIG}\n[initialisation]\n{body}\n"));
+        assert_eq!(
+            parse("zfw = 60000\ngw = 65000.0\ngwcg = 25.0")
+                .unwrap()
+                .initialisation,
+            Some(InitialisationConfig {
+                zfw: 60000.0,
+                gw: 65000.0,
+                gwcg: 25.0
+            })
+        );
+        assert!(parse("zfw = 60000\ngw = 60000\ngwcg = 25").is_ok());
+        for body in [
+            "",
+            "zfw = 60000",
+            "zfw = 60000\ngw = 65000",
+            "gw = 65000\ngwcg = 25",
+            "zfw = 60000\ngwcg = 25",
+            "zfw = '60000'\ngw = 65000\ngwcg = 25",
+            "zfw = 60000\ngw = 65000\ngwcg = 25\nextra = 1",
+            "zfw = 60000\nzfw = 60000\ngw = 65000\ngwcg = 25",
+        ] {
+            assert!(parse(body).is_err(), "accepted {body}");
+        }
+        for field in ["zfw", "gw", "gwcg"] {
+            for invalid in ["nan", "inf", "-inf"] {
+                let body = [("zfw", "60000"), ("gw", "65000"), ("gwcg", "25")]
+                    .map(|(name, value)| {
+                        format!("{name} = {}", if name == field { invalid } else { value })
+                    })
+                    .join("\n");
+                assert!(
+                    matches!(parse(&body), Err(ConfigError::InvalidInitialisation { field: actual, .. }) if actual == field)
+                );
+            }
+        }
+        for body in [
+            "zfw = 0\ngw = 65000\ngwcg = 25",
+            "zfw = -1\ngw = 65000\ngwcg = 25",
+            "zfw = 60000\ngw = 0\ngwcg = 25",
+            "zfw = 60000\ngw = -1\ngwcg = 25",
+            "zfw = 60000\ngw = 59999\ngwcg = 25",
+        ] {
+            assert!(matches!(
+                parse(body),
+                Err(ConfigError::InvalidInitialisation { .. })
+            ));
+        }
+        assert!(
+            matches!(parse("zfw = 60000\ngw = 65000\ngwcg = 25\ntimeout = 30"),
+            Err(ConfigError::UnexpectedField { section, field }) if section == "initialisation" && field == "timeout")
+        );
+        assert!(ReplayConfig::new(&format!("initialisation = 1\n{VALID_CONFIG}")).is_err());
+    }
 
     const VALID_CONFIG: &str = r#"
 format_version = 1
