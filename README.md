@@ -130,14 +130,33 @@ Aircraft-specific loading limits will be validated by the aircraft initialisatio
 This optional addition uses `format_version = 1`; omitting the section retains
 immediate playback on arming. No timeout, tolerance or unit fields are configurable.
 
-**Aircraft target submission is not implemented yet.** Aircraft detection and
-actual mass/balance readback are implemented. Submission still returns a typed
-unimplemented error. Enabling this section on a detected A32NX currently fails safely
+**Loading-value calculation is not implemented yet.** Aircraft detection,
+loading writes and actual mass/balance readback are implemented. Submission first
+calculates native loading values; that calculation currently returns a typed
+unimplemented error before any loading writes. Enabling this section on a detected A32NX currently fails safely
 on arming, even if the aircraft already meets the targets. Unsupported or
 unidentified aircraft log that initialisation was skipped and start replay immediately,
 without enforcing mass/CG targets. The readiness gate is implemented and
-tested with a fake simulator. Future submission integration must change actual
-aircraft loading/fuel/balance, not merely flight-management entries.
+tested with a fake simulator.
+
+Once loading-value calculation is implemented, submission writes passenger stations
+A/B/C/D, the four cargo stations, fuel left/right auxiliary tanks, left/right main
+tanks, centre tank, total fuel and desired percentage, in that order. It then sets
+`L:A32NX_BOARDING_RATE = 0` and `L:A32NX_EFB_REFUEL_RATE_SETTING = 2`
+(instant loading), followed by `L:A32NX_BOARDING_STARTED_BY_USR = 1` and
+`L:A32NX_REFUEL_STARTED_BY_USR = 1`. Each write uses the existing `msfs-rs`
+calculator-code adapter. A failed write stops the sequence immediately and returns
+a typed submission error with the failing variable. Writes are sequential, not
+transactional: earlier successful writes remain applied after a later failure.
+
+The mappings are verified against A32NX revision
+`2baa2b35eadaf4c78e172ce41bbe6b40b4aeafb2`:
+[payload UI](https://github.com/flybywiresim/aircraft/blob/2baa2b35eadaf4c78e172ce41bbe6b40b4aeafb2/fbw-common/src/systems/instruments/src/EFB/Ground/Pages/Payload/NarrowBody/A320Payload.tsx),
+[cabin station identifiers](https://github.com/flybywiresim/aircraft/blob/2baa2b35eadaf4c78e172ce41bbe6b40b4aeafb2/fbw-a32nx/src/base/flybywire-aircraft-a320-neo/config/a32nx/a320-251n/cabin.json5),
+[boarding rates](https://github.com/flybywiresim/aircraft/blob/2baa2b35eadaf4c78e172ce41bbe6b40b4aeafb2/fbw-common/src/wasm/systems/systems/src/payload/mod.rs),
+and [refuelling implementation](https://github.com/flybywiresim/aircraft/blob/2baa2b35eadaf4c78e172ce41bbe6b40b4aeafb2/fbw-a32nx/src/systems/instruments/src/MCDU/legacy/A32NX_Core/A32NX_Refuel.ts).
+Passenger values encode seat flags; calculating these and cargo/fuel distribution
+from ZFW/GW/GWCG is deferred. No placeholder values are submitted.
 
 Readback uses these A32NX local variables, with no SDK unit conversion:
 
@@ -154,7 +173,7 @@ The values come from actual payload and fuel in the
 [A32NX airframe calculation](https://github.com/flybywiresim/aircraft/blob/2baa2b35eadaf4c78e172ce41bbe6b40b4aeafb2/fbw-a32nx/src/wasm/systems/a320_systems/src/airframe/mod.rs).
 The [airframe output implementation](https://github.com/flybywiresim/aircraft/blob/2baa2b35eadaf4c78e172ce41bbe6b40b4aeafb2/fbw-common/src/wasm/systems/systems/src/airframe/mod.rs)
 publishes masses rounded to 1 kg and CG rounded to 0.01 percentage points of MAC.
-Readback preserves those values without additional rounding. Until submission is
+Readback preserves those values without additional rounding. Until loading-value calculation is
 implemented, the normal arming path fails before reaching readback.
 
 Aircraft support is checked once on each arm frame requesting initialisation,
@@ -492,7 +511,7 @@ the `/work` location above. Then enable the example's three targets and reload
 using the A32NX. Record the `ATC MODEL` string, and repeat with a custom livery
 whose title differs. With either accepted A20N model string and `A32NX_IS_READY`
 registered (whether zero or one), arming must report the
-unimplemented submission error, reset `L:REPLAYER_ARMED`
+unimplemented loading-value calculation error, reset `L:REPLAYER_ARMED`
 to `0`, and produce no replay control writes or telemetry file. Further arming
 must not restart the failed gauge; reload it for another attempt.
 
@@ -516,8 +535,11 @@ Record the A32NX source revision (mapping verified at
 This diagnostic check produces no replay telemetry; normal replay output remains
 in `/work` as described above.
 
-Successful loading, actual-aircraft convergence, timeout and control release
-require manual validation after implementing verified A32NX initialisation mappings.
+After implementing loading-value calculation, repeat the example with initialisation
+enabled and verify all desired values are written before both instant rate settings
+and both start requests. Check actual-aircraft convergence, timeout and control
+release, and the generated telemetry in `/work` after readiness. Successful loading
+still requires this manual validation.
 Host tests and WASM compilation do not establish that simulator compatibility.
 
 ## MVP simulator mappings

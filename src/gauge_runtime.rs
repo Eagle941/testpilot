@@ -915,7 +915,7 @@ unit = "radians"
         assert!(matches!(
             error.downcast_ref::<InitialisationError>(),
             Some(InitialisationError::NotImplemented {
-                operation: "submission"
+                operation: "loading-value calculation"
             })
         ));
         assert_eq!(
@@ -1043,7 +1043,7 @@ unit = "radians"
     }
 
     #[test]
-    fn a32nx_submission_stub_fails_safely_without_replay_or_telemetry() {
+    fn a32nx_loading_calculation_stub_fails_safely_without_replay_or_telemetry() {
         let fixture = initialisation_fixture();
         let mut simulator = FakeSimulator::new(duration(100.0));
         simulator.queue_reads(ARMED_VARIABLE, [1.0]);
@@ -1063,7 +1063,7 @@ unit = "radians"
         assert!(matches!(
             error.downcast_ref::<InitialisationError>(),
             Some(InitialisationError::NotImplemented {
-                operation: "submission"
+                operation: "loading-value calculation"
             })
         ));
         runtime.stop().unwrap();
