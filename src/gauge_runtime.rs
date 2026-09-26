@@ -1,40 +1,53 @@
 //! MSFS-specific replay runtime used by the gauge entry point.
 
+use crate::aircraft_initialisation::{AircraftInitialiser, AircraftSupport};
 use crate::arm::ArmingMonitor;
 use crate::cursor::Frame;
 use crate::error::GaugeError;
+use crate::initialisation::Initialisation;
 use crate::replayer::{InterpolationFrame, Replayer, ReplayerUpdate};
-use crate::simulator::{MsfsSimulator, SimulatorAdapter};
+use crate::simulator::SimulatorAdapter;
 
 /// Local simulator variable that arms replay start when it transitions to `1`.
 const ARMED_VARIABLE: &str = "L:REPLAYER_ARMED";
 
 /// Owns the MSFS variables and replay state used by the gauge event loop.
-pub struct GaugeRuntime<S = MsfsSimulator> {
+pub struct GaugeRuntime<S, I> {
     /// Replay orchestrator.
     replayer: Replayer,
     /// Tracks arming transitions and writes reset state.
     arming: ArmingMonitor,
     /// Adapter around msfs-rs legacy calculator code.
     simulator: S,
+    /// Aircraft loading operations, independent of generic simulator I/O.
+    aircraft_initialiser: I,
+    /// Readiness and timeout state while the prepared scenario waits to start.
+    initialisation: Option<Initialisation>,
     /// Reusable converted injection values for the current frame.
     injected_values: Vec<f64>,
     /// Reusable sampled telemetry values for the current frame.
     recorded_values: Vec<Option<f64>>,
 }
 
-impl<S: SimulatorAdapter> GaugeRuntime<S> {
-    /// Creates a runtime from explicit replay and simulator components.
+impl<S: SimulatorAdapter, I: AircraftInitialiser<S>> GaugeRuntime<S, I> {
+    /// Creates a runtime from explicit replay, simulator and aircraft components.
     ///
     /// # Arguments
     ///
     /// * `replayer` - Parsed replay state machine driving scenario playback.
     /// * `simulator` - MSFS adapter used for all per-frame I/O.
-    pub fn new(replayer: Replayer, simulator: S) -> Result<Self, GaugeError> {
+    /// * `aircraft_initialiser` - Aircraft loading operations, substitutable for tests.
+    pub fn new(
+        replayer: Replayer,
+        simulator: S,
+        aircraft_initialiser: I,
+    ) -> Result<Self, GaugeError> {
         let mut runtime = Self {
             arming: ArmingMonitor::new(ARMED_VARIABLE),
             replayer,
             simulator,
+            aircraft_initialiser,
+            initialisation: None,
             injected_values: Vec::new(),
             recorded_values: Vec::new(),
         };
@@ -55,7 +68,36 @@ impl<S: SimulatorAdapter> GaugeRuntime<S> {
         let simulation_time = self.simulator.simulation_time()?;
         let init_now = self.arming.ready_to_start(&mut self.simulator)?;
 
-        match self.replayer.pre_update(init_now, simulation_time)? {
+        if init_now {
+            if let Some(targets) = self.replayer.prepare_scenario()? {
+                match self.aircraft_initialiser.detect(&mut self.simulator) {
+                    AircraftSupport::Supported => {
+                        self.initialisation = Some(Initialisation::new(targets, simulation_time));
+                        self.aircraft_initialiser
+                            .submit(&mut self.simulator, targets)?;
+                    }
+                    AircraftSupport::Unsupported => {
+                        println!(
+                            "TESTPILOT: initialisation skipped: unsupported or unidentified aircraft"
+                        );
+                        self.replayer.start_prepared(simulation_time)?;
+                    }
+                }
+            } else {
+                self.replayer.start_prepared(simulation_time)?;
+            }
+        }
+        if let Some(gate) = &mut self.initialisation {
+            gate.check_deadline(simulation_time)?;
+            let actual = self.aircraft_initialiser.readback(&mut self.simulator)?;
+            if !gate.observe(actual)? {
+                return Ok(());
+            }
+            self.initialisation = None;
+            self.replayer.start_prepared(simulation_time)?;
+        }
+
+        match self.replayer.pre_update(simulation_time)? {
             Some(ReplayerUpdate::Running { frame, started_now }) => {
                 let simulator = &mut self.simulator;
                 let injected_values = &mut self.injected_values;
@@ -80,8 +122,14 @@ impl<S: SimulatorAdapter> GaugeRuntime<S> {
     /// This method is idempotent from the perspective of runtime state; if no
     /// scenario is active, it still resets arming state and returns `Ok(())`.
     pub fn stop(&mut self) -> Result<(), GaugeError> {
-        self.replayer.reset()?;
-        self.arming.reset(&mut self.simulator)?;
+        self.initialisation = None;
+        let replay_result = self.replayer.reset();
+        let arming_result = self.arming.reset(&mut self.simulator);
+        if let Err(error) = &arming_result {
+            println!("TESTPILOT ERROR: arming reset failed: {error}");
+        }
+        replay_result?;
+        arming_result?;
         Ok(())
     }
 
@@ -270,7 +318,11 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 
+    use crate::aircraft_initialisation::{A32nxInitialiser, AircraftSupport};
+    use crate::config::InitialisationConfig;
+    use crate::error::InitialisationError;
     use crate::error::{GaugeError, ReplayerError, SimulatorError};
+    use crate::initialisation::AircraftMassBalance;
     use crate::replayer::Replayer;
     use crate::simulator::SimulatorAdapter;
 
@@ -338,6 +390,11 @@ unit = "radians"
 
     #[derive(Debug, PartialEq)]
     enum Operation {
+        DetectAircraft,
+        ReadString(String),
+        LocalVariableExists(String),
+        Initialise(InitialisationConfig),
+        ReadMassBalance,
         Write {
             variable: String,
             value: f64,
@@ -358,6 +415,7 @@ unit = "radians"
         Write(String),
         ValidateRead(String),
         Read(String),
+        LocalVariableExists(String),
     }
 
     struct FakeSimulator {
@@ -365,6 +423,7 @@ unit = "radians"
         reads: HashMap<String, VecDeque<f64>>,
         operations: Vec<Operation>,
         failure: Option<Failure>,
+        string_reads: VecDeque<Result<String, SimulatorError>>,
     }
 
     impl FakeSimulator {
@@ -374,6 +433,7 @@ unit = "radians"
                 reads: HashMap::new(),
                 operations: Vec::new(),
                 failure: None,
+                string_reads: VecDeque::new(),
             }
         }
 
@@ -393,13 +453,81 @@ unit = "radians"
                 (Some(Failure::SimulationTime), Failure::SimulationTime) => true,
                 (Some(Failure::Write(configured)), Failure::Write(actual))
                 | (Some(Failure::ValidateRead(configured)), Failure::ValidateRead(actual))
+                | (
+                    Some(Failure::LocalVariableExists(configured)),
+                    Failure::LocalVariableExists(actual),
+                )
                 | (Some(Failure::Read(configured)), Failure::Read(actual)) => configured == actual,
                 _ => false,
             }
         }
     }
 
+    #[derive(Default)]
+    struct FakeAircraftInitialiser {
+        mass_balance: VecDeque<Result<AircraftMassBalance, InitialisationError>>,
+        fail_initialisation: bool,
+        unsupported: bool,
+    }
+
+    impl crate::aircraft_initialisation::AircraftInitialiser<FakeSimulator>
+        for FakeAircraftInitialiser
+    {
+        fn supported_model(&mut self, simulator: &mut FakeSimulator) -> bool {
+            simulator.operations.push(Operation::DetectAircraft);
+            !self.unsupported
+        }
+
+        fn submit(
+            &mut self,
+            simulator: &mut FakeSimulator,
+            targets: InitialisationConfig,
+        ) -> Result<(), InitialisationError> {
+            simulator.operations.push(Operation::Initialise(targets));
+            if self.fail_initialisation {
+                return Err(InitialisationError::Submit(
+                    SimulatorError::CalculatorCodeWriteFailed {
+                        variable: "L:TEST_LOADING".to_owned(),
+                        value: targets.zfw,
+                    },
+                ));
+            }
+            Ok(())
+        }
+
+        fn readback(
+            &mut self,
+            simulator: &mut FakeSimulator,
+        ) -> Result<AircraftMassBalance, InitialisationError> {
+            simulator.operations.push(Operation::ReadMassBalance);
+            self.mass_balance
+                .pop_front()
+                .expect("missing queued mass/balance readback")
+        }
+    }
+
     impl SimulatorAdapter for FakeSimulator {
+        fn local_variable_exists(&mut self, variable: &str) -> Result<bool, SimulatorError> {
+            self.operations
+                .push(Operation::LocalVariableExists(variable.to_owned()));
+            if self.should_fail(&Failure::LocalVariableExists(variable.to_owned())) {
+                return Err(SimulatorError::UnsupportedReadVariable {
+                    variable: variable.to_owned(),
+                });
+            }
+            Ok(self.reads.contains_key(variable))
+        }
+
+        fn read_string(&mut self, variable: &str) -> Result<String, SimulatorError> {
+            self.operations
+                .push(Operation::ReadString(variable.to_owned()));
+            self.string_reads.pop_front().unwrap_or_else(|| {
+                Err(SimulatorError::CalculatorCodeReadFailed {
+                    variable: variable.to_owned(),
+                })
+            })
+        }
+
         fn simulation_time(&self) -> Result<Duration, SimulatorError> {
             if self.should_fail(&Failure::SimulationTime) {
                 return Err(SimulatorError::SimulationTimeUnavailable);
@@ -525,15 +653,470 @@ unit = "radians"
             .unwrap_or_else(|| panic!("telemetry file was not created"))
     }
 
-    fn runtime(fixture: &Fixture, simulator: FakeSimulator) -> GaugeRuntime<FakeSimulator> {
+    fn runtime(
+        fixture: &Fixture,
+        simulator: FakeSimulator,
+    ) -> GaugeRuntime<FakeSimulator, FakeAircraftInitialiser> {
+        runtime_with_initialiser(fixture, simulator, FakeAircraftInitialiser::default())
+    }
+
+    fn runtime_with_initialiser(
+        fixture: &Fixture,
+        simulator: FakeSimulator,
+        initialiser: FakeAircraftInitialiser,
+    ) -> GaugeRuntime<FakeSimulator, FakeAircraftInitialiser> {
         let replayer = Replayer::with_config_path(fixture.config_path.clone());
-        GaugeRuntime::new(replayer, simulator)
+        GaugeRuntime::new(replayer, simulator, initialiser)
             .unwrap_or_else(|error| panic!("failed to construct gauge runtime: {error}"))
     }
 
     fn duration(seconds: f64) -> Duration {
         Duration::try_from_secs_f64(seconds)
             .unwrap_or_else(|error| panic!("invalid test duration: {error}"))
+    }
+
+    const MATCHED: AircraftMassBalance = AircraftMassBalance {
+        zfw: 60000.0,
+        gw: 65000.0,
+        gwcg: 25.0,
+    };
+    const UNMATCHED: AircraftMassBalance = AircraftMassBalance {
+        gwcg: 26.0,
+        ..MATCHED
+    };
+
+    fn initialisation_fixture() -> Fixture {
+        let (input_config, _) = CONFIG.split_once("[record.0]").unwrap();
+        Fixture::new(&format!(
+            "{input_config}\n[initialisation]\nzfw = 60000\ngw = 65000\ngwcg = 25\n"
+        ))
+    }
+
+    fn assert_no_telemetry(fixture: &Fixture) {
+        assert!(!fs::read_dir(&fixture.directory).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("telemetry_")
+        }));
+    }
+
+    fn assert_no_replay_writes(simulator: &FakeSimulator) {
+        assert!(
+            !simulator
+                .operations
+                .iter()
+                .any(|operation| matches!(operation,
+            Operation::Write { variable, .. } if variable != ARMED_VARIABLE))
+        );
+    }
+
+    #[test]
+    fn detects_aircraft_model_and_variable_presence_without_reading_readiness() {
+        use crate::aircraft_initialisation::AircraftInitialiser;
+        for (model, expected) in [
+            ("A20N", AircraftSupport::Supported),
+            ("TT:ATCCOM.AC_MODEL_A20N.0.text", AircraftSupport::Supported),
+            ("  a20n  ", AircraftSupport::Supported),
+            (
+                " tt:atccom.ac_model_a20n.0.TEXT ",
+                AircraftSupport::Supported,
+            ),
+            ("A320", AircraftSupport::Unsupported),
+            ("A388", AircraftSupport::Unsupported),
+            ("C172", AircraftSupport::Unsupported),
+            ("A20NX", AircraftSupport::Unsupported),
+            (
+                "TT:ATCCOM.AC_MODEL_A388.0.text",
+                AircraftSupport::Unsupported,
+            ),
+            ("Airbus A320 Neo FlyByWire", AircraftSupport::Unsupported),
+            ("", AircraftSupport::Unsupported),
+            (" ", AircraftSupport::Unsupported),
+        ] {
+            let mut simulator = FakeSimulator::new(Duration::ZERO);
+            simulator.string_reads.push_back(Ok(model.to_owned()));
+            simulator.queue_reads("L:A32NX_IS_READY", [0.0]);
+            assert_eq!(
+                A32nxInitialiser.detect(&mut simulator),
+                expected,
+                "model {model:?}"
+            );
+            let mut operations = vec![Operation::ReadString("A:ATC MODEL".to_owned())];
+            if expected == AircraftSupport::Supported {
+                operations.push(Operation::LocalVariableExists(
+                    "L:A32NX_IS_READY".to_owned(),
+                ));
+            }
+            assert_eq!(simulator.operations, operations);
+            assert_eq!(simulator.reads["L:A32NX_IS_READY"], [0.0]);
+        }
+        let mut simulator = FakeSimulator::new(Duration::ZERO);
+        assert_eq!(
+            A32nxInitialiser.detect(&mut simulator),
+            AircraftSupport::Unsupported
+        );
+    }
+
+    #[test]
+    fn a20n_without_ready_variable_or_with_failed_lookup_is_unsupported() {
+        use crate::aircraft_initialisation::AircraftInitialiser;
+        for fail in [false, true] {
+            let mut simulator = FakeSimulator::new(Duration::ZERO);
+            simulator.string_reads.push_back(Ok("A20N".to_owned()));
+            if fail {
+                simulator.queue_reads("L:A32NX_IS_READY", [1.0]);
+                simulator.failure =
+                    Some(Failure::LocalVariableExists("L:A32NX_IS_READY".to_owned()));
+            }
+            assert_eq!(
+                A32nxInitialiser.detect(&mut simulator),
+                AircraftSupport::Unsupported
+            );
+            assert_eq!(
+                simulator.operations,
+                [
+                    Operation::ReadString("A:ATC MODEL".to_owned()),
+                    Operation::LocalVariableExists("L:A32NX_IS_READY".to_owned()),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_or_unidentified_aircraft_start_replay_immediately() {
+        for model in [Some("C172"), Some("A20N"), Some(""), None] {
+            let fixture = initialisation_fixture();
+            let mut simulator = FakeSimulator::new(duration(100.0));
+            simulator.queue_reads(ARMED_VARIABLE, [1.0, 1.0]);
+            if let Some(model) = model {
+                simulator.string_reads.push_back(Ok(model.to_owned()));
+            }
+            let replayer = Replayer::with_config_path(fixture.config_path.clone());
+            let mut runtime = GaugeRuntime::new(replayer, simulator, A32nxInitialiser).unwrap();
+            runtime.pre_update().unwrap(); // Neither real initialisation TODO may be reached.
+            assert!(runtime.initialisation.is_none());
+            runtime.simulator.time = duration(100.5);
+            runtime.pre_update().unwrap();
+            assert_eq!(
+                runtime
+                    .simulator
+                    .operations
+                    .iter()
+                    .filter(|op| matches!(op, Operation::ReadString(_)))
+                    .count(),
+                1
+            );
+            runtime.stop().unwrap();
+            assert_eq!(
+                fixture.telemetry_contents(),
+                "sidestick_pitch_position.time,sidestick_pitch_position.value\n0,0\n0.5,0.5\n"
+            );
+        }
+    }
+
+    #[test]
+    fn support_is_checked_again_when_a_new_run_is_armed() {
+        let fixture = initialisation_fixture();
+        let mut simulator = FakeSimulator::new(duration(100.0));
+        simulator.queue_reads(ARMED_VARIABLE, [1.0, 0.0, 1.0]);
+        simulator
+            .string_reads
+            .extend([Ok("unknown".to_owned()), Ok("A20N".to_owned())]);
+        simulator.queue_reads("L:A32NX_IS_READY", [0.0]);
+        let replayer = Replayer::with_config_path(fixture.config_path.clone());
+        let mut runtime = GaugeRuntime::new(replayer, simulator, A32nxInitialiser).unwrap();
+        runtime.pre_update().unwrap();
+        runtime.stop().unwrap();
+        fixture.clear_telemetry_files();
+        runtime.pre_update().unwrap();
+        let error = runtime.pre_update().unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<InitialisationError>(),
+            Some(InitialisationError::NotImplemented {
+                operation: "submission"
+            })
+        ));
+        assert_eq!(
+            runtime
+                .simulator
+                .operations
+                .iter()
+                .filter(|op| matches!(op, Operation::ReadString(_)))
+                .count(),
+            2
+        );
+        runtime.stop().unwrap();
+        assert_no_telemetry(&fixture);
+    }
+
+    #[test]
+    fn unsupported_detection_does_not_call_loading_operations() {
+        let fixture = initialisation_fixture();
+        let initialiser = FakeAircraftInitialiser {
+            unsupported: true,
+            fail_initialisation: true,
+            ..Default::default()
+        };
+        let mut simulator = FakeSimulator::new(duration(100.0));
+        simulator.queue_reads(ARMED_VARIABLE, [1.0]);
+        let mut runtime = runtime_with_initialiser(&fixture, simulator, initialiser);
+        runtime.pre_update().unwrap();
+        assert!(
+            !runtime
+                .simulator
+                .operations
+                .iter()
+                .any(|op| matches!(op, Operation::Initialise(_) | Operation::ReadMassBalance))
+        );
+        runtime.stop().unwrap();
+        assert!(fixture.telemetry_contents().ends_with("\n0,0\n"));
+    }
+
+    #[test]
+    fn a32nx_initialisation_stubs_fail_safely_without_replay_or_telemetry() {
+        use crate::aircraft_initialisation::AircraftInitialiser;
+
+        let fixture = initialisation_fixture();
+        let mut simulator = FakeSimulator::new(duration(100.0));
+        simulator.queue_reads(ARMED_VARIABLE, [1.0]);
+        simulator
+            .string_reads
+            .push_back(Ok("TT:ATCCOM.AC_MODEL_A20N.0.text".to_owned()));
+        simulator.queue_reads("L:A32NX_IS_READY", [1.0]);
+        let replayer = Replayer::with_config_path(fixture.config_path.clone());
+        let mut runtime = GaugeRuntime::new(replayer, simulator, A32nxInitialiser).unwrap();
+        let error = runtime.pre_update().unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<InitialisationError>(),
+            Some(InitialisationError::NotImplemented {
+                operation: "submission"
+            })
+        ));
+        assert!(matches!(
+            runtime
+                .aircraft_initialiser
+                .readback(&mut runtime.simulator),
+            Err(InitialisationError::NotImplemented {
+                operation: "readback"
+            })
+        ));
+        runtime.stop().unwrap();
+        assert!(runtime.initialisation.is_none());
+        assert_no_replay_writes(&runtime.simulator);
+        assert_no_telemetry(&fixture);
+    }
+
+    #[test]
+    fn initialisation_waits_without_output_and_starts_at_zero_after_simultaneous_readiness() {
+        let fixture = initialisation_fixture();
+        let mut initialiser = FakeAircraftInitialiser::default();
+        let mut simulator = FakeSimulator::new(duration(100.0));
+        simulator.queue_reads(ARMED_VARIABLE, [1.0; 5]);
+        initialiser.mass_balance.extend([
+            Ok(AircraftMassBalance {
+                zfw: 61000.0,
+                ..MATCHED
+            }),
+            Ok(AircraftMassBalance {
+                gw: 66000.0,
+                ..MATCHED
+            }),
+            Ok(UNMATCHED),
+            Ok(MATCHED),
+        ]);
+        let mut runtime = runtime_with_initialiser(&fixture, simulator, initialiser);
+        for now in [100.0, 110.0, 120.0] {
+            runtime.simulator.time = duration(now);
+            runtime.pre_update().unwrap();
+            assert_no_telemetry(&fixture);
+            assert_no_replay_writes(&runtime.simulator);
+        }
+        runtime.simulator.time = duration(129.999);
+        runtime.pre_update().unwrap();
+        runtime.simulator.time = duration(130.499);
+        runtime.pre_update().unwrap();
+        assert_eq!(
+            runtime
+                .simulator
+                .operations
+                .iter()
+                .filter(|op| matches!(op, Operation::Initialise(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            runtime
+                .simulator
+                .operations
+                .iter()
+                .filter(|op| matches!(op, Operation::ReadMassBalance))
+                .count(),
+            4
+        );
+        assert!(
+            runtime
+                .simulator
+                .operations
+                .contains(&Operation::Initialise(InitialisationConfig {
+                    zfw: 60000.0,
+                    gw: 65000.0,
+                    gwcg: 25.0
+                }))
+        );
+        runtime.stop().unwrap();
+        assert_eq!(
+            fixture.telemetry_contents(),
+            "sidestick_pitch_position.time,sidestick_pitch_position.value\n0,0\n0.5,0.5\n"
+        );
+    }
+
+    #[test]
+    fn initialisation_can_start_on_the_arm_frame() {
+        let fixture = initialisation_fixture();
+        let mut initialiser = FakeAircraftInitialiser::default();
+        let mut simulator = FakeSimulator::new(duration(100.0));
+        simulator.queue_reads(ARMED_VARIABLE, [1.0]);
+        initialiser.mass_balance.push_back(Ok(MATCHED));
+        let mut runtime = runtime_with_initialiser(&fixture, simulator, initialiser);
+        runtime.simulator.clear_operations();
+        runtime.pre_update().unwrap();
+        assert!(matches!(
+            runtime.simulator.operations.as_slice(),
+            [
+                Operation::Read { .. },
+                Operation::DetectAircraft,
+                Operation::Initialise(_),
+                Operation::ReadMassBalance,
+                Operation::Write { value: 0.0, .. }
+            ]
+        ));
+        runtime.stop().unwrap();
+        assert!(fixture.telemetry_contents().ends_with("\n0,0\n"));
+    }
+
+    #[test]
+    fn initialisation_timeout_precedes_readiness_at_and_after_deadline() {
+        for now in [130.0, 135.0] {
+            let fixture = initialisation_fixture();
+            let mut initialiser = FakeAircraftInitialiser::default();
+            let mut simulator = FakeSimulator::new(duration(100.0));
+            simulator.queue_reads(ARMED_VARIABLE, [1.0, 1.0]);
+            initialiser
+                .mass_balance
+                .extend([Ok(UNMATCHED), Ok(MATCHED)]);
+            let mut runtime = runtime_with_initialiser(&fixture, simulator, initialiser);
+            runtime.pre_update().unwrap();
+            runtime.simulator.time = duration(now);
+            let error = runtime.pre_update().unwrap_err();
+            assert!(matches!(
+                error.downcast_ref::<InitialisationError>(),
+                Some(InitialisationError::Timeout {
+                    latest: Some(UNMATCHED),
+                    ..
+                })
+            ));
+            assert_eq!(
+                runtime.aircraft_initialiser.mass_balance.len(),
+                1,
+                "deadline must be checked before readback"
+            );
+            assert_no_replay_writes(&runtime.simulator);
+            runtime.stop().unwrap();
+            runtime.stop().unwrap();
+            assert_no_telemetry(&fixture);
+            assert_eq!(
+                runtime.simulator.operations.last(),
+                Some(&Operation::Write {
+                    variable: ARMED_VARIABLE.to_owned(),
+                    value: 0.0
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn initialisation_failures_are_typed_and_cleanup_creates_no_telemetry() {
+        for case in 0..4 {
+            let fixture = initialisation_fixture();
+            let mut initialiser = FakeAircraftInitialiser::default();
+            let mut simulator = FakeSimulator::new(duration(100.0));
+            simulator.queue_reads(ARMED_VARIABLE, [1.0, 1.0]);
+            match case {
+                0 => initialiser.fail_initialisation = true,
+                1 => initialiser
+                    .mass_balance
+                    .push_back(Err(InitialisationError::Readback(
+                        SimulatorError::CalculatorCodeReadFailed {
+                            variable: "L:TEST_LOADING".to_owned(),
+                        },
+                    ))),
+                2 => initialiser.mass_balance.push_back(Ok(AircraftMassBalance {
+                    gw: f64::NAN,
+                    ..MATCHED
+                })),
+                _ => initialiser.mass_balance.push_back(Ok(UNMATCHED)),
+            }
+            let mut runtime = runtime_with_initialiser(&fixture, simulator, initialiser);
+            if case == 3 {
+                runtime.pre_update().unwrap();
+                runtime.simulator.time = duration(99.0);
+            }
+            let error = runtime.pre_update().unwrap_err();
+            let error = error.downcast_ref::<InitialisationError>().unwrap();
+            assert!(matches!(
+                (case, error),
+                (0, InitialisationError::Submit(_))
+                    | (1, InitialisationError::Readback(_))
+                    | (2, InitialisationError::NonFiniteReadback { .. })
+                    | (3, InitialisationError::ClockMovedBackwards { .. })
+            ));
+            runtime.stop().unwrap();
+            assert_no_replay_writes(&runtime.simulator);
+            assert_no_telemetry(&fixture);
+        }
+    }
+
+    #[test]
+    fn initialisation_rejects_overlapping_arming_and_can_be_cleaned_up_while_waiting() {
+        let fixture = initialisation_fixture();
+        let mut initialiser = FakeAircraftInitialiser::default();
+        let mut simulator = FakeSimulator::new(duration(100.0));
+        simulator.queue_reads(ARMED_VARIABLE, [1.0, 0.0, 1.0]);
+        initialiser
+            .mass_balance
+            .extend([Ok(UNMATCHED), Ok(UNMATCHED)]);
+        let mut runtime = runtime_with_initialiser(&fixture, simulator, initialiser);
+        runtime.pre_update().unwrap();
+        runtime.pre_update().unwrap(); // Disarming is not an abort.
+        let error = runtime.pre_update().unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<ReplayerError>(),
+            Some(&ReplayerError::ScenarioAlreadyLoaded)
+        );
+        assert_eq!(
+            runtime
+                .simulator
+                .operations
+                .iter()
+                .filter(|op| matches!(op, Operation::Initialise(_)))
+                .count(),
+            1
+        );
+        runtime.stop().unwrap();
+        runtime.stop().unwrap();
+        assert_no_telemetry(&fixture);
+        assert_no_replay_writes(&runtime.simulator);
+        runtime.simulator.queue_reads(ARMED_VARIABLE, [0.0, 1.0]);
+        runtime
+            .aircraft_initialiser
+            .mass_balance
+            .push_back(Ok(MATCHED));
+        runtime.pre_update().unwrap();
+        runtime.pre_update().unwrap();
+        runtime.stop().unwrap();
+        assert!(fixture.telemetry_contents().ends_with("\n0,0\n"));
     }
 
     #[test]
@@ -553,6 +1136,7 @@ unit = "radians"
         let result = GaugeRuntime::new(
             Replayer::with_config_path(fixture.config_path.clone()),
             simulator,
+            A32nxInitialiser,
         );
         match result {
             Err(GaugeError::Simulator(SimulatorError::CalculatorCodeWriteFailed {

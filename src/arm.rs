@@ -50,9 +50,12 @@ impl ArmingMonitor {
         Ok(starting)
     }
 
-    /// Resets the arming variable to `0.0`.
-    pub fn reset<S: SimulatorAdapter>(&self, simulator: &mut S) -> Result<(), SimulatorError> {
-        simulator.write(&self.variable, 0.0)
+    /// Resets the arming variable and edge detector to `0.0` after a successful write.
+    pub fn reset<S: SimulatorAdapter>(&mut self, simulator: &mut S) -> Result<(), SimulatorError> {
+        simulator.write(&self.variable, 0.0)?;
+        self.armed_value = 0.0;
+        self.trigger = PositiveTrigger::default();
+        Ok(())
     }
 }
 
@@ -78,6 +81,16 @@ mod tests {
     }
 
     impl SimulatorAdapter for FakeSimulator {
+        fn local_variable_exists(&mut self, _variable: &str) -> Result<bool, SimulatorError> {
+            Ok(false)
+        }
+
+        fn read_string(&mut self, variable: &str) -> Result<String, SimulatorError> {
+            Err(SimulatorError::UnsupportedReadVariable {
+                variable: variable.to_owned(),
+            })
+        }
+
         fn simulation_time(&self) -> Result<std::time::Duration, SimulatorError> {
             unreachable!()
         }
@@ -145,9 +158,22 @@ mod tests {
     #[test]
     fn resetting_sets_the_arming_variable_to_zero() {
         let mut simulator = FakeSimulator::new();
-        let monitor = ArmingMonitor::new("L:REPLAYER_ARMED");
+        let mut monitor = ArmingMonitor::new("L:REPLAYER_ARMED");
 
         monitor.reset(&mut simulator).unwrap();
         assert_eq!(simulator.writes, vec![0.0]);
+    }
+
+    #[test]
+    fn reset_allows_rearming_before_another_idle_frame() {
+        let mut simulator = FakeSimulator::new();
+        let mut monitor = ArmingMonitor::new("L:REPLAYER_ARMED");
+        simulator.values.push(1.0);
+        assert!(monitor.ready_to_start(&mut simulator).unwrap());
+
+        monitor.reset(&mut simulator).unwrap();
+        simulator.values.push(1.0);
+        assert!(monitor.ready_to_start(&mut simulator).unwrap());
+        assert_eq!(monitor.armed_value, 1.0);
     }
 }

@@ -38,6 +38,7 @@ fn build_scenario(rows: usize) -> (Scenario, PathBuf) {
     let scenario_path = directory.join("scenario.csv");
     make_scenario_csv(&scenario_path, rows);
     let config = ReplayConfig {
+        initialisation: None,
         input_file: PathBuf::from("scenario.csv"),
         inject: vec![InjectionConfig {
             name: "input".to_string(),

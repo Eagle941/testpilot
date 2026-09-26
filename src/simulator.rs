@@ -11,6 +11,12 @@ const SIMULATION_TIME_CODE: &str = "(E:SIMULATION TIME, seconds)";
 
 /// Simulator operations required by replay injection.
 pub trait SimulatorAdapter {
+    /// Checks whether an `L:` variable exists, without registering it or reading its value.
+    fn local_variable_exists(&mut self, variable: &str) -> Result<bool, SimulatorError>;
+
+    /// Reads an aircraft (`A:`) string variable using the SDK's string unit.
+    fn read_string(&mut self, variable: &str) -> Result<String, SimulatorError>;
+
     /// Returns the current simulator-clock time.
     fn simulation_time(&self) -> Result<Duration, SimulatorError>;
 
@@ -41,6 +47,42 @@ impl MsfsSimulator {
 
 #[cfg(target_arch = "wasm32")]
 impl SimulatorAdapter for MsfsSimulator {
+    fn local_variable_exists(&mut self, variable: &str) -> Result<bool, SimulatorError> {
+        let name = local_variable_name(variable)?;
+        // SAFETY: name is NUL-terminated and remains alive throughout the SDK call.
+        // Unlike register_named_variable, this lookup never creates a variable.
+        Ok(unsafe { msfs::sys::check_named_variable(name.as_ptr()) } != -1)
+    }
+
+    fn read_string(&mut self, variable: &str) -> Result<String, SimulatorError> {
+        self.validate_read(variable, Some("string"))?;
+        let code = std::ffi::CString::new(self.calculator_code_buffer.as_str()).map_err(|_| {
+            SimulatorError::UnsupportedReadVariable {
+                variable: variable.to_owned(),
+            }
+        })?;
+        let mut value = std::ptr::null();
+        // SAFETY: code is NUL-terminated and lives through the synchronous SDK call;
+        // value is a valid output pointer. The SDK owns the returned string.
+        let success = unsafe {
+            msfs::sys::execute_calculator_code(
+                code.as_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut value,
+            )
+        };
+        let value = if success != 0 && !value.is_null() {
+            // SAFETY: on success the SDK supplies a NUL-terminated string. Copy it
+            // before another SDK call. Check null and UTF-8 instead of using the
+            // pinned legacy String wrapper, which assumes both are valid.
+            Some(unsafe { std::ffi::CStr::from_ptr(value) })
+        } else {
+            None
+        };
+        decode_string_read(value, variable)
+    }
+
     fn simulation_time(&self) -> Result<Duration, SimulatorError> {
         let value = msfs::legacy::execute_calculator_code::<f64>(SIMULATION_TIME_CODE)
             .ok_or(SimulatorError::SimulationTimeUnavailable)?;
@@ -76,6 +118,30 @@ impl SimulatorAdapter for MsfsSimulator {
         }
         Ok(value)
     }
+}
+
+/// Converts a prefixed local variable into the SDK's unprefixed, NUL-terminated name.
+fn local_variable_name(variable: &str) -> Result<std::ffi::CString, SimulatorError> {
+    variable
+        .strip_prefix("L:")
+        .filter(|name| !name.is_empty())
+        .and_then(|name| std::ffi::CString::new(name).ok())
+        .ok_or_else(|| SimulatorError::UnsupportedReadVariable {
+            variable: variable.to_owned(),
+        })
+}
+
+/// Converts an SDK string result, reporting missing or invalid UTF-8 values without panicking.
+fn decode_string_read(
+    value: Option<&std::ffi::CStr>,
+    variable: &str,
+) -> Result<String, SimulatorError> {
+    value
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+        .ok_or_else(|| SimulatorError::CalculatorCodeReadFailed {
+            variable: variable.to_owned(),
+        })
 }
 
 /// Formats one finite value write for a prefixed `K:` event or `L:` variable.
@@ -173,6 +239,16 @@ mod tests {
     }
 
     impl SimulatorAdapter for FakeSimulator {
+        fn local_variable_exists(&mut self, _variable: &str) -> Result<bool, SimulatorError> {
+            Ok(false)
+        }
+
+        fn read_string(&mut self, variable: &str) -> Result<String, SimulatorError> {
+            Err(SimulatorError::UnsupportedReadVariable {
+                variable: variable.to_owned(),
+            })
+        }
+
         fn simulation_time(&self) -> Result<Duration, SimulatorError> {
             Ok(self.time)
         }
@@ -193,6 +269,46 @@ mod tests {
 
         fn read(&mut self, _variable: &str, _unit: Option<&str>) -> Result<f64, SimulatorError> {
             Ok(self.read_value)
+        }
+    }
+
+    #[test]
+    fn validates_local_variable_names_for_non_registering_lookup() {
+        assert_eq!(
+            super::local_variable_name("L:A32NX_IS_READY")
+                .unwrap()
+                .as_c_str(),
+            c"A32NX_IS_READY"
+        );
+        for variable in ["", "L:", "A:ATC MODEL", "A32NX_IS_READY", "L:NAME\0SUFFIX"] {
+            assert!(matches!(
+                super::local_variable_name(variable),
+                Err(SimulatorError::UnsupportedReadVariable { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn string_reads_use_the_sdk_string_unit_and_reject_unavailable_or_invalid_results() {
+        let mut code = String::new();
+        build_read_calculator_code(&mut code, "A:ATC MODEL", Some("string")).unwrap();
+        assert_eq!(code, "(A:ATC MODEL, string)");
+        assert_eq!(
+            super::decode_string_read(Some(c"A20N"), "A:ATC MODEL").unwrap(),
+            "A20N"
+        );
+        assert_eq!(
+            super::decode_string_read(Some(c""), "A:ATC MODEL").unwrap(),
+            ""
+        );
+        let invalid = c"\xff";
+        for value in [None, Some(invalid)] {
+            assert_eq!(
+                super::decode_string_read(value, "A:ATC MODEL"),
+                Err(SimulatorError::CalculatorCodeReadFailed {
+                    variable: "A:ATC MODEL".to_owned()
+                })
+            );
         }
     }
 
