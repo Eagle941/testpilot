@@ -15,13 +15,13 @@ pub enum AircraftSupport {
 }
 
 /// Loading operations used by the runtime; tests can supply an independent aircraft component.
-pub trait AircraftInitialiser<S: SimulatorAdapter> {
+pub trait AircraftInitialiser {
     /// Checks this initialiser's model and interface requirements.
     /// Unavailable identifiers or interfaces must return false.
-    fn supported_model(&mut self, simulator: &mut S) -> bool;
+    fn supported_model(&mut self, simulator: &mut dyn SimulatorAdapter) -> bool;
 
     /// Detects support once per armed run that requests initialisation.
-    fn detect(&mut self, simulator: &mut S) -> AircraftSupport {
+    fn detect(&mut self, simulator: &mut dyn SimulatorAdapter) -> AircraftSupport {
         if self.supported_model(simulator) {
             AircraftSupport::Supported
         } else {
@@ -32,21 +32,24 @@ pub trait AircraftInitialiser<S: SimulatorAdapter> {
     /// Submits actual aircraft loading targets once on arming.
     fn submit(
         &mut self,
-        simulator: &mut S,
+        simulator: &mut dyn SimulatorAdapter,
         targets: InitialisationConfig,
     ) -> Result<(), InitialisationError>;
 
     /// Reads actual mass and balance, independently of configured telemetry signals.
-    fn readback(&mut self, simulator: &mut S) -> Result<AircraftMassBalance, InitialisationError>;
+    fn readback(
+        &mut self,
+        simulator: &mut dyn SimulatorAdapter,
+    ) -> Result<AircraftMassBalance, InitialisationError>;
 }
 
 /// A32NX loading component. Simulator mappings remain deliberately unimplemented.
 pub struct A32nxInitialiser;
 
-impl<S: SimulatorAdapter> AircraftInitialiser<S> for A32nxInitialiser {
+impl AircraftInitialiser for A32nxInitialiser {
     /// Matches the A20N model code and its configured ATC localisation key (see README).
     /// Requires the FlyByWire readiness variable to exist, without reading its value.
-    fn supported_model(&mut self, simulator: &mut S) -> bool {
+    fn supported_model(&mut self, simulator: &mut dyn SimulatorAdapter) -> bool {
         let Ok(model) = simulator.read_string("A:ATC MODEL") else {
             return false;
         };
@@ -62,7 +65,7 @@ impl<S: SimulatorAdapter> AircraftInitialiser<S> for A32nxInitialiser {
     }
     fn submit(
         &mut self,
-        _simulator: &mut S,
+        _simulator: &mut dyn SimulatorAdapter,
         _targets: InitialisationConfig,
     ) -> Result<(), InitialisationError> {
         // TODO: Verify and implement actual A32NX payload/fuel/balance injection through msfs-rs.
@@ -71,7 +74,10 @@ impl<S: SimulatorAdapter> AircraftInitialiser<S> for A32nxInitialiser {
         })
     }
 
-    fn readback(&mut self, _simulator: &mut S) -> Result<AircraftMassBalance, InitialisationError> {
+    fn readback(
+        &mut self,
+        _simulator: &mut dyn SimulatorAdapter,
+    ) -> Result<AircraftMassBalance, InitialisationError> {
         // TODO: Verify and implement actual A32NX ZFW/GW/GWCG readback in kg and percent MAC.
         Err(InitialisationError::NotImplemented {
             operation: "readback",

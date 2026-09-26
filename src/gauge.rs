@@ -8,17 +8,20 @@ use crate::{gauge_runtime::GaugeRuntime, replayer::Replayer, simulator::MsfsSimu
 #[msfs::gauge(name=testpilot)]
 /// MSFS gauge entrypoint that drives the replay runtime each `PreUpdate`.
 async fn testpilot(mut gauge: msfs::Gauge) -> Result<(), Box<dyn Error>> {
-    let mut runtime =
-        match GaugeRuntime::new(Replayer::new(), MsfsSimulator::new(), A32nxInitialiser) {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                println!("TESTPILOT ERROR: runtime setup failed: {error}");
-                // Setup failures must also await PostKill stream closure: returning
-                // early leaves msfs-rs polling a completed future on the next event.
-                while gauge.next_event().await.is_some() {}
-                return Ok(());
-            }
-        };
+    let mut runtime = match GaugeRuntime::new(
+        Replayer::new(),
+        Box::new(MsfsSimulator::new()),
+        Box::new(A32nxInitialiser),
+    ) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            println!("TESTPILOT ERROR: runtime setup failed: {error}");
+            // Setup failures must also await PostKill stream closure: returning
+            // early leaves msfs-rs polling a completed future on the next event.
+            while gauge.next_event().await.is_some() {}
+            return Ok(());
+        }
+    };
     // PreKill stops replay, but this future must remain pending until msfs-rs
     // closes the event stream and polls it on PostKill. Returning on PreKill
     // would make that final poll panic by resuming an already completed future.

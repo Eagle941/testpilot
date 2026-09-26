@@ -41,7 +41,11 @@ the clock, including a generic aircraft-string read operation. The separate
 `A32nxInitialiser` component owns aircraft detection, loading submission and
 mass/balance readback behind the small `AircraftInitialiser` interface, allowing
 runtime tests to substitute it independently. The runtime has one explicit
-constructor taking the replayer, simulator and aircraft component. `Initialisation` contains only
+constructor taking the replayer, a `Box<dyn SimulatorAdapter>` and a
+`Box<dyn AircraftInitialiser>`. Neither `GaugeRuntime` nor `AircraftInitialiser`
+has generic type parameters; initialisation methods receive a
+`&mut dyn SimulatorAdapter`. Tests retain shared handles to fake state for clock
+control and operation assertions. `Initialisation` contains only
 the simulator-independent tolerance and deadline checks.
 
 ## MVP scope

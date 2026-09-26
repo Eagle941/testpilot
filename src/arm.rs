@@ -40,9 +40,9 @@ impl ArmingMonitor {
 
     /// Reads the arming value, updates transition tracking, and reports whether
     /// the run should start from this frame.
-    pub fn ready_to_start<S: SimulatorAdapter>(
+    pub fn ready_to_start(
         &mut self,
-        simulator: &mut S,
+        simulator: &mut dyn SimulatorAdapter,
     ) -> Result<bool, SimulatorError> {
         let armed = simulator.read(&self.variable, None)?;
         let starting = self.trigger.start(armed);
@@ -51,7 +51,7 @@ impl ArmingMonitor {
     }
 
     /// Resets the arming variable and edge detector to `0.0` after a successful write.
-    pub fn reset<S: SimulatorAdapter>(&mut self, simulator: &mut S) -> Result<(), SimulatorError> {
+    pub fn reset(&mut self, simulator: &mut dyn SimulatorAdapter) -> Result<(), SimulatorError> {
         simulator.write(&self.variable, 0.0)?;
         self.armed_value = 0.0;
         self.trigger = PositiveTrigger::default();
