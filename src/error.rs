@@ -14,6 +14,10 @@ use thiserror::Error;
 /// Validation failures for replay TOML contents.
 #[derive(Debug, Error)]
 pub enum ConfigError {
+    #[error(
+        "initialisation.zfw, initialisation.gw and initialisation.gwcg must be supplied together or all omitted"
+    )]
+    IncompleteInitialisationMassBalance,
     #[error("invalid initialisation.{field}: {reason}")]
     InvalidInitialisation {
         field: &'static str,
@@ -95,6 +99,10 @@ pub enum ConfigError {
 /// Initialisation submission, readback, readiness and deadline failures.
 #[derive(Debug, Error)]
 pub enum InitialisationError {
+    #[error(
+        "invalid THS target {degrees} degrees: must be finite and between -4 and 13.5 inclusive"
+    )]
+    InvalidThsTarget { degrees: f64 },
     #[error("invalid A32NX loading targets {targets:?}: {reason}")]
     InvalidLoadingTargets {
         targets: crate::config::InitialisationConfig,
@@ -107,11 +115,11 @@ pub enum InitialisationError {
         targets: crate::config::InitialisationConfig,
     },
     #[error(
-        "aircraft initialisation timed out after 30 simulator seconds; targets (kg, kg, % MAC): {targets:?}; latest actual values: {latest:?}"
+        "aircraft initialisation timed out after 30 simulator seconds; targets (kg, kg, % MAC, THS degrees): {targets:?}; latest actual values: {latest:?}"
     )]
     Timeout {
-        targets: crate::config::InitialisationConfig,
-        latest: Option<crate::initialisation::AircraftMassBalance>,
+        targets: Box<crate::config::InitialisationConfig>,
+        latest: Option<crate::initialisation::AircraftInitialisationState>,
     },
     #[error("initialisation simulator time moved backwards from {previous:?} to {current:?}")]
     ClockMovedBackwards {
@@ -120,9 +128,15 @@ pub enum InitialisationError {
     },
     #[error("initialisation readback {field} must be finite, got {value}")]
     NonFiniteReadback { field: &'static str, value: f64 },
+    #[error("initialisation THS readback is missing")]
+    MissingThsReadback,
+    #[error("initialisation readback {field} is missing")]
+    MissingMassBalanceReadback { field: &'static str },
+    #[error("required initialisation variable L:A32NX_HYD_TRIM_WHEEL_PERCENT does not exist")]
+    MissingThsInterface,
     #[error("failed to submit aircraft initialisation targets: {0}")]
     Submit(#[source] SimulatorError),
-    #[error("failed to read actual aircraft mass and balance: {0}")]
+    #[error("failed to read actual aircraft initialisation state: {0}")]
     Readback(#[source] SimulatorError),
 }
 

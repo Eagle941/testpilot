@@ -1,13 +1,15 @@
 format_version = 1
 input_file = "scenario.csv"
 
-# Optional actual aircraft mass/balance targets. Detected A32NX aircraft load
-# these targets on arming and wait for readiness before replay; unsupported or
+# Optional initialisation: zfw/gw/gwcg must be all present or all absent.
+# ths is independently optional; ths-only and mass/balance-only runs are valid.
+# Detected A32NX aircraft apply these and wait for readiness; unsupported or
 # unidentified aircraft skip initialisation and start replay.
 # [initialisation]
 # zfw = 60000.0 # kg
 # gw = 65000.0  # kg
 # gwcg = 25.0  # percent MAC
+# ths = 1.0    # optional degrees, -4 to 13.5 inclusive
 
 [inject.0]
 name = "sidestick_pitch_position"

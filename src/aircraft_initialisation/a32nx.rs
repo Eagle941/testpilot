@@ -1,9 +1,9 @@
-//! A32NX detection, loading calculation, submission and actual mass/balance readback.
+//! A32NX detection, aircraft loading, trim initialisation and actual-state readback.
 
 use super::AircraftInitialiser;
 use crate::config::InitialisationConfig;
 use crate::error::InitialisationError;
-use crate::initialisation::AircraftMassBalance;
+use crate::initialisation::AircraftInitialisationState;
 use crate::simulator::SimulatorAdapter;
 
 const PAX_WEIGHT_KG: f64 = 84.0;
@@ -25,9 +25,6 @@ const PAX_ARMS: [f64; 4] = [20.5, 1.5, -16.6, -35.6];
 const CARGO_CAPACITIES: [f64; 4] = [3402.0, 2426.0, 2110.0, 1497.0];
 const CARGO_ARMS: [f64; 4] = [17.3, -24.1, -34.1, -42.4];
 const FUEL_ARMS: [f64; 5] = [-16.9, -16.9, -8.0, -8.0, -4.5];
-
-/// A32NX detection, loading submission and actual mass/balance readback.
-pub struct A32nxInitialiser;
 
 /// Native LVAR values, calculated before any loading writes are performed.
 #[derive(Debug, PartialEq)]
@@ -52,8 +49,12 @@ struct A32nxLoading {
 impl A32nxLoading {
     /// Reduced `calculate`: GW fixes fuel; its moment fixes the required payload moment.
     fn from_targets(targets: InitialisationConfig) -> Result<Self, InitialisationError> {
-        let InitialisationConfig { zfw, gw, gwcg } = targets;
         let invalid = |reason| InitialisationError::InvalidLoadingTargets { targets, reason };
+        let (Some(zfw), Some(gw), Some(gwcg)) = (targets.zfw, targets.gw, targets.gwcg) else {
+            return Err(invalid(
+                "ZFW, GW and GWCG must all be supplied for aircraft loading",
+            ));
+        };
         if ![zfw, gw, gwcg].into_iter().all(f64::is_finite) {
             return Err(invalid("all inputs must be finite"));
         }
@@ -313,6 +314,30 @@ impl A32nxLoading {
     }
 }
 
+/// A32NX detection, loading submission and configured actual-state readback.
+#[derive(Default)]
+pub struct A32nxInitialiser {
+    /// Whether the latest submitted configuration requests THS readback.
+    read_ths: bool,
+    /// Whether the latest submission omitted the mass/balance group.
+    skip_mass_balance: bool,
+}
+
+impl A32nxInitialiser {
+    /// Trim-wheel position published by A32NX in percent.
+    const TRIM_POSITION: &str = "L:A32NX_HYD_TRIM_WHEEL_PERCENT";
+    /// Transient manual trim demand consumed each simulator tick.
+    const TRIM_EVENT: &str = "K:AXIS_ELEV_TRIM_SET";
+
+    /// Maps THS degrees to the SDK's integer event range without clamping.
+    fn trim_axis_demand(degrees: f64) -> Result<f64, InitialisationError> {
+        if !degrees.is_finite() || !(-4.0..=13.5).contains(&degrees) {
+            return Err(InitialisationError::InvalidThsTarget { degrees });
+        }
+        Ok((-16383.0 + (degrees + 4.0) * 32767.0 / 17.5).round())
+    }
+}
+
 impl AircraftInitialiser for A32nxInitialiser {
     /// Matches the A20N model code and its configured ATC localisation key (see README).
     /// Requires the FlyByWire readiness variable to exist, without reading its value.
@@ -336,25 +361,79 @@ impl AircraftInitialiser for A32nxInitialiser {
         simulator: &mut dyn SimulatorAdapter,
         targets: InitialisationConfig,
     ) -> Result<(), InitialisationError> {
-        A32nxLoading::from_targets(targets)?.submit(simulator)
+        self.read_ths = false;
+        self.skip_mass_balance = true;
+        // Prepare every target before performing any writes.
+        let loading = targets
+            .has_mass_balance()
+            .then(|| A32nxLoading::from_targets(targets))
+            .transpose()?;
+        let trim = targets
+            .ths
+            .map(|target| {
+                let axis = Self::trim_axis_demand(target)?;
+                if !simulator
+                    .local_variable_exists(Self::TRIM_POSITION)
+                    .map_err(InitialisationError::Readback)?
+                {
+                    return Err(InitialisationError::MissingThsInterface);
+                }
+                simulator
+                    .validate_read(Self::TRIM_POSITION, None)
+                    .map_err(InitialisationError::Readback)?;
+                Ok(axis)
+            })
+            .transpose()?;
+        if let Some(loading) = loading {
+            loading.submit(simulator)?;
+        }
+        if let Some(axis) = trim {
+            simulator
+                .write(Self::TRIM_EVENT, axis)
+                .map_err(InitialisationError::Submit)?;
+        }
+        self.skip_mass_balance = !targets.has_mass_balance();
+        self.read_ths = targets.ths.is_some();
+        Ok(())
     }
 
     fn readback(
         &mut self,
         simulator: &mut dyn SimulatorAdapter,
-    ) -> Result<AircraftMassBalance, InitialisationError> {
+    ) -> Result<AircraftInitialisationState, InitialisationError> {
         // A32NX publishes actual airframe masses in kg and CG in percent MAC.
         // L: reads use their native numeric scale without an SDK unit conversion.
-        Ok(AircraftMassBalance {
-            zfw: simulator
-                .read("L:A32NX_AIRFRAME_ZFW", None)
-                .map_err(InitialisationError::Readback)?,
-            gw: simulator
-                .read("L:A32NX_AIRFRAME_GW", None)
-                .map_err(InitialisationError::Readback)?,
-            gwcg: simulator
-                .read("L:A32NX_AIRFRAME_GW_CG_PERCENT_MAC", None)
-                .map_err(InitialisationError::Readback)?,
+        Ok(AircraftInitialisationState {
+            zfw: (!self.skip_mass_balance)
+                .then(|| {
+                    simulator
+                        .read("L:A32NX_AIRFRAME_ZFW", None)
+                        .map_err(InitialisationError::Readback)
+                })
+                .transpose()?,
+            gw: (!self.skip_mass_balance)
+                .then(|| {
+                    simulator
+                        .read("L:A32NX_AIRFRAME_GW", None)
+                        .map_err(InitialisationError::Readback)
+                })
+                .transpose()?,
+            gwcg: (!self.skip_mass_balance)
+                .then(|| {
+                    simulator
+                        .read("L:A32NX_AIRFRAME_GW_CG_PERCENT_MAC", None)
+                        .map_err(InitialisationError::Readback)
+                })
+                .transpose()?,
+            ths: self
+                .read_ths
+                .then(|| {
+                    simulator
+                        .read(Self::TRIM_POSITION, None)
+                        .map(|percent| -4.0 + percent * 17.5 / 100.0)
+                        .map_err(InitialisationError::Readback)
+                })
+                .transpose()?,
         })
     }
 }
@@ -364,6 +443,30 @@ mod tests {
     use super::*;
     use crate::error::SimulatorError;
     use std::time::Duration;
+
+    #[test]
+    fn axis_conversion_preserves_endpoints_and_rounds_to_integer_events() {
+        for (degrees, axis) in [
+            (-4.0, -16383.0),
+            (0.0, -8893.0),
+            (4.75, 1.0),
+            (13.5, 16384.0),
+        ] {
+            assert_eq!(A32nxInitialiser::trim_axis_demand(degrees).unwrap(), axis);
+        }
+        for value in [
+            -4.000001,
+            13.500001,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            assert!(matches!(
+                A32nxInitialiser::trim_axis_demand(value),
+                Err(InitialisationError::InvalidThsTarget { .. })
+            ));
+        }
+    }
 
     #[derive(Default)]
     struct LoadingSimulator {
@@ -485,13 +588,14 @@ mod tests {
     #[test]
     fn unreachable_loading_performs_no_loading_writes() {
         let mut simulator = LoadingSimulator::default();
-        let error = A32nxInitialiser
+        let error = A32nxInitialiser::default()
             .submit(
                 &mut simulator,
                 InitialisationConfig {
-                    zfw: 60000.0,
-                    gw: 65000.0,
-                    gwcg: 99.0,
+                    zfw: Some(60000.0),
+                    gw: Some(65000.0),
+                    gwcg: Some(99.0),
+                    ths: None,
                 },
             )
             .unwrap_err();
@@ -522,7 +626,12 @@ mod tests {
             .map(|(volume, arm)| volume * 3.039075693483925 * arm)
             .sum::<f64>();
         let gwcg = (-5.383 - (-400350.0 + payload_moment + fuel_moment) / gw) * 100.0 / 13.464;
-        InitialisationConfig { zfw, gw, gwcg }
+        InitialisationConfig {
+            zfw: Some(zfw),
+            gw: Some(gw),
+            gwcg: Some(gwcg),
+            ths: None,
+        }
     }
 
     fn counts(load: &A32nxLoading) -> [u32; 4] {
@@ -557,9 +666,9 @@ mod tests {
         let cargo = cargo(load);
         let fuel = fuel(load);
         let actual = targets(counts, cargo, fuel);
-        close(actual.zfw, requested.zfw);
-        close(actual.gw, requested.gw);
-        close(actual.gwcg, requested.gwcg);
+        close(actual.zfw.unwrap(), requested.zfw.unwrap());
+        close(actual.gw.unwrap(), requested.gw.unwrap());
+        close(actual.gwcg.unwrap(), requested.gwcg.unwrap());
         assert!(cargo.iter().sum::<f64>() + 1e-7 >= counts.iter().sum::<u32>() as f64 * 20.0);
         for (n, capacity) in counts.into_iter().zip([36, 42, 48, 48]) {
             assert!(n <= capacity);
@@ -580,9 +689,10 @@ mod tests {
         for (requested, expected_counts, expected_cargo, main) in [
             (
                 InitialisationConfig {
-                    zfw: 50000.0,
-                    gw: 56000.0,
-                    gwcg: 30.5,
+                    zfw: Some(50000.0),
+                    gw: Some(56000.0),
+                    gwcg: Some(30.5),
+                    ths: None,
                 },
                 [14, 18, 20, 20],
                 [873.6258759536895, 0.0, 0.0, 578.3741240463105],
@@ -590,9 +700,10 @@ mod tests {
             ),
             (
                 InitialisationConfig {
-                    zfw: 60000.0,
-                    gw: 65000.0,
-                    gwcg: 25.0,
+                    zfw: Some(60000.0),
+                    gw: Some(65000.0),
+                    gwcg: Some(25.0),
+                    ths: None,
                 },
                 [32, 42, 47, 47],
                 [
@@ -665,9 +776,9 @@ mod tests {
             assert_eq!(counts(&load), expected_counts);
         }
         let mut requested = targets([36, 42, 48, 48], [2400.0, 2400.0, 1500.0, 884.0], [0.0; 5]);
-        let fuel = A32nxLoading::fuel_distribution(79000.0 - requested.zfw);
+        let fuel = A32nxLoading::fuel_distribution(79000.0 - requested.zfw.unwrap());
         requested = targets([36, 42, 48, 48], [2400.0, 2400.0, 1500.0, 884.0], fuel);
-        close(requested.gw, 79000.0);
+        close(requested.gw.unwrap(), 79000.0);
         verify(&A32nxLoading::from_targets(requested).unwrap(), requested);
     }
 
@@ -690,34 +801,35 @@ mod tests {
     #[test]
     fn rejects_invalid_and_unreachable_targets() {
         let base = InitialisationConfig {
-            zfw: 50000.0,
-            gw: 56000.0,
-            gwcg: 30.5,
+            zfw: Some(50000.0),
+            gw: Some(56000.0),
+            gwcg: Some(30.5),
+            ths: None,
         };
         for requested in [
             InitialisationConfig {
-                zfw: 42499.0,
+                zfw: Some(42499.0),
                 ..base
             },
             InitialisationConfig {
-                zfw: 64301.0,
-                gw: 65000.0,
+                zfw: Some(64301.0),
+                gw: Some(65000.0),
                 ..base
             },
             InitialisationConfig {
-                gw: 49999.0,
+                gw: Some(49999.0),
                 ..base
             },
             InitialisationConfig {
-                gw: 79001.0,
+                gw: Some(79001.0),
                 ..base
             },
             InitialisationConfig {
-                gw: 70000.0,
+                gw: Some(70000.0),
                 ..base
             },
             InitialisationConfig {
-                gwcg: f64::MAX,
+                gwcg: Some(f64::MAX),
                 ..base
             },
         ]
@@ -727,10 +839,16 @@ mod tests {
                 .into_iter()
                 .flat_map(|value| {
                     [
-                        InitialisationConfig { zfw: value, ..base },
-                        InitialisationConfig { gw: value, ..base },
                         InitialisationConfig {
-                            gwcg: value,
+                            zfw: Some(value),
+                            ..base
+                        },
+                        InitialisationConfig {
+                            gw: Some(value),
+                            ..base
+                        },
+                        InitialisationConfig {
+                            gwcg: Some(value),
                             ..base
                         },
                     ]
@@ -742,15 +860,19 @@ mod tests {
             ));
         }
         for requested in [
-            InitialisationConfig { gwcg: 99.0, ..base },
             InitialisationConfig {
-                gwcg: -99.0,
+                gwcg: Some(99.0),
                 ..base
             },
             InitialisationConfig {
-                zfw: 42500.0,
-                gw: 42500.0,
-                gwcg: 30.0,
+                gwcg: Some(-99.0),
+                ..base
+            },
+            InitialisationConfig {
+                zfw: Some(42500.0),
+                gw: Some(42500.0),
+                gwcg: Some(30.0),
+                ths: None,
             },
         ] {
             assert!(matches!(

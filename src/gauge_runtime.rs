@@ -73,8 +73,6 @@ impl GaugeRuntime {
                 match self.aircraft_initialiser.detect(self.simulator.as_mut()) {
                     AircraftSupport::Supported => {
                         self.initialisation = Some(Initialisation::new(targets, simulation_time));
-                        self.aircraft_initialiser
-                            .submit(self.simulator.as_mut(), targets)?;
                     }
                     AircraftSupport::Unsupported => {
                         println!(
@@ -89,6 +87,8 @@ impl GaugeRuntime {
         }
         if let Some(gate) = &mut self.initialisation {
             gate.check_deadline(simulation_time)?;
+            self.aircraft_initialiser
+                .submit(self.simulator.as_mut(), gate.targets())?;
             let actual = self
                 .aircraft_initialiser
                 .readback(self.simulator.as_mut())?;
@@ -326,7 +326,7 @@ mod tests {
     use crate::config::InitialisationConfig;
     use crate::error::InitialisationError;
     use crate::error::{GaugeError, ReplayerError, SimulatorError};
-    use crate::initialisation::AircraftMassBalance;
+    use crate::initialisation::AircraftInitialisationState;
     use crate::replayer::Replayer;
     use crate::simulator::SimulatorAdapter;
 
@@ -469,7 +469,7 @@ unit = "radians"
 
     #[derive(Default)]
     struct FakeAircraftInitialiser {
-        mass_balance: VecDeque<Result<AircraftMassBalance, InitialisationError>>,
+        mass_balance: VecDeque<Result<AircraftInitialisationState, InitialisationError>>,
         fail_initialisation: bool,
         unsupported: bool,
     }
@@ -504,7 +504,7 @@ unit = "radians"
                 return Err(InitialisationError::Submit(
                     SimulatorError::CalculatorCodeWriteFailed {
                         variable: "L:TEST_LOADING".to_owned(),
-                        value: targets.zfw,
+                        value: targets.zfw.unwrap(),
                     },
                 ));
             }
@@ -514,7 +514,7 @@ unit = "radians"
         fn readback(
             &mut self,
             _simulator: &mut dyn SimulatorAdapter,
-        ) -> Result<AircraftMassBalance, InitialisationError> {
+        ) -> Result<AircraftInitialisationState, InitialisationError> {
             self.simulator
                 .borrow_mut()
                 .operations
@@ -743,13 +743,14 @@ unit = "radians"
             .unwrap_or_else(|error| panic!("invalid test duration: {error}"))
     }
 
-    const MATCHED: AircraftMassBalance = AircraftMassBalance {
-        zfw: 60000.0,
-        gw: 65000.0,
-        gwcg: 25.0,
+    const MATCHED: AircraftInitialisationState = AircraftInitialisationState {
+        zfw: Some(60000.0),
+        gw: Some(65000.0),
+        gwcg: Some(25.0),
+        ths: None,
     };
-    const UNMATCHED: AircraftMassBalance = AircraftMassBalance {
-        gwcg: 26.0,
+    const UNMATCHED: AircraftInitialisationState = AircraftInitialisationState {
+        gwcg: Some(26.0),
         ..MATCHED
     };
 
@@ -758,6 +759,319 @@ unit = "radians"
         Fixture::new(&format!(
             "{input_config}\n[initialisation]\nzfw = 60000\ngw = 65000\ngwcg = 25\n"
         ))
+    }
+
+    fn trim_runtime() -> (Fixture, GaugeRuntime, SimulatorHandle) {
+        let fixture = initialisation_fixture();
+        let config = fs::read_to_string(&fixture.config_path).unwrap();
+        fs::write(&fixture.config_path, format!("{config}ths = 4.75\n")).unwrap();
+        let mut simulator = FakeSimulator::new(duration(100.0));
+        simulator.string_reads.push_back(Ok("A20N".to_owned()));
+        simulator.queue_reads("L:A32NX_IS_READY", [0.0]);
+        simulator.queue_reads(ARMED_VARIABLE, [1.0; 4]);
+        simulator.queue_reads("L:A32NX_AIRFRAME_ZFW", [60000.0; 4]);
+        simulator.queue_reads("L:A32NX_AIRFRAME_GW", [65000.0; 4]);
+        simulator.queue_reads("L:A32NX_AIRFRAME_GW_CG_PERCENT_MAC", [25.0; 4]);
+        simulator.queue_reads("L:A32NX_HYD_TRIM_WHEEL_PERCENT", [0.0, 25.0, 50.0]);
+        let simulator = Rc::new(RefCell::new(simulator));
+        let runtime = GaugeRuntime::new(
+            Replayer::with_config_path(fixture.config_path.clone()),
+            Box::new(Rc::clone(&simulator)),
+            Box::new(A32nxInitialiser::default()),
+        )
+        .unwrap();
+        (fixture, runtime, simulator)
+    }
+
+    #[test]
+    fn ths_only_initialisation_does_not_load_or_read_mass_balance() {
+        let (fixture, mut runtime, simulator) = trim_runtime();
+        let config = fs::read_to_string(&fixture.config_path).unwrap();
+        fs::write(
+            &fixture.config_path,
+            config.replace("zfw = 60000\ngw = 65000\ngwcg = 25\n", ""),
+        )
+        .unwrap();
+        for variable in [
+            "L:A32NX_AIRFRAME_ZFW",
+            "L:A32NX_AIRFRAME_GW",
+            "L:A32NX_AIRFRAME_GW_CG_PERCENT_MAC",
+        ] {
+            simulator.borrow_mut().reads.remove(variable);
+        }
+        for now in [100.0, 101.0] {
+            simulator.borrow_mut().time = duration(now);
+            runtime.pre_update().unwrap();
+            assert_no_telemetry(&fixture);
+        }
+        assert!(simulator.borrow().operations.iter().all(|op| match op {
+            Operation::Write { variable, .. } =>
+                variable == ARMED_VARIABLE || variable == "K:AXIS_ELEV_TRIM_SET",
+            Operation::Read { variable, .. } => !variable.starts_with("L:A32NX_AIRFRAME_"),
+            _ => true,
+        }));
+        simulator.borrow_mut().time = duration(102.0);
+        runtime.pre_update().unwrap();
+        runtime.stop().unwrap();
+        assert!(fixture.telemetry_contents().ends_with("\n0,0\n"));
+    }
+
+    #[test]
+    fn empty_initialisation_starts_immediately_without_detection_or_loading() {
+        let fixture = initialisation_fixture();
+        let config = fs::read_to_string(&fixture.config_path).unwrap();
+        fs::write(
+            &fixture.config_path,
+            config.replace("zfw = 60000\ngw = 65000\ngwcg = 25\n", ""),
+        )
+        .unwrap();
+        let mut simulator = FakeSimulator::new(duration(100.0));
+        simulator.queue_reads(ARMED_VARIABLE, [1.0]);
+        let (mut runtime, simulator) = runtime(&fixture, simulator);
+        runtime.pre_update().unwrap();
+        assert!(!simulator.borrow().operations.iter().any(|op| matches!(
+            op,
+            Operation::DetectAircraft | Operation::Initialise(_) | Operation::ReadMassBalance
+        )));
+        runtime.stop().unwrap();
+        assert!(fixture.telemetry_contents().ends_with("\n0,0\n"));
+    }
+
+    #[test]
+    fn trim_delays_replay_resends_demand_and_releases_on_readiness() {
+        let (fixture, mut runtime, simulator) = trim_runtime();
+        for now in [100.0, 101.0] {
+            simulator.borrow_mut().time = duration(now);
+            runtime.pre_update().unwrap();
+            assert_no_telemetry(&fixture);
+            assert!(!simulator.borrow().operations.iter().any(|op| matches!(op, Operation::Write { variable, .. } if variable == "K:AXIS_ELEVATOR_SET")));
+        }
+        assert_eq!(simulator.borrow().operations.iter().filter(|op|
+            matches!(op, Operation::Write { variable, value: 1.0 } if variable == "K:AXIS_ELEV_TRIM_SET")
+        ).count(), 2);
+        // Every waiting frame resubmits the same loading and trim targets.
+        assert_eq!(simulator.borrow().operations.iter().filter(|op|
+            matches!(op, Operation::Write { variable, .. } if variable == "L:A32NX_BOARDING_STARTED_BY_USR")
+        ).count(), 2);
+        let writes: Vec<_> = simulator
+            .borrow()
+            .operations
+            .iter()
+            .filter_map(|op| match op {
+                Operation::Write { variable, value } if variable != ARMED_VARIABLE => {
+                    Some((variable.clone(), *value))
+                }
+                _ => None,
+            })
+            .collect();
+        let (first, repeated) = writes.split_at(writes.len() / 2);
+        assert_eq!(
+            first, repeated,
+            "resubmission must preserve every loading and trim value"
+        );
+        simulator.borrow_mut().clear_operations();
+        simulator.borrow_mut().time = duration(102.0);
+        runtime.pre_update().unwrap();
+        simulator.borrow_mut().clear_operations();
+        simulator.borrow_mut().time = duration(102.5);
+        runtime.pre_update().unwrap();
+        runtime.stop().unwrap();
+        assert!(fixture.telemetry_contents().contains("\n0,0\n"));
+        assert!(!simulator.borrow().operations.iter().any(|op|
+            matches!(op, Operation::Write { variable, .. } if variable == "K:AXIS_ELEV_TRIM_SET" || variable.starts_with("L:A32NX_"))));
+    }
+
+    #[test]
+    fn trim_failures_and_timeout_stop_without_telemetry() {
+        for failure in [
+            Some(Failure::Read("L:A32NX_HYD_TRIM_WHEEL_PERCENT".to_owned())),
+            Some(Failure::Write("K:AXIS_ELEV_TRIM_SET".to_owned())),
+            Some(Failure::Write("L:A32NX_PAX_A_DESIRED".to_owned())),
+            None,
+        ] {
+            let (fixture, mut runtime, simulator) = trim_runtime();
+            runtime.pre_update().unwrap();
+            let timeout = failure.is_none();
+            simulator.borrow_mut().failure = failure;
+            simulator.borrow_mut().time = duration(if timeout { 130.0 } else { 101.0 });
+            simulator.borrow_mut().clear_operations();
+            let error = runtime.pre_update().unwrap_err();
+            assert!(error.downcast_ref::<InitialisationError>().is_some());
+            if timeout {
+                assert!(matches!(
+                    error.downcast_ref::<InitialisationError>(),
+                    Some(InitialisationError::Timeout { .. })
+                ));
+                assert!(
+                    !simulator
+                        .borrow()
+                        .operations
+                        .iter()
+                        .any(|op| matches!(op, Operation::Write { .. })),
+                    "timeout must precede all loading and trim submissions"
+                );
+            }
+            runtime.stop().unwrap();
+            assert_no_telemetry(&fixture);
+            assert!(!simulator.borrow().operations.iter().any(|op| matches!(op, Operation::Write { variable, .. } if variable == "K:AXIS_ELEVATOR_SET")));
+            assert_eq!(
+                simulator.borrow().operations.last(),
+                Some(&Operation::Write {
+                    variable: ARMED_VARIABLE.to_owned(),
+                    value: 0.0
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn missing_trim_interface_fails_before_loading_writes() {
+        let (fixture, mut runtime, simulator) = trim_runtime();
+        simulator
+            .borrow_mut()
+            .reads
+            .remove("L:A32NX_HYD_TRIM_WHEEL_PERCENT");
+        simulator.borrow_mut().clear_operations();
+        let error = runtime.pre_update().unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<InitialisationError>(),
+            Some(InitialisationError::MissingThsInterface)
+        ));
+        assert!(
+            !simulator
+                .borrow()
+                .operations
+                .iter()
+                .any(|op| matches!(op, Operation::Write { .. }))
+        );
+        runtime.stop().unwrap();
+        assert_no_telemetry(&fixture);
+    }
+
+    #[test]
+    fn a32nx_readback_includes_ths_only_when_latest_submission_requests_it() {
+        use crate::aircraft_initialisation::AircraftInitialiser;
+
+        let mut simulator = FakeSimulator::new(Duration::ZERO);
+        let mut initialiser = A32nxInitialiser::default();
+        let targets = InitialisationConfig {
+            zfw: Some(60000.0),
+            gw: Some(65000.0),
+            gwcg: Some(25.0),
+            ths: Some(1.0),
+        };
+        simulator.queue_reads("L:A32NX_AIRFRAME_ZFW", [60000.0; 4]);
+        simulator.queue_reads("L:A32NX_AIRFRAME_GW", [65000.0; 4]);
+        simulator.queue_reads("L:A32NX_AIRFRAME_GW_CG_PERCENT_MAC", [25.0; 4]);
+        simulator.queue_reads("L:A32NX_HYD_TRIM_WHEEL_PERCENT", [0.0, 50.0, 100.0]);
+        initialiser.submit(&mut simulator, targets).unwrap();
+        for expected in [-4.0, 4.75, 13.5] {
+            simulator.clear_operations();
+            assert_eq!(
+                initialiser.readback(&mut simulator).unwrap(),
+                AircraftInitialisationState {
+                    ths: Some(expected),
+                    ..MATCHED
+                }
+            );
+            assert_eq!(simulator.operations.len(), 4);
+            assert!(
+                simulator
+                    .operations
+                    .iter()
+                    .all(|op| matches!(op, Operation::Read { .. }))
+            );
+            assert_eq!(
+                simulator.operations.last(),
+                Some(&Operation::Read {
+                    variable: "L:A32NX_HYD_TRIM_WHEEL_PERCENT".to_owned(),
+                    unit: None,
+                })
+            );
+        }
+        initialiser
+            .submit(
+                &mut simulator,
+                InitialisationConfig {
+                    ths: None,
+                    ..targets
+                },
+            )
+            .unwrap();
+        simulator.clear_operations();
+        assert_eq!(initialiser.readback(&mut simulator).unwrap(), MATCHED);
+        assert_eq!(simulator.operations.len(), 3);
+        assert!(
+            simulator
+                .operations
+                .iter()
+                .all(|op| matches!(op, Operation::Read { variable, .. }
+            if variable != "L:A32NX_HYD_TRIM_WHEEL_PERCENT"))
+        );
+    }
+
+    #[test]
+    fn a32nx_readback_propagates_configured_ths_read_failures() {
+        use crate::aircraft_initialisation::AircraftInitialiser;
+
+        for invalid in [
+            None,
+            Some(f64::NAN),
+            Some(f64::INFINITY),
+            Some(f64::NEG_INFINITY),
+        ] {
+            let mut simulator = FakeSimulator::new(Duration::ZERO);
+            let mut initialiser = A32nxInitialiser::default();
+            // Register the interface without queuing a value, so None tests a failed read.
+            simulator.queue_reads("L:A32NX_HYD_TRIM_WHEEL_PERCENT", []);
+            initialiser
+                .submit(
+                    &mut simulator,
+                    InitialisationConfig {
+                        zfw: Some(60000.0),
+                        gw: Some(65000.0),
+                        gwcg: Some(25.0),
+                        ths: Some(1.0),
+                    },
+                )
+                .unwrap();
+            simulator.queue_reads("L:A32NX_AIRFRAME_ZFW", [60000.0]);
+            simulator.queue_reads("L:A32NX_AIRFRAME_GW", [65000.0]);
+            simulator.queue_reads("L:A32NX_AIRFRAME_GW_CG_PERCENT_MAC", [25.0]);
+            if let Some(value) = invalid {
+                simulator.queue_reads("L:A32NX_HYD_TRIM_WHEEL_PERCENT", [value]);
+            }
+            simulator.clear_operations();
+            assert!(matches!(initialiser.readback(&mut simulator),
+                Err(InitialisationError::Readback(SimulatorError::CalculatorCodeReadFailed { variable }))
+                | Err(InitialisationError::Readback(SimulatorError::NonFiniteRead { variable, .. }))
+                if variable == "L:A32NX_HYD_TRIM_WHEEL_PERCENT"));
+            assert_eq!(simulator.operations.len(), 4);
+            assert!(
+                simulator
+                    .operations
+                    .iter()
+                    .all(|op| matches!(op, Operation::Read { .. }))
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_aircraft_skip_trim() {
+        let (fixture, mut runtime, simulator) = trim_runtime();
+        simulator.borrow_mut().string_reads = VecDeque::from([Ok("C172".to_owned())]);
+        simulator.borrow_mut().clear_operations();
+        runtime.pre_update().unwrap();
+        assert!(runtime.initialisation.is_none());
+        assert!(!simulator.borrow().operations.iter().any(|op| match op {
+            Operation::Read { variable, .. }
+            | Operation::Write { variable, .. }
+            | Operation::ValidateRead { variable, .. }
+            | Operation::LocalVariableExists(variable) => variable.contains("TRIM"),
+            _ => false,
+        }));
+        runtime.stop().unwrap();
+        assert!(fixture.telemetry_contents().ends_with("\n0,0\n"));
     }
 
     fn assert_no_telemetry(fixture: &Fixture) {
@@ -807,7 +1121,7 @@ unit = "radians"
             simulator.string_reads.push_back(Ok(model.to_owned()));
             simulator.queue_reads("L:A32NX_IS_READY", [0.0]);
             assert_eq!(
-                A32nxInitialiser.detect(&mut simulator),
+                A32nxInitialiser::default().detect(&mut simulator),
                 expected,
                 "model {model:?}"
             );
@@ -822,7 +1136,7 @@ unit = "radians"
         }
         let mut simulator = FakeSimulator::new(Duration::ZERO);
         assert_eq!(
-            A32nxInitialiser.detect(&mut simulator),
+            A32nxInitialiser::default().detect(&mut simulator),
             AircraftSupport::Unsupported
         );
     }
@@ -839,7 +1153,7 @@ unit = "radians"
                     Some(Failure::LocalVariableExists("L:A32NX_IS_READY".to_owned()));
             }
             assert_eq!(
-                A32nxInitialiser.detect(&mut simulator),
+                A32nxInitialiser::default().detect(&mut simulator),
                 AircraftSupport::Unsupported
             );
             assert_eq!(
@@ -866,7 +1180,7 @@ unit = "radians"
             let mut runtime = GaugeRuntime::new(
                 replayer,
                 Box::new(Rc::clone(&simulator)),
-                Box::new(A32nxInitialiser),
+                Box::new(A32nxInitialiser::default()),
             )
             .unwrap();
             runtime.pre_update().unwrap(); // Unsupported aircraft must skip loading operations.
@@ -907,7 +1221,7 @@ unit = "radians"
         let mut runtime = GaugeRuntime::new(
             replayer,
             Box::new(Rc::clone(&simulator)),
-            Box::new(A32nxInitialiser),
+            Box::new(A32nxInitialiser::default()),
         )
         .unwrap();
         runtime.pre_update().unwrap();
@@ -956,21 +1270,26 @@ unit = "radians"
     #[test]
     fn a32nx_readback_reads_fresh_actual_values_in_native_units_without_writes() {
         use crate::aircraft_initialisation::AircraftInitialiser;
-
         let mut simulator = FakeSimulator::new(Duration::ZERO);
         simulator.queue_reads("L:A32NX_AIRFRAME_ZFW", [60000.0, 60100.0]);
         simulator.queue_reads("L:A32NX_AIRFRAME_GW", [65000.0, 65100.0]);
         simulator.queue_reads("L:A32NX_AIRFRAME_GW_CG_PERCENT_MAC", [25.0, 25.01]);
         for expected in [
             MATCHED,
-            AircraftMassBalance {
-                zfw: 60100.0,
-                gw: 65100.0,
-                gwcg: 25.01,
+            AircraftInitialisationState {
+                zfw: Some(60100.0),
+                gw: Some(65100.0),
+                gwcg: Some(25.01),
+                ths: None,
             },
         ] {
             simulator.clear_operations();
-            assert_eq!(A32nxInitialiser.readback(&mut simulator).unwrap(), expected);
+            assert_eq!(
+                A32nxInitialiser::default()
+                    .readback(&mut simulator)
+                    .unwrap(),
+                expected
+            );
             assert_eq!(
                 simulator.operations,
                 [
@@ -989,7 +1308,6 @@ unit = "radians"
     #[test]
     fn a32nx_readback_reports_each_failed_variable_and_stops_reading() {
         use crate::aircraft_initialisation::AircraftInitialiser;
-
         let variables = [
             "L:A32NX_AIRFRAME_ZFW",
             "L:A32NX_AIRFRAME_GW",
@@ -1016,7 +1334,9 @@ unit = "radians"
                 if invalid.is_none() {
                     simulator.failure = Some(Failure::Read((*failed_variable).to_owned()));
                 }
-                let error = A32nxInitialiser.readback(&mut simulator).unwrap_err();
+                let error = A32nxInitialiser::default()
+                    .readback(&mut simulator)
+                    .unwrap_err();
                 match (invalid, error) {
                     (
                         None,
@@ -1056,7 +1376,7 @@ unit = "radians"
         let mut runtime = GaugeRuntime::new(
             replayer,
             Box::new(Rc::clone(&simulator)),
-            Box::new(A32nxInitialiser),
+            Box::new(A32nxInitialiser::default()),
         )
         .unwrap();
         let error = runtime.pre_update().unwrap_err();
@@ -1077,12 +1397,12 @@ unit = "radians"
         let mut simulator = FakeSimulator::new(duration(100.0));
         simulator.queue_reads(ARMED_VARIABLE, [1.0; 5]);
         initialiser.mass_balance.extend([
-            Ok(AircraftMassBalance {
-                zfw: 61000.0,
+            Ok(AircraftInitialisationState {
+                zfw: Some(61000.0),
                 ..MATCHED
             }),
-            Ok(AircraftMassBalance {
-                gw: 66000.0,
+            Ok(AircraftInitialisationState {
+                gw: Some(66000.0),
                 ..MATCHED
             }),
             Ok(UNMATCHED),
@@ -1107,7 +1427,7 @@ unit = "radians"
                 .iter()
                 .filter(|op| matches!(op, Operation::Initialise(_)))
                 .count(),
-            1
+            4
         );
         assert_eq!(
             simulator
@@ -1123,9 +1443,10 @@ unit = "radians"
                 .borrow_mut()
                 .operations
                 .contains(&Operation::Initialise(InitialisationConfig {
-                    zfw: 60000.0,
-                    gw: 65000.0,
-                    gwcg: 25.0
+                    zfw: Some(60000.0),
+                    gw: Some(65000.0),
+                    gwcg: Some(25.0),
+                    ths: None,
                 }))
         );
         runtime.stop().unwrap();
@@ -1178,7 +1499,12 @@ unit = "radians"
             assert!(matches!(
                 error.downcast_ref::<InitialisationError>(),
                 Some(InitialisationError::Timeout {
-                    latest: Some(UNMATCHED),
+                    latest: Some(crate::initialisation::AircraftInitialisationState {
+                        zfw: Some(60000.0),
+                        gw: Some(65000.0),
+                        gwcg: Some(26.0),
+                        ths: None
+                    }),
                     ..
                 })
             ));
@@ -1217,10 +1543,12 @@ unit = "radians"
                             variable: "L:TEST_LOADING".to_owned(),
                         },
                     ))),
-                2 => initialiser.mass_balance.push_back(Ok(AircraftMassBalance {
-                    gw: f64::NAN,
-                    ..MATCHED
-                })),
+                2 => initialiser
+                    .mass_balance
+                    .push_back(Ok(AircraftInitialisationState {
+                        gw: Some(f64::NAN),
+                        ..MATCHED
+                    })),
                 _ => initialiser.mass_balance.push_back(Ok(UNMATCHED)),
             }
             let (mut runtime, simulator, _) =
@@ -1269,7 +1597,7 @@ unit = "radians"
                 .iter()
                 .filter(|op| matches!(op, Operation::Initialise(_)))
                 .count(),
-            1
+            2
         );
         runtime.stop().unwrap();
         runtime.stop().unwrap();
@@ -1302,7 +1630,7 @@ unit = "radians"
         let result = GaugeRuntime::new(
             Replayer::with_config_path(fixture.config_path.clone()),
             Box::new(simulator),
-            Box::new(A32nxInitialiser),
+            Box::new(A32nxInitialiser::default()),
         );
         match result {
             Err(GaugeError::Simulator(SimulatorError::CalculatorCodeWriteFailed {

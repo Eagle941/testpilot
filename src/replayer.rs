@@ -433,7 +433,7 @@ unit = "radians"
         let targets = replayer.prepare_scenario().unwrap().unwrap();
         assert_eq!(
             (targets.zfw, targets.gw, targets.gwcg),
-            (60000.0, 65000.0, 25.0)
+            (Some(60000.0), Some(65000.0), Some(25.0))
         );
         assert!(replayer.pre_update(time(100.0)).unwrap().is_none());
         assert!(replayer.pre_update(time(120.0)).unwrap().is_none());

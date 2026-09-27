@@ -34,22 +34,42 @@ const INJECT_SECTION_FIELDS: [&str; 4] = ["name", "variable", "source_range", "s
 /// Allowed fields for each `[record.N]` section.
 const RECORD_SECTION_FIELDS: [&str; 4] = ["name", "variable", "unit", "max_sampling_rate"];
 
-/// Demanded actual aircraft mass and balance, independent of flight-management entries.
+/// Demanded actual aircraft mass, balance and optional THS, independent of flight-management entries.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InitialisationConfig {
-    /// Zero-fuel weight in kilograms.
-    pub zfw: f64,
-    /// Gross weight in kilograms.
-    pub gw: f64,
-    /// Gross-weight centre of gravity in percent mean aerodynamic chord.
-    pub gwcg: f64,
+    /// Optional zero-fuel weight in kilograms; required with gw and gwcg.
+    pub zfw: Option<f64>,
+    /// Optional gross weight in kilograms; required with zfw and gwcg.
+    pub gw: Option<f64>,
+    /// Optional gross-weight centre of gravity in percent MAC; required with zfw and gw.
+    pub gwcg: Option<f64>,
+    /// Optional trimmable horizontal stabilizer demand in degrees, from -4 to 13.5.
+    pub ths: Option<f64>,
 }
 
 impl InitialisationConfig {
+    /// Whether any mass/balance target is configured; validation requires the complete group.
+    pub const fn has_mass_balance(&self) -> bool {
+        self.zfw.is_some() || self.gw.is_some() || self.gwcg.is_some()
+    }
+
+    /// Whether the section requests any initialisation work.
+    pub const fn has_targets(&self) -> bool {
+        self.has_mass_balance() || self.ths.is_some()
+    }
+
     /// Checks finite targets and basic mass consistency; aircraft limits belong to the adapter.
     fn validate(&self) -> Result<(), ConfigError> {
+        if self.has_mass_balance()
+            && (self.zfw.is_none() || self.gw.is_none() || self.gwcg.is_none())
+        {
+            return Err(ConfigError::IncompleteInitialisationMassBalance);
+        }
         for (field, value) in [("zfw", self.zfw), ("gw", self.gw), ("gwcg", self.gwcg)] {
+            let Some(value) = value else {
+                continue;
+            };
             if !value.is_finite() {
                 return Err(ConfigError::InvalidInitialisation {
                     field,
@@ -63,10 +83,20 @@ impl InitialisationConfig {
                 });
             }
         }
-        if self.gw < self.zfw {
+        if let (Some(gw), Some(zfw)) = (self.gw, self.zfw)
+            && gw < zfw
+        {
             return Err(ConfigError::InvalidInitialisation {
                 field: "gw",
                 reason: "must be at least zfw",
+            });
+        }
+        if let Some(ths) = self.ths
+            && (!ths.is_finite() || !(-4.0..=13.5).contains(&ths))
+        {
+            return Err(ConfigError::InvalidInitialisation {
+                field: "ths",
+                reason: "must be finite and between -4 and 13.5 degrees inclusive",
             });
         }
         Ok(())
@@ -76,7 +106,7 @@ impl InitialisationConfig {
 /// Validated replay configuration in deterministic processing order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReplayConfig {
-    /// Optional demanded aircraft mass and balance before playback.
+    /// Optional demanded aircraft mass, balance and THS before playback.
     pub initialisation: Option<InitialisationConfig>,
     /// Scenario CSV path exactly as specified by `input_file`.
     pub input_file: PathBuf,
@@ -97,7 +127,7 @@ impl ReplayConfig {
         })?;
         Self::reject_unknown_fields("root", root, &ROOT_FIELDS)?;
         if let Some(section) = root.get("initialisation").and_then(Value::as_table) {
-            Self::reject_unknown_fields("initialisation", section, &["zfw", "gw", "gwcg"])?;
+            Self::reject_unknown_fields("initialisation", section, &["zfw", "gw", "gwcg", "ths"])?;
         }
 
         let raw: RawReplayConfig = value.try_into().map_err(ConfigError::Toml)?;
@@ -127,7 +157,7 @@ impl ReplayConfig {
         }
 
         Ok(ReplayConfig {
-            initialisation: raw.initialisation,
+            initialisation: raw.initialisation.filter(InitialisationConfig::has_targets),
             input_file: PathBuf::from(raw.input_file),
             inject,
             record,
@@ -469,6 +499,39 @@ struct RawRecordingConfig {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn validates_optional_ths_degrees() {
+        let parse = |value: &str| {
+            ReplayConfig::new(&format!(
+                "{VALID_CONFIG}\n[initialisation]\nzfw = 60000\ngw = 65000\ngwcg = 25\nths = {value}\n"
+            ))
+        };
+        for value in [-4.0, 0.0, 4.75, 13.5] {
+            assert_eq!(
+                parse(&value.to_string())
+                    .unwrap()
+                    .initialisation
+                    .unwrap()
+                    .ths,
+                Some(value)
+            );
+        }
+        for value in ["-4.00001", "13.50001", "nan", "inf", "-inf"] {
+            assert!(matches!(
+                parse(value),
+                Err(ConfigError::InvalidInitialisation { field: "ths", .. })
+            ));
+        }
+        for value in ["'1'", "true", "[]", "1\nths = 2"] {
+            assert!(parse(value).is_err());
+        }
+        assert!(matches!(
+            parse("1\nTHS = 2"),
+            Err(ConfigError::UnexpectedField { section, field })
+                if section == "initialisation" && field == "THS"
+        ));
+    }
+
     use super::*;
 
     #[test]
@@ -484,14 +547,15 @@ mod tests {
                 .unwrap()
                 .initialisation,
             Some(InitialisationConfig {
-                zfw: 60000.0,
-                gw: 65000.0,
-                gwcg: 25.0
+                zfw: Some(60000.0),
+                gw: Some(65000.0),
+                gwcg: Some(25.0),
+                ths: None,
             })
         );
         assert!(parse("zfw = 60000\ngw = 60000\ngwcg = 25").is_ok());
+        assert_eq!(parse("").unwrap().initialisation, None);
         for body in [
-            "",
             "zfw = 60000",
             "zfw = 60000\ngw = 65000",
             "gw = 65000\ngwcg = 25",
@@ -531,6 +595,52 @@ mod tests {
             Err(ConfigError::UnexpectedField { section, field }) if section == "initialisation" && field == "timeout")
         );
         assert!(ReplayConfig::new(&format!("initialisation = 1\n{VALID_CONFIG}")).is_err());
+    }
+
+    #[test]
+    fn initialisation_mass_group_is_all_or_none_independently_of_ths() {
+        for include_ths in [false, true] {
+            for mask in 0..8 {
+                let mut body = String::new();
+                for (index, (name, value)) in [("zfw", 60000), ("gw", 65000), ("gwcg", 25)]
+                    .into_iter()
+                    .enumerate()
+                {
+                    if mask & (1 << index) != 0 {
+                        body.push_str(&format!("{name} = {value}\n"));
+                    }
+                }
+                if include_ths {
+                    body.push_str("ths = 1.0\n");
+                }
+                let parsed =
+                    ReplayConfig::new(&format!("{VALID_CONFIG}\n[initialisation]\n{body}"));
+                if mask != 0 && mask != 7 {
+                    assert!(
+                        matches!(
+                            parsed,
+                            Err(ConfigError::IncompleteInitialisationMassBalance)
+                        ),
+                        "accepted {body}"
+                    );
+                } else {
+                    let targets = parsed.unwrap().initialisation;
+                    assert_eq!(targets.is_some(), mask == 7 || include_ths);
+                    if let Some(targets) = targets {
+                        assert_eq!(targets.has_mass_balance(), mask == 7);
+                        assert_eq!(targets.ths, include_ths.then_some(1.0));
+                    }
+                }
+            }
+        }
+        for invalid in ["nan", "inf", "-4.01", "13.51"] {
+            assert!(matches!(
+                ReplayConfig::new(&format!(
+                    "{VALID_CONFIG}\n[initialisation]\nths = {invalid}"
+                )),
+                Err(ConfigError::InvalidInitialisation { field: "ths", .. })
+            ));
+        }
     }
 
     const VALID_CONFIG: &str = r#"

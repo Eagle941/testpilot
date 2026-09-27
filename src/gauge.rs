@@ -11,7 +11,7 @@ async fn testpilot(mut gauge: msfs::Gauge) -> Result<(), Box<dyn Error>> {
     let mut runtime = match GaugeRuntime::new(
         Replayer::new(),
         Box::new(MsfsSimulator::new()),
-        Box::new(A32nxInitialiser),
+        Box::new(A32nxInitialiser::default()),
     ) {
         Ok(runtime) => runtime,
         Err(error) => {

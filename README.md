@@ -40,14 +40,33 @@ frames using a supplied simulator timestamp; it does not receive a simulator
 adapter. `SimulatorAdapter` provides only low-level reads, writes, validation and
 the clock, including a generic aircraft-string read operation. The separate
 `A32nxInitialiser` component owns aircraft detection, loading submission and
-mass/balance readback behind the small `AircraftInitialiser` interface, allowing
+mass/balance and configured THS readback behind the `AircraftInitialiser` interface, allowing
 runtime tests to substitute it independently. The runtime has one explicit
 constructor taking the replayer, a `Box<dyn SimulatorAdapter>` and a
 `Box<dyn AircraftInitialiser>`. Neither `GaugeRuntime` nor `AircraftInitialiser`
 has generic type parameters; initialisation methods receive a
 `&mut dyn SimulatorAdapter`. Tests retain shared handles to fake state for clock
 control and operation assertions. `Initialisation` contains only
-the simulator-independent tolerance and deadline checks.
+the simulator-independent tolerance and deadline checks. `AircraftInitialiser`
+retains its detection, submission and `readback` methods; readback now returns
+the single shared `AircraftInitialisationState` type.
+`AircraftInitialisationState` represents omitted targets with `None`. The A32NX
+initialiser remembers the mass/balance and THS selections from the latest
+successful `submit`; `readback` reads only requested groups and never issues
+control commands. Each submission resets both selections for the new run.
+Before any submission, readback returns mass/balance with `ths = None`.
+
+`GaugeRuntime` keeps one initialisation gate. On every initialisation frame it
+checks the deadline, calls `AircraftInitialiser::submit` with the same configured
+targets, reads the resulting aircraft state, and checks readiness. Submission
+recalculates and reapplies the complete mass/balance loading when configured,
+and sends the THS axis demand when configured. There is no separate trim
+coordinator or update/poll method. All targets are validated before any writes.
+
+Both readback and the readiness gate use `AircraftInitialisationState`; no
+snapshot conversion is needed. Readiness and cleanup clear the gate, stopping
+further loading and trim submissions. The frame that establishes readiness still
+submits before readback; playback begins only after the observed values pass.
 
 ## MVP scope
 
@@ -116,27 +135,46 @@ The repository provides this default as `example/replayer_config.toml`. The
 installation script copies it to `/work/replayer_config.toml` together with the
 default scenario.
 
-An optional section can demand actual aircraft mass and balance before replay:
+An optional section can demand actual aircraft mass, balance and THS before replay:
 
 ```toml
 [initialisation]
 zfw = 60000.0 # zero-fuel weight, kg
 gw = 65000.0  # gross weight, kg
 gwcg = 25.0  # gross-weight centre of gravity, percent MAC
+ths = 1.0    # optional trimmable horizontal stabilizer demand, degrees [-4, 13.5]
 ```
 
-All three fields are required when the section is present. Values must be numeric
-and finite; masses must be positive and `gw >= zfw`. Unknown fields are rejected.
+The mass/balance group (`zfw`, `gw`, `gwcg`) is optional, but all three fields
+must be supplied together or all omitted. Any partial group is rejected.
+`ths` (lowercase) is optional; omitting it leaves trim untouched and skips trim readback.
+When provided, it must be numeric, finite and within [-4, 13.5] degrees inclusive.
+Mass/balance values must also be numeric and finite; masses must be positive and
+`gw >= zfw`. Unknown fields are rejected.
 Aircraft-specific loading limits are validated by the aircraft initialisation component.
 This optional addition uses `format_version = 1`; omitting the section retains
-immediate playback on arming. No timeout, tolerance or unit fields are configurable.
+immediate playback on arming. An empty `[initialisation]` table has the same
+behavior as omitting the section: no aircraft detection, loading, or readback.
+No timeout, tolerance or unit fields are configurable.
+
+THS-only initialisation is valid:
+
+```toml
+[initialisation]
+ths = 1.0
+```
+
+This submits no passenger/cargo/fuel loading and performs no mass/CG readback or
+readiness checks. Mass/balance-only initialisation similarly performs no trim
+commands or readback. When both groups are present, all configured targets must
+be ready on the same frame.
 
 Aircraft detection, loading calculation, loading writes and actual mass/balance
 readback are implemented. Submission calculates all native loading values before
 writing any of them. Invalid or unreachable targets return a typed error with the
 requested targets and stop initialisation without loading writes. Unsupported or
 unidentified aircraft log that initialisation was skipped and start replay immediately,
-without enforcing mass/CG targets. The readiness gate is implemented and
+without enforcing mass/CG or THS targets. The readiness gate is implemented and
 tested with a fake simulator.
 
 The calculation is a reduced Rust port of the author's local Python load-calculator
@@ -151,7 +189,7 @@ The solver tries passenger totals nearest the EFB preference (lower totals first
 on ties), chooses feasible integer seating closest to the EFB distribution
 (lexicographic A/B/C/D tie break), then interpolates between the cargo moment
 extremes. It respects station capacities and baggage allowance. The search uses
-fixed-size storage and runs once on arming, before any loading writes.
+fixed-size storage and runs on each initialisation frame, before any loading writes.
 
 Submission first writes `L:A32NX_WB_PER_PAX_WEIGHT = 84` and
 `L:A32NX_WB_PER_BAG_WEIGHT = 20` (native kg), then passenger stations
@@ -194,6 +232,35 @@ The values come from actual payload and fuel in the
 The [airframe output implementation](https://github.com/flybywiresim/aircraft/blob/2baa2b35eadaf4c78e172ce41bbe6b40b4aeafb2/fbw-common/src/wasm/systems/systems/src/airframe/mod.rs)
 publishes masses rounded to 1 kg and CG rounded to 0.01 percentage points of MAC.
 Readback preserves those values without additional rounding.
+
+THS uses `K:AXIS_ELEV_TRIM_SET` (a key event, not an `A:` simulation variable).
+The demand is `round(-16383 + (ths + 4) * 32767 / 17.5)`: -4 degrees maps to
+-16383 and 13.5 degrees maps to 16384. Rounding supplies an integer event value.
+Readback uses `L:A32NX_HYD_TRIM_WHEEL_PERCENT` without a unit, converted to degrees
+as `-4 + percent * 17.5 / 100`: 0% is -4 degrees and 100% is 13.5 degrees.
+The readback variable must exist before loading is submitted.
+
+A32NX consumes this axis demand as a transient manual trim command, resetting it
+after each tick. Both `AXIS_ELEV_TRIM_SET` and `ELEVATOR_TRIM_SET` have this
+behavior. Their `Variable::aspect` targets are internal memory, not externally
+writable LVARs; the trim-wheel LVAR and `A:ELEVATOR TRIM POSITION` publish outputs
+and do not initialise A32NX's actuator state. No single-write THS interface was
+found in the inspected A32NX implementation. Such an interface would require an
+aircraft-side change that latches a target or initialises the actuator state.
+While initialising, the module resubmits all configured targets every frame,
+including mass/fuel loading even when only THS is still outside tolerance.
+The instant-loading paths reapply the same requested values. This deliberately
+trades repeated calculation and writes for a single submission/readback loop.
+Trim commands cease on readiness, timeout, failure or gauge shutdown; none are
+sent during playback. All configured THS and mass/CG targets must be ready on the same frame.
+The 0.01-degree tolerance accommodates axis quantisation. Aircraft hydraulics
+must permit trim movement, and the operator must avoid competing trim inputs.
+
+Interface references: [MSFS 2020 key event documentation](https://docs.flightsimulator.com/html/Programming_Tools/Event_IDs/Aircraft_Flight_Control_Events.htm),
+[A32NX trim event handling](https://github.com/flybywiresim/aircraft/blob/ce46d9dbc7a90bd9afddc75d61c64316a6f78d0d/fbw-a32nx/src/wasm/systems/a320_systems_wasm/src/trimmable_horizontal_stabilizer.rs),
+and [trim-wheel percentage publication](https://github.com/flybywiresim/aircraft/blob/ce46d9dbc7a90bd9afddc75d61c64316a6f78d0d/fbw-common/src/wasm/systems/systems/src/hydraulic/trimmable_horizontal_stabilizer.rs).
+Current upstream event handling was also checked on 2026-09-26. These source checks
+do not establish in-simulator compatibility.
 
 Aircraft support is checked once on each arm frame requesting initialisation,
 using `(A:ATC MODEL, string)` and the existence of `L:A32NX_IS_READY`.
@@ -274,13 +341,15 @@ preflight pass and assumes the scenario is correctly formatted. Initialization
 reads the first two samples for every cursor. Subsequent simulator frames read
 forward until every cursor brackets the current scenario time or reaches EOF.
 When `[initialisation]` is present and aircraft detection reports support, the
-arm frame submits the targets once and enters an initialising state. Each simulator frame checks actual aircraft mass
-and balance. Playback starts immediately on the first frame where all three
-values simultaneously meet these inclusive absolute tolerances:
+arm frame enters an initialising state. Each simulator frame checks the deadline,
+resubmits the configured mass/balance and THS targets, then reads and checks them.
+Playback starts immediately on the first frame where all requested values
+simultaneously meet these inclusive absolute tolerances:
 
 - ZFW: within 100 kg of its target;
 - GW: within 100 kg of its target;
-- GWCG: within 0.01 percentage points of MAC (25.00 accepts 24.99 through 25.01).
+- GWCG: within 0.01 percentage points of MAC (25.00 accepts 24.99 through 25.01);
+- THS, when configured: within 0.01 degrees of its target, inclusive.
 
 There is no dwell period or continuing readiness check once replay starts.
 The deadline is 30 elapsed simulator seconds from the arm frame, under the
@@ -526,11 +595,11 @@ Manual validation (requires MSFS; not established by host tests):
 Record the MSFS 2020 build, A32NX channel/version or commit, and locked `msfs-rs`
 revision with each manual check. With the shipped example's initialisation section
 commented out, verify the existing scenario still starts on arming and records in
-the `/work` location above. Then enable the example's three targets and reload
+the `/work` location above. Then enable the example's mass/CG and THS targets and reload
 using the A32NX. Record the `ATC MODEL` string, and repeat with a custom livery
 whose title differs. With either accepted A20N model string and `A32NX_IS_READY`
-registered (whether zero or one), arming must submit loading once and wait for
-the actual mass/CG targets before producing replay controls or telemetry. Disable
+registered (whether zero or one), arming must repeatedly submit the same loading and trim targets and wait for
+the actual mass/CG and THS targets before producing replay controls or telemetry. Disable
 GSX payload/fuel synchronisation and finish existing boarding/refuelling first;
 avoid editing EFB loads during the test. Change GWCG to an unreachable value such
 as 99 and verify arming reports a loading error, resets `L:REPLAYER_ARMED` to `0`,
@@ -548,14 +617,29 @@ skipped and the existence check must leave that variable absent. A failed lookup
 has the same skip behavior, covered by host tests.
 
 For readback validation, use a diagnostic build that calls `A32nxInitialiser::readback`
-directly without submitting targets or injecting controls. Compare its three values
-with the same local variables in the simulator, then change actual payload and fuel
+directly without submitting targets or injecting controls.
+Compare its mass/CG values with the same local variables in the simulator, then change actual payload and fuel
 and verify subsequent reads follow the published values in kg and percent MAC.
 Record the A32NX source revision (mapping verified at
 `2baa2b35eadaf4c78e172ce41bbe6b40b4aeafb2`) and `msfs-rs` revision
 `2f697b9aac9fa3c00474f901a7f7ee4218cf534b` alongside the MSFS build and scenario.
 This diagnostic check produces no replay telemetry; normal replay output remains
 in `/work` as described above.
+
+For THS, record the aircraft source revision used above and test -4, 1, 4.75 and
+13.5 degrees in separate runs with hydraulic pressure available. Expected trim
+readback percentages are 0, approximately 28.5714, 50 and 100 respectively.
+Start away from the demand: verify identical loading requests and trim events
+repeat while waiting, no
+telemetry is created until all targets are ready, and loading/trim submissions stop when
+playback begins. Verify convergence despite repeated instant loading, including
+boarding/refuelling activity flags and payload/tank quantities. Hold trim away from its target to verify the 30-second timeout
+resets arming and creates no telemetry. Repeat with THS omitted to verify no trim
+reads or commands. Check generated output in the same `/work` location and use
+`example/scenario.csv`; record the MSFS build, A32NX channel/commit and locked
+`msfs-rs` revision with the results. Repeat with only `ths` in `[initialisation]`: verify trim convergence without
+payload/fuel loading or mass/CG reads. An empty table must start immediately
+without any aircraft initialisation. These checks require in-simulator validation.
 
 Repeat the example with initialisation enabled and verify the 84/20 kg weight
 settings and all desired values are written before both instant rate settings

@@ -5,15 +5,28 @@ use std::time::Duration;
 use crate::config::InitialisationConfig;
 use crate::error::InitialisationError;
 
-/// Actual aircraft mass and balance returned by the simulator, not FMS entries.
+/// Inclusive THS readiness tolerance in degrees, including event quantisation.
+pub(crate) fn ths_ready(target: f64, value: f64) -> Result<bool, InitialisationError> {
+    if !value.is_finite() {
+        return Err(InitialisationError::NonFiniteReadback {
+            field: "THS",
+            value,
+        });
+    }
+    Ok(Initialisation::within(value, target, 0.01))
+}
+
+/// Actual aircraft mass, balance and optional THS returned by the simulator, not FMS entries.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct AircraftMassBalance {
-    /// Actual zero-fuel weight in kilograms.
-    pub zfw: f64,
-    /// Actual gross weight in kilograms.
-    pub gw: f64,
-    /// Actual gross-weight centre of gravity in percent MAC.
-    pub gwcg: f64,
+pub struct AircraftInitialisationState {
+    /// Actual zero-fuel weight in kilograms, present for configured mass/balance.
+    pub zfw: Option<f64>,
+    /// Actual gross weight in kilograms, present for configured mass/balance.
+    pub gw: Option<f64>,
+    /// Actual gross-weight centre of gravity in percent MAC, present for configured mass/balance.
+    pub gwcg: Option<f64>,
+    /// Actual THS in degrees, present when trim initialisation is requested.
+    pub ths: Option<f64>,
 }
 
 /// Bounded readiness state for one armed run.
@@ -25,10 +38,15 @@ pub struct Initialisation {
     /// Most recent checked timestamp, used to reject backwards time.
     previous_time: Duration,
     /// Latest valid snapshot, included in timeout diagnostics.
-    latest: Option<AircraftMassBalance>,
+    latest: Option<AircraftInitialisationState>,
 }
 
 impl Initialisation {
+    /// Targets to resubmit while the readiness gate is waiting.
+    pub const fn targets(&self) -> InitialisationConfig {
+        self.targets
+    }
+
     /// Begins a 30-second simulator-time deadline at the arm frame.
     pub const fn new(targets: InitialisationConfig, armed_at: Duration) -> Self {
         Self {
@@ -50,28 +68,40 @@ impl Initialisation {
         self.previous_time = now;
         if now - self.armed_at >= Duration::from_secs(30) {
             return Err(InitialisationError::Timeout {
-                targets: self.targets,
+                targets: Box::new(self.targets),
                 latest: self.latest,
             });
         }
         Ok(())
     }
 
-    /// Checks all three values on one frame, with inclusive absolute tolerances.
-    pub fn observe(&mut self, actual: AircraftMassBalance) -> Result<bool, InitialisationError> {
-        for (field, value) in [
-            ("zfw", actual.zfw),
-            ("gw", actual.gw),
-            ("gwcg", actual.gwcg),
+    /// Checks all requested values on one frame, with inclusive absolute tolerances.
+    pub fn observe(
+        &mut self,
+        actual: AircraftInitialisationState,
+    ) -> Result<bool, InitialisationError> {
+        let mut mass_ready = true;
+        for (field, value, target, tolerance) in [
+            ("zfw", actual.zfw, self.targets.zfw, 100.0),
+            ("gw", actual.gw, self.targets.gw, 100.0),
+            ("gwcg", actual.gwcg, self.targets.gwcg, 0.01),
         ] {
+            let Some(target) = target else {
+                continue;
+            };
+            let value = value.ok_or(InitialisationError::MissingMassBalanceReadback { field })?;
             if !value.is_finite() {
                 return Err(InitialisationError::NonFiniteReadback { field, value });
             }
+            mass_ready &= Self::within(value, target, tolerance);
         }
+        let trim_ready = match (self.targets.ths, actual.ths) {
+            (Some(_), None) => return Err(InitialisationError::MissingThsReadback),
+            (Some(target), Some(value)) => ths_ready(target, value)?,
+            (None, _) => true,
+        };
         self.latest = Some(actual);
-        Ok(Self::within(actual.zfw, self.targets.zfw, 100.0)
-            && Self::within(actual.gw, self.targets.gw, 100.0)
-            && Self::within(actual.gwcg, self.targets.gwcg, 0.01))
+        Ok(trim_ready && mass_ready)
     }
 
     /// Compares inclusive endpoints directly to preserve decimal boundary rounding.
@@ -84,15 +114,98 @@ impl Initialisation {
 mod tests {
     use super::*;
 
+    #[test]
+    fn ths_only_readiness_does_not_require_mass_readback() {
+        let targets = InitialisationConfig {
+            zfw: None,
+            gw: None,
+            gwcg: None,
+            ths: Some(1.0),
+        };
+        let mut gate = Initialisation::new(targets, Duration::ZERO);
+        let actual = AircraftInitialisationState {
+            zfw: None,
+            gw: None,
+            gwcg: None,
+            ths: Some(0.0),
+        };
+        assert!(!gate.observe(actual).unwrap());
+        assert!(
+            gate.observe(AircraftInitialisationState {
+                ths: Some(1.0),
+                ..actual
+            })
+            .unwrap()
+        );
+        assert!(matches!(
+            Initialisation::new(TARGETS, Duration::ZERO).observe(actual),
+            Err(InitialisationError::MissingMassBalanceReadback { field: "zfw" })
+        ));
+    }
+
+    #[test]
+    fn ths_must_be_present_finite_and_simultaneously_within_tolerance() {
+        let mut gate = Initialisation::new(
+            InitialisationConfig {
+                ths: Some(1.0),
+                ..TARGETS
+            },
+            Duration::ZERO,
+        );
+        assert!(matches!(
+            gate.observe(ACTUAL),
+            Err(InitialisationError::MissingThsReadback)
+        ));
+        for value in [0.99, 1.0, 1.01] {
+            assert!(
+                gate.observe(AircraftInitialisationState {
+                    ths: Some(value),
+                    ..ACTUAL
+                })
+                .unwrap()
+            );
+        }
+        for value in [0.989999, 1.010001] {
+            assert!(
+                !gate
+                    .observe(AircraftInitialisationState {
+                        ths: Some(value),
+                        ..ACTUAL
+                    })
+                    .unwrap()
+            );
+        }
+        assert!(
+            !gate
+                .observe(AircraftInitialisationState {
+                    ths: Some(1.0),
+                    gw: Some(66000.0),
+                    ..ACTUAL
+                })
+                .unwrap()
+        );
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(matches!(
+                gate.observe(AircraftInitialisationState {
+                    ths: Some(value),
+                    ..ACTUAL
+                }),
+                Err(InitialisationError::NonFiniteReadback { field: "THS", .. })
+            ));
+        }
+    }
+
     const TARGETS: InitialisationConfig = InitialisationConfig {
-        zfw: 60000.0,
-        gw: 65000.0,
-        gwcg: 25.0,
+        zfw: Some(60000.0),
+        gw: Some(65000.0),
+        gwcg: Some(25.0),
+        ths: None,
     };
-    const ACTUAL: AircraftMassBalance = AircraftMassBalance {
-        zfw: 60000.0,
-        gw: 65000.0,
-        gwcg: 25.0,
+    const ACTUAL: AircraftInitialisationState = AircraftInitialisationState {
+        zfw: Some(60000.0),
+        gw: Some(65000.0),
+        gwcg: Some(25.0),
+        ths: None,
     };
 
     #[test]
@@ -101,33 +214,41 @@ mod tests {
         for zfw in [59900.0, 60100.0] {
             for gw in [64900.0, 65100.0] {
                 for gwcg in [24.99, 25.01] {
-                    assert!(gate.observe(AircraftMassBalance { zfw, gw, gwcg }).unwrap());
+                    assert!(
+                        gate.observe(AircraftInitialisationState {
+                            zfw: Some(zfw),
+                            gw: Some(gw),
+                            gwcg: Some(gwcg),
+                            ths: None
+                        })
+                        .unwrap()
+                    );
                 }
             }
         }
         for actual in [
-            AircraftMassBalance {
-                zfw: 59899.999,
+            AircraftInitialisationState {
+                zfw: Some(59899.999),
                 ..ACTUAL
             },
-            AircraftMassBalance {
-                zfw: 60100.001,
+            AircraftInitialisationState {
+                zfw: Some(60100.001),
                 ..ACTUAL
             },
-            AircraftMassBalance {
-                gw: 64899.999,
+            AircraftInitialisationState {
+                gw: Some(64899.999),
                 ..ACTUAL
             },
-            AircraftMassBalance {
-                gw: 65100.001,
+            AircraftInitialisationState {
+                gw: Some(65100.001),
                 ..ACTUAL
             },
-            AircraftMassBalance {
-                gwcg: 24.989999,
+            AircraftInitialisationState {
+                gwcg: Some(24.989999),
                 ..ACTUAL
             },
-            AircraftMassBalance {
-                gwcg: 25.010001,
+            AircraftInitialisationState {
+                gwcg: Some(25.010001),
                 ..ACTUAL
             },
         ] {
@@ -140,24 +261,24 @@ mod tests {
         let mut gate = Initialisation::new(TARGETS, Duration::ZERO);
         assert!(
             !gate
-                .observe(AircraftMassBalance {
-                    zfw: 61000.0,
+                .observe(AircraftInitialisationState {
+                    zfw: Some(61000.0),
                     ..ACTUAL
                 })
                 .unwrap()
         );
         assert!(
             !gate
-                .observe(AircraftMassBalance {
-                    gw: 66000.0,
+                .observe(AircraftInitialisationState {
+                    gw: Some(66000.0),
                     ..ACTUAL
                 })
                 .unwrap()
         );
         assert!(
             !gate
-                .observe(AircraftMassBalance {
-                    gwcg: 26.0,
+                .observe(AircraftInitialisationState {
+                    gwcg: Some(26.0),
                     ..ACTUAL
                 })
                 .unwrap()
@@ -165,16 +286,16 @@ mod tests {
         assert!(gate.observe(ACTUAL).unwrap());
         for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             for actual in [
-                AircraftMassBalance {
-                    zfw: value,
+                AircraftInitialisationState {
+                    zfw: Some(value),
                     ..ACTUAL
                 },
-                AircraftMassBalance {
-                    gw: value,
+                AircraftInitialisationState {
+                    gw: Some(value),
                     ..ACTUAL
                 },
-                AircraftMassBalance {
-                    gwcg: value,
+                AircraftInitialisationState {
+                    gwcg: Some(value),
                     ..ACTUAL
                 },
             ] {
@@ -195,9 +316,9 @@ mod tests {
             assert!(matches!(
                 gate.check_deadline(Duration::from_secs(100) + elapsed),
                 Err(InitialisationError::Timeout {
-                    targets: TARGETS,
+                    targets,
                     latest: Some(ACTUAL)
-                })
+                }) if *targets == TARGETS
             ));
         }
         let mut gate = Initialisation::new(TARGETS, Duration::from_secs(100));
