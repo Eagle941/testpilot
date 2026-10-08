@@ -13,7 +13,7 @@ use serde::de::Error as SerdeError;
 use toml::Value;
 use toml::value::Table;
 
-pub use crate::error::ConfigError;
+pub use crate::error::{ConfigError, ConfigFileError};
 
 /// Configuration and scenario format version supported by this crate.
 pub const FORMAT_VERSION: u32 = 1;
@@ -35,7 +35,7 @@ const INJECT_SECTION_FIELDS: [&str; 4] = ["name", "variable", "source_range", "s
 const RECORD_SECTION_FIELDS: [&str; 4] = ["name", "variable", "unit", "max_sampling_rate"];
 
 /// Demanded actual aircraft mass, balance and optional THS, independent of flight-management entries.
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InitialisationConfig {
     /// Optional zero-fuel weight in kilograms; required with gw and gwcg.
@@ -105,7 +105,7 @@ impl InitialisationConfig {
 
 /// Validated replay configuration in deterministic processing order.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ReplayConfig {
+pub struct Config {
     /// Optional demanded aircraft mass, balance and THS before playback.
     pub initialisation: Option<InitialisationConfig>,
     /// Scenario CSV path exactly as specified by `input_file`.
@@ -116,9 +116,9 @@ pub struct ReplayConfig {
     pub record: Vec<RecordingConfig>,
 }
 
-impl ReplayConfig {
+impl Config {
     /// Creates a replay configuration from TOML text.
-    pub fn new(contents: &str) -> Result<ReplayConfig, ConfigError> {
+    pub fn new(contents: &str) -> Result<Config, ConfigError> {
         let value: Value = toml::from_str(contents)?;
         let root = value.as_table().ok_or_else(|| {
             ConfigError::Toml(toml::de::Error::custom(
@@ -135,13 +135,20 @@ impl ReplayConfig {
     }
 
     /// Reads and parses a replay configuration file.
-    pub fn read_config_file(path: impl AsRef<Path>) -> Result<ReplayConfig, ConfigError> {
-        let contents = fs::read_to_string(path)?;
-        Self::new(&contents)
+    pub fn read_config_file(path: impl AsRef<Path>) -> Result<Config, ConfigFileError> {
+        let path = path.as_ref();
+        let contents = fs::read_to_string(path).map_err(|source| ConfigFileError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Self::new(&contents).map_err(|source| ConfigFileError::Parse {
+            path: path.to_path_buf(),
+            source: Box::new(source),
+        })
     }
 
     /// Builds a validated config from raw deserialized TOML data.
-    fn parse_raw(raw: RawReplayConfig) -> Result<ReplayConfig, ConfigError> {
+    fn parse_raw(raw: RawReplayConfig) -> Result<Config, ConfigError> {
         if raw.format_version != FORMAT_VERSION {
             return Err(ConfigError::UnsupportedFormatVersion {
                 found: raw.format_version,
@@ -156,7 +163,7 @@ impl ReplayConfig {
             initialisation.validate()?;
         }
 
-        Ok(ReplayConfig {
+        Ok(Config {
             initialisation: raw.initialisation.filter(InitialisationConfig::has_targets),
             input_file: PathBuf::from(raw.input_file),
             inject,
@@ -174,9 +181,9 @@ impl ReplayConfig {
 
         for (index, raw) in entries {
             let section_name = format!("inject.{index}");
-            let injection: RawInjectionConfig =
+            let injection: InjectionConfig =
                 Self::parse_indexed_section_entry(&section_name, raw, &INJECT_SECTION_FIELDS)?;
-            result.push(InjectionConfig::new(index, injection, &mut signals)?);
+            result.push(injection.validate(index, &mut signals)?);
         }
 
         Ok(result)
@@ -195,9 +202,9 @@ impl ReplayConfig {
 
         for (index, raw) in entries {
             let section_name = format!("record.{index}");
-            let recording: RawRecordingConfig =
+            let recording: RecordingConfig =
                 Self::parse_indexed_section_entry(&section_name, raw, &RECORD_SECTION_FIELDS)?;
-            result.push(RecordingConfig::new(index, recording, &mut signals)?);
+            result.push(recording.validate(index, &mut signals)?);
         }
 
         Ok(result)
@@ -309,7 +316,8 @@ impl ReplayConfig {
 }
 
 /// Configuration for one continuous scenario input.
-#[derive(Debug, Clone, PartialEq)]
+/// Deserialization parses fields; `Config::new` validates their semantics.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct InjectionConfig {
     /// Logical input signal name from the configuration.
     pub name: String,
@@ -322,34 +330,25 @@ pub struct InjectionConfig {
 }
 
 impl InjectionConfig {
-    /// Builds a validated injection config from raw TOML fields.
-    fn new(
-        index: usize,
-        raw: RawInjectionConfig,
-        signals: &mut HashSet<String>,
-    ) -> Result<InjectionConfig, ConfigError> {
-        if raw.name.is_empty() {
+    /// Validates a deserialized injection config before accepting it.
+    fn validate(self, index: usize, signals: &mut HashSet<String>) -> Result<Self, ConfigError> {
+        if self.name.is_empty() {
             return Err(ConfigError::EmptyInjectionName { index });
         }
-        if !signals.insert(raw.name.clone()) {
+        if !signals.insert(self.name.clone()) {
             return Err(ConfigError::DuplicateInjectionSignal {
                 index,
-                name: raw.name,
+                name: self.name,
             });
         }
 
-        Self::validate_increasing_range(index, "source_range", raw.source_range)?;
-        Self::validate_increasing_range(index, "simulator_range", raw.simulator_range)?;
-        if raw.simulator_range[0] < -16_383.0 || raw.simulator_range[1] > 16_384.0 {
+        Self::validate_increasing_range(index, "source_range", self.source_range)?;
+        Self::validate_increasing_range(index, "simulator_range", self.simulator_range)?;
+        if self.simulator_range[0] < -16_383.0 || self.simulator_range[1] > 16_384.0 {
             return Err(ConfigError::UnsafeSimulatorRange { index });
         }
 
-        Ok(InjectionConfig {
-            name: raw.name,
-            variable: raw.variable,
-            source_range: raw.source_range,
-            simulator_range: raw.simulator_range,
-        })
+        Ok(self)
     }
 
     /// Validates that a configured range has finite, strictly increasing endpoints.
@@ -380,7 +379,8 @@ impl InjectionConfig {
 }
 
 /// Configuration for one aircraft-response signal recorded each frame.
-#[derive(Debug, Clone, PartialEq)]
+/// Deserialization parses fields; `Config::new` validates their semantics.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct RecordingConfig {
     /// Logical telemetry column name from the configuration.
     pub name: String,
@@ -393,45 +393,36 @@ pub struct RecordingConfig {
 }
 
 impl RecordingConfig {
-    /// Builds a validated recording config from raw TOML fields.
-    fn new(
-        index: usize,
-        raw: RawRecordingConfig,
-        signals: &mut HashSet<String>,
-    ) -> Result<RecordingConfig, ConfigError> {
-        if raw.name.is_empty() {
+    /// Validates a deserialized recording config before accepting it.
+    fn validate(self, index: usize, signals: &mut HashSet<String>) -> Result<Self, ConfigError> {
+        if self.name.is_empty() {
             return Err(ConfigError::EmptyRecordingName { index });
         }
-        if !signals.insert(raw.name.clone()) {
+        if !signals.insert(self.name.clone()) {
             return Err(ConfigError::DuplicateRecordingSignal {
                 index,
-                name: raw.name,
+                name: self.name,
             });
         }
-        if raw.variable.is_empty() {
+        if self.variable.is_empty() {
             return Err(ConfigError::EmptyRecordingVariable { index });
         }
-        if raw.variable.starts_with("A:") {
-            match raw.unit.as_deref() {
+        if self.variable.starts_with("A:") {
+            match self.unit.as_deref() {
                 None => return Err(ConfigError::MissingRecordingUnit { index }),
                 Some("") => return Err(ConfigError::EmptyRecordingUnit { index }),
                 Some(_) => {}
             }
-        } else if raw.unit.is_some() {
+        } else if self.unit.is_some() {
             return Err(ConfigError::UnexpectedRecordingUnit {
                 index,
-                variable: raw.variable,
+                variable: self.variable,
             });
         }
-        Ok(RecordingConfig {
-            name: raw.name,
-            variable: raw.variable,
-            unit: raw.unit,
-            max_sampling_rate: match raw.max_sampling_rate {
-                Some(rate) => Some(Self::validate_sampling_rate(index, rate)?),
-                None => None,
-            },
-        })
+        if let Some(rate) = self.max_sampling_rate {
+            Self::validate_sampling_rate(index, rate)?;
+        }
+        Ok(self)
     }
 
     /// Validates an optional max sampling rate (must be finite and > 0).
@@ -454,7 +445,7 @@ impl RecordingConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 /// Internal raw configuration as deserialized from TOML.
 struct RawReplayConfig {
     /// Optional aircraft initialisation targets.
@@ -471,38 +462,12 @@ struct RawReplayConfig {
     record: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Deserialize)]
-/// Internal raw input signal configuration.
-struct RawInjectionConfig {
-    /// Raw signal name.
-    name: String,
-    /// Raw destination variable string.
-    variable: String,
-    /// Raw source range.
-    source_range: [f64; 2],
-    /// Raw simulator range.
-    simulator_range: [f64; 2],
-}
-
-#[derive(Debug, Deserialize)]
-/// Internal raw recording signal configuration.
-struct RawRecordingConfig {
-    /// Raw signal name.
-    name: String,
-    /// Raw source variable string.
-    variable: String,
-    /// Optional raw recording unit.
-    unit: Option<String>,
-    /// Optional raw max sampling rate.
-    max_sampling_rate: Option<f64>,
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
     fn validates_optional_ths_degrees() {
         let parse = |value: &str| {
-            ReplayConfig::new(&format!(
+            Config::new(&format!(
                 "{VALID_CONFIG}\n[initialisation]\nzfw = 60000\ngw = 65000\ngwcg = 25\nths = {value}\n"
             ))
         };
@@ -536,12 +501,9 @@ mod tests {
 
     #[test]
     fn initialisation_is_optional_and_requires_complete_finite_targets() {
-        assert_eq!(
-            ReplayConfig::new(VALID_CONFIG).unwrap().initialisation,
-            None
-        );
+        assert_eq!(Config::new(VALID_CONFIG).unwrap().initialisation, None);
         let parse =
-            |body: &str| ReplayConfig::new(&format!("{VALID_CONFIG}\n[initialisation]\n{body}\n"));
+            |body: &str| Config::new(&format!("{VALID_CONFIG}\n[initialisation]\n{body}\n"));
         assert_eq!(
             parse("zfw = 60000\ngw = 65000.0\ngwcg = 25.0")
                 .unwrap()
@@ -594,7 +556,7 @@ mod tests {
             matches!(parse("zfw = 60000\ngw = 65000\ngwcg = 25\ntimeout = 30"),
             Err(ConfigError::UnexpectedField { section, field }) if section == "initialisation" && field == "timeout")
         );
-        assert!(ReplayConfig::new(&format!("initialisation = 1\n{VALID_CONFIG}")).is_err());
+        assert!(Config::new(&format!("initialisation = 1\n{VALID_CONFIG}")).is_err());
     }
 
     #[test]
@@ -613,8 +575,7 @@ mod tests {
                 if include_ths {
                     body.push_str("ths = 1.0\n");
                 }
-                let parsed =
-                    ReplayConfig::new(&format!("{VALID_CONFIG}\n[initialisation]\n{body}"));
+                let parsed = Config::new(&format!("{VALID_CONFIG}\n[initialisation]\n{body}"));
                 if mask != 0 && mask != 7 {
                     assert!(
                         matches!(
@@ -635,7 +596,7 @@ mod tests {
         }
         for invalid in ["nan", "inf", "-4.01", "13.51"] {
             assert!(matches!(
-                ReplayConfig::new(&format!(
+                Config::new(&format!(
                     "{VALID_CONFIG}\n[initialisation]\nths = {invalid}"
                 )),
                 Err(ConfigError::InvalidInitialisation { field: "ths", .. })
@@ -681,7 +642,7 @@ unit = "position"
 "#;
 
     fn assert_error(config: &str, assertion: impl FnOnce(&ConfigError)) {
-        match ReplayConfig::new(config) {
+        match Config::new(config) {
             Ok(parsed) => panic!("configuration unexpectedly parsed: {parsed:?}"),
             Err(error) => assertion(&error),
         }
@@ -689,7 +650,7 @@ unit = "position"
 
     #[test]
     fn parses_default_configuration_file() {
-        match ReplayConfig::new(include_str!("../example/replayer_config.toml")) {
+        match Config::new(include_str!("../../../example/replayer_config.toml")) {
             Ok(config) => {
                 assert_eq!(config.inject.len(), 2);
                 assert_eq!(config.record.len(), 4);
@@ -700,7 +661,7 @@ unit = "position"
 
     #[test]
     fn parses_readme_configuration() {
-        let config = match ReplayConfig::new(VALID_CONFIG) {
+        let config = match Config::new(VALID_CONFIG) {
             Ok(config) => config,
             Err(error) => panic!("README configuration should parse: {error}"),
         };
@@ -724,7 +685,7 @@ unit = "position"
     fn accepts_omitted_and_empty_recordings() {
         let (injections_only, _) = VALID_CONFIG.split_once("[record.0]").unwrap();
         for suffix in ["", "[record]\n"] {
-            let config = ReplayConfig::new(&format!("{injections_only}{suffix}")).unwrap();
+            let config = Config::new(&format!("{injections_only}{suffix}")).unwrap();
             assert_eq!(config.inject.len(), 2);
             assert!(config.record.is_empty());
         }
@@ -751,7 +712,7 @@ unit = "position"
             panic!("failed to create test configuration: {error}");
         }
 
-        let result = ReplayConfig::read_config_file(&path);
+        let result = Config::read_config_file(&path);
         let _ = std::fs::remove_file(&path);
 
         match result {
@@ -766,8 +727,8 @@ unit = "position"
             std::env::temp_dir().join(format!("replay-missing-config-{}.toml", std::process::id()));
         let _ = std::fs::remove_file(&path);
 
-        match ReplayConfig::read_config_file(&path) {
-            Err(ConfigError::FileIo(_)) => {}
+        match Config::read_config_file(&path) {
+            Err(ConfigFileError::Read { .. }) => {}
             unexpected => panic!("expected file I/O error, got: {unexpected:?}"),
         }
     }
@@ -788,7 +749,7 @@ unit = "position"
         let arbitrary = VALID_CONFIG
             .replacen("sidestick_pitch_position\"", "custom_input\"", 1)
             .replacen("K:AXIS_ELEVATOR_SET", "L:CUSTOM_INPUT", 1);
-        match ReplayConfig::new(&arbitrary) {
+        match Config::new(&arbitrary) {
             Ok(config) => {
                 assert_eq!(config.inject[0].name, "custom_input");
                 assert_eq!(config.inject[0].variable, "L:CUSTOM_INPUT");
@@ -825,7 +786,7 @@ unit = "position"
             .replacen("name = \"pitch\"", "name = \"custom_response\"", 1)
             .replacen("A:PLANE PITCH DEGREES", "L:CUSTOM_RESPONSE", 1)
             .replacen("unit = \"radians\"\n", "", 1);
-        match ReplayConfig::new(&arbitrary) {
+        match Config::new(&arbitrary) {
             Ok(config) => {
                 assert_eq!(config.record[0].name, "custom_response");
                 assert_eq!(config.record[0].variable, "L:CUSTOM_RESPONSE");
@@ -891,7 +852,7 @@ unit = "position"
 
     #[test]
     fn accepts_optional_recording_sampling_rate() {
-        let config = ReplayConfig::new(&VALID_CONFIG.replacen(
+        let config = Config::new(&VALID_CONFIG.replacen(
             "unit = \"radians\"\n",
             "unit = \"radians\"\nmax_sampling_rate = 1.0\n",
             1,
@@ -1057,7 +1018,7 @@ unit = "position"
             .replace("[record.1]", "[record.0]")
             .replace("[record.9]", "[record.1]");
 
-        let config = match ReplayConfig::new(&reordered) {
+        let config = match Config::new(&reordered) {
             Ok(config) => config,
             Err(error) => panic!("reordered configuration should parse: {error}"),
         };

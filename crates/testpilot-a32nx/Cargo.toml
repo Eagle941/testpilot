@@ -1,0 +1,11 @@
+[package]
+name = "testpilot-a32nx"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+testpilot-core.workspace = true
+
+[lints]
+workspace = true

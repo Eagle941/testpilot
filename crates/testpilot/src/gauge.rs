@@ -2,14 +2,17 @@ use std::error::Error;
 
 use msfs::MSFSEvent;
 
-use crate::aircraft_initialisation::A32nxInitialiser;
-use crate::{gauge_runtime::GaugeRuntime, replayer::Replayer, simulator::MsfsSimulator};
+use testpilot_a32nx::A32nxInitialiser;
+use testpilot_core::runtime::Runtime;
+use testpilot_msfs::MsfsSimulator;
+
+use crate::config::CONFIG_PATH;
 
 #[msfs::gauge(name=testpilot)]
 /// MSFS gauge entrypoint that drives the replay runtime each `PreUpdate`.
 async fn testpilot(mut gauge: msfs::Gauge) -> Result<(), Box<dyn Error>> {
-    let mut runtime = match GaugeRuntime::new(
-        Replayer::new(),
+    let mut runtime = match Runtime::new(
+        CONFIG_PATH,
         Box::new(MsfsSimulator::new()),
         Box::new(A32nxInitialiser::default()),
     ) {
@@ -34,13 +37,9 @@ async fn testpilot(mut gauge: msfs::Gauge) -> Result<(), Box<dyn Error>> {
         match event {
             MSFSEvent::PreUpdate if !stopping => {
                 if let Err(error) = runtime.pre_update() {
-                    // Terminal failures suppress further updates. Keep the future alive
-                    // until event-stream closure, just as for PreKill, to avoid a reload panic.
-                    stopping = true;
                     println!("TESTPILOT ERROR: {error:#}");
-                    if let Err(stop_error) = runtime.stop() {
-                        println!("TESTPILOT ERROR: recovery failed: {stop_error:#}");
-                    }
+                    // Cleanup has returned the runtime to Idle. Keep forwarding updates
+                    // so a new arming transition can start another run.
                 }
             }
             MSFSEvent::PreKill if !stopping => {

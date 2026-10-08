@@ -483,7 +483,7 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 [[package]]
 name = "msfs"
 version = "0.2.0"
-source = "git+https://github.com/flybywiresim/msfs-rs?branch=main#2f697b9aac9fa3c00474f901a7f7ee4218cf534b"
+source = "git+https://github.com/flybywiresim/msfs-rs?rev=2f697b9aac9fa3c00474f901a7f7ee4218cf534b#2f697b9aac9fa3c00474f901a7f7ee4218cf534b"
 dependencies = [
  "bindgen",
  "cc",
@@ -496,7 +496,7 @@ dependencies = [
 [[package]]
 name = "msfs_derive"
 version = "0.3.0"
-source = "git+https://github.com/flybywiresim/msfs-rs?branch=main#2f697b9aac9fa3c00474f901a7f7ee4218cf534b"
+source = "git+https://github.com/flybywiresim/msfs-rs?rev=2f697b9aac9fa3c00474f901a7f7ee4218cf534b#2f697b9aac9fa3c00474f901a7f7ee4218cf534b"
 dependencies = [
  "quote",
  "syn 2.0.119",
@@ -505,7 +505,7 @@ dependencies = [
 [[package]]
 name = "msfs_sdk"
 version = "0.2.0"
-source = "git+https://github.com/flybywiresim/msfs-rs?branch=main#2f697b9aac9fa3c00474f901a7f7ee4218cf534b"
+source = "git+https://github.com/flybywiresim/msfs-rs?rev=2f697b9aac9fa3c00474f901a7f7ee4218cf534b#2f697b9aac9fa3c00474f901a7f7ee4218cf534b"
 
 [[package]]
 name = "nom"
@@ -784,14 +784,38 @@ dependencies = [
 name = "testpilot"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "criterion",
- "csv",
  "msfs",
+ "testpilot-a32nx",
+ "testpilot-core",
+ "testpilot-msfs",
+]
+
+[[package]]
+name = "testpilot-a32nx"
+version = "0.1.0"
+dependencies = [
+ "testpilot-core",
+]
+
+[[package]]
+name = "testpilot-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "csv",
  "serde",
  "thiserror",
  "time",
  "toml",
+]
+
+[[package]]
+name = "testpilot-msfs"
+version = "0.1.0"
+dependencies = [
+ "msfs",
+ "testpilot-core",
 ]
 
 [[package]]

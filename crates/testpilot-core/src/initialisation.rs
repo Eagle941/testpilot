@@ -17,7 +17,7 @@ pub(crate) fn ths_ready(target: f64, value: f64) -> Result<bool, InitialisationE
 }
 
 /// Actual aircraft mass, balance and optional THS returned by the simulator, not FMS entries.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct AircraftInitialisationState {
     /// Actual zero-fuel weight in kilograms, present for configured mass/balance.
     pub zfw: Option<f64>,
@@ -30,6 +30,7 @@ pub struct AircraftInitialisationState {
 }
 
 /// Bounded readiness state for one armed run.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Initialisation {
     /// Demanded aircraft values.
     targets: InitialisationConfig,
@@ -38,7 +39,7 @@ pub struct Initialisation {
     /// Most recent checked timestamp, used to reject backwards time.
     previous_time: Duration,
     /// Latest valid snapshot, included in timeout diagnostics.
-    latest: Option<AircraftInitialisationState>,
+    latest_snapshot: Option<AircraftInitialisationState>,
 }
 
 impl Initialisation {
@@ -53,12 +54,12 @@ impl Initialisation {
             targets,
             armed_at,
             previous_time: armed_at,
-            latest: None,
+            latest_snapshot: None,
         }
     }
 
     /// Checks time before readback so timeout takes precedence at exactly 30 seconds.
-    pub fn check_deadline(&mut self, now: Duration) -> Result<(), InitialisationError> {
+    pub fn timed_out(&mut self, now: Duration) -> Result<(), InitialisationError> {
         if now < self.previous_time {
             return Err(InitialisationError::ClockMovedBackwards {
                 previous: self.previous_time,
@@ -69,14 +70,14 @@ impl Initialisation {
         if now - self.armed_at >= Duration::from_secs(30) {
             return Err(InitialisationError::Timeout {
                 targets: Box::new(self.targets),
-                latest: self.latest,
+                latest: self.latest_snapshot,
             });
         }
         Ok(())
     }
 
     /// Checks all requested values on one frame, with inclusive absolute tolerances.
-    pub fn observe(
+    pub fn is_complete(
         &mut self,
         actual: AircraftInitialisationState,
     ) -> Result<bool, InitialisationError> {
@@ -100,7 +101,7 @@ impl Initialisation {
             (Some(target), Some(value)) => ths_ready(target, value)?,
             (None, _) => true,
         };
-        self.latest = Some(actual);
+        self.latest_snapshot = Some(actual);
         Ok(trim_ready && mass_ready)
     }
 
@@ -129,16 +130,16 @@ mod tests {
             gwcg: None,
             ths: Some(0.0),
         };
-        assert!(!gate.observe(actual).unwrap());
+        assert!(!gate.is_complete(actual).unwrap());
         assert!(
-            gate.observe(AircraftInitialisationState {
+            gate.is_complete(AircraftInitialisationState {
                 ths: Some(1.0),
                 ..actual
             })
             .unwrap()
         );
         assert!(matches!(
-            Initialisation::new(TARGETS, Duration::ZERO).observe(actual),
+            Initialisation::new(TARGETS, Duration::ZERO).is_complete(actual),
             Err(InitialisationError::MissingMassBalanceReadback { field: "zfw" })
         ));
     }
@@ -153,12 +154,12 @@ mod tests {
             Duration::ZERO,
         );
         assert!(matches!(
-            gate.observe(ACTUAL),
+            gate.is_complete(ACTUAL),
             Err(InitialisationError::MissingThsReadback)
         ));
         for value in [0.99, 1.0, 1.01] {
             assert!(
-                gate.observe(AircraftInitialisationState {
+                gate.is_complete(AircraftInitialisationState {
                     ths: Some(value),
                     ..ACTUAL
                 })
@@ -168,7 +169,7 @@ mod tests {
         for value in [0.989999, 1.010001] {
             assert!(
                 !gate
-                    .observe(AircraftInitialisationState {
+                    .is_complete(AircraftInitialisationState {
                         ths: Some(value),
                         ..ACTUAL
                     })
@@ -177,7 +178,7 @@ mod tests {
         }
         assert!(
             !gate
-                .observe(AircraftInitialisationState {
+                .is_complete(AircraftInitialisationState {
                     ths: Some(1.0),
                     gw: Some(66000.0),
                     ..ACTUAL
@@ -186,7 +187,7 @@ mod tests {
         );
         for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             assert!(matches!(
-                gate.observe(AircraftInitialisationState {
+                gate.is_complete(AircraftInitialisationState {
                     ths: Some(value),
                     ..ACTUAL
                 }),
@@ -215,7 +216,7 @@ mod tests {
             for gw in [64900.0, 65100.0] {
                 for gwcg in [24.99, 25.01] {
                     assert!(
-                        gate.observe(AircraftInitialisationState {
+                        gate.is_complete(AircraftInitialisationState {
                             zfw: Some(zfw),
                             gw: Some(gw),
                             gwcg: Some(gwcg),
@@ -252,7 +253,7 @@ mod tests {
                 ..ACTUAL
             },
         ] {
-            assert!(!gate.observe(actual).unwrap(), "accepted {actual:?}");
+            assert!(!gate.is_complete(actual).unwrap(), "accepted {actual:?}");
         }
     }
 
@@ -261,7 +262,7 @@ mod tests {
         let mut gate = Initialisation::new(TARGETS, Duration::ZERO);
         assert!(
             !gate
-                .observe(AircraftInitialisationState {
+                .is_complete(AircraftInitialisationState {
                     zfw: Some(61000.0),
                     ..ACTUAL
                 })
@@ -269,7 +270,7 @@ mod tests {
         );
         assert!(
             !gate
-                .observe(AircraftInitialisationState {
+                .is_complete(AircraftInitialisationState {
                     gw: Some(66000.0),
                     ..ACTUAL
                 })
@@ -277,13 +278,13 @@ mod tests {
         );
         assert!(
             !gate
-                .observe(AircraftInitialisationState {
+                .is_complete(AircraftInitialisationState {
                     gwcg: Some(26.0),
                     ..ACTUAL
                 })
                 .unwrap()
         );
-        assert!(gate.observe(ACTUAL).unwrap());
+        assert!(gate.is_complete(ACTUAL).unwrap());
         for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             for actual in [
                 AircraftInitialisationState {
@@ -300,7 +301,7 @@ mod tests {
                 },
             ] {
                 assert!(matches!(
-                    gate.observe(actual),
+                    gate.is_complete(actual),
                     Err(InitialisationError::NonFiniteReadback { .. })
                 ));
             }
@@ -311,10 +312,10 @@ mod tests {
     fn deadline_uses_elapsed_simulator_time_and_reports_latest_snapshot() {
         for elapsed in [Duration::from_secs(30), Duration::from_secs(35)] {
             let mut gate = Initialisation::new(TARGETS, Duration::from_secs(100));
-            gate.check_deadline(Duration::from_millis(129999)).unwrap();
-            gate.observe(ACTUAL).unwrap();
+            gate.timed_out(Duration::from_millis(129999)).unwrap();
+            gate.is_complete(ACTUAL).unwrap();
             assert!(matches!(
-                gate.check_deadline(Duration::from_secs(100) + elapsed),
+                gate.timed_out(Duration::from_secs(100) + elapsed),
                 Err(InitialisationError::Timeout {
                     targets,
                     latest: Some(ACTUAL)
@@ -323,7 +324,7 @@ mod tests {
         }
         let mut gate = Initialisation::new(TARGETS, Duration::from_secs(100));
         assert!(matches!(
-            gate.check_deadline(Duration::from_secs(130)),
+            gate.timed_out(Duration::from_secs(130)),
             Err(InitialisationError::Timeout { latest: None, .. })
         ));
     }
@@ -331,8 +332,8 @@ mod tests {
     #[test]
     fn rejects_clock_reversal_even_after_the_arm_timestamp() {
         let mut gate = Initialisation::new(TARGETS, Duration::from_secs(100));
-        gate.check_deadline(Duration::from_secs(110)).unwrap();
-        assert!(matches!(gate.check_deadline(Duration::from_secs(109)),
+        gate.timed_out(Duration::from_secs(110)).unwrap();
+        assert!(matches!(gate.timed_out(Duration::from_secs(109)),
             Err(InitialisationError::ClockMovedBackwards { previous, current })
                 if previous == Duration::from_secs(110) && current == Duration::from_secs(109)));
     }

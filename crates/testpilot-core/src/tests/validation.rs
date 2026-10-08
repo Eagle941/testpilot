@@ -4,7 +4,7 @@ use crate::error::ScenarioError;
 #[test]
 fn validates_default_unequal_length_scenario() {
     let summary = validate_scenario(
-        include_bytes!("../../example/scenario.csv").as_slice(),
+        include_bytes!("../../../../example/scenario.csv").as_slice(),
         &config(),
     )
     .unwrap_or_else(|error| panic!("default scenario rejected: {error}"));
@@ -114,7 +114,7 @@ fn rejects_invalid_timestamps() {
 #[test]
 fn rejects_invalid_and_out_of_range_values() {
     match validate("0,nope,0,0\n1,0,1,0\n") {
-        Err(ScenarioError::ParseInvalid(_)) => {}
+        Err(ScenarioError::ParseNumber { .. }) => {}
         unexpected => panic!("expected parse-invalid validation error, got: {unexpected:?}"),
     }
     match validate("0,NaN,0,0\n1,0,1,0\n") {
@@ -140,7 +140,7 @@ fn rejects_missing_samples() {
 #[test]
 fn reports_csv_structure_errors() {
     match validate("0,0,0\n") {
-        Err(ScenarioError::Csv(_)) => {}
+        Err(ScenarioError::Csv { .. }) => {}
         unexpected => panic!("expected CSV-parse validation error, got: {unexpected:?}"),
     }
 }

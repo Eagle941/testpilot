@@ -1,15 +1,15 @@
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use csv::{Position, Reader, ReaderBuilder, StringRecord, Trim};
 
-use crate::config::{InjectionConfig, ReplayConfig};
+use crate::config::{Config, InjectionConfig};
 use crate::playback::{AffineRange, LinearSegment, PlaybackError, Sample};
 
-use crate::error::ScenarioError;
+use crate::error::{InterpolationError, ScenarioError};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Pair of CSV column indexes used for one configured input signal.
 ///
 /// `time_idx` points to `<signal>.time` and `value_idx` points to the adjacent
@@ -69,7 +69,53 @@ impl Frame<'_> {
     }
 }
 
-/// Incremental, read-only scenario loader with one file cursor per injection.
+/// One interpolated input in source units, with its configured simulator destination.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReplayInput<'a> {
+    /// Logical signal name used in diagnostics.
+    pub signal: &'a str,
+    /// Prefixed simulator destination from trusted configuration.
+    pub variable: &'a str,
+    /// Interpolated value before affine conversion.
+    pub value: f64,
+    /// Conversion applied at the simulator I/O boundary.
+    pub conversion: AffineRange,
+}
+
+/// Read-only input values for a single scenario timestamp.
+#[derive(Debug, Clone, Copy)]
+pub struct ReplayInputs<'a> {
+    /// Cursors already advanced to bracket this frame.
+    scenario: &'a Scenario,
+    /// Scenario-relative simulator elapsed time.
+    elapsed: Duration,
+}
+
+impl ReplayInputs<'_> {
+    /// Interpolates inputs in configuration order, without allocating a frame buffer.
+    ///
+    /// Values are evaluated as consumed so an input failure retains the established
+    /// injection order. No telemetry or scheduling state is borrowed by this view.
+    pub fn iter(&self) -> impl Iterator<Item = Result<ReplayInput<'_>, InterpolationError>> {
+        self.scenario.interpolation_rows().map(|points| {
+            let value = points.value_at(self.elapsed).map_err(|source| {
+                InterpolationError::InterpolateSignal {
+                    signal: points.signal.to_owned(),
+                    source,
+                }
+            })?;
+            Ok(ReplayInput {
+                signal: points.signal,
+                variable: points.variable,
+                value,
+                conversion: points.conversion,
+            })
+        })
+    }
+}
+
+/// Streams and interpolates one scenario through independent, read-only signal cursors.
+#[derive(Debug)]
 pub struct Scenario {
     /// Active per-signal cursor set.
     cursors: Vec<Cursor>,
@@ -80,7 +126,7 @@ impl Scenario {
     ///
     /// Initialization reads each CSV header and the first two samples needed
     /// for interpolation. The scenario file is never opened for writing.
-    pub fn new(path: impl AsRef<Path>, config: &ReplayConfig) -> Result<Scenario, ScenarioError> {
+    pub fn new(path: impl AsRef<Path>, config: &Config) -> Result<Scenario, ScenarioError> {
         let path = path.as_ref();
         let cursors = config
             .inject
@@ -94,12 +140,19 @@ impl Scenario {
     /// Advances every signal cursor for the current elapsed scenario time.
     ///
     /// Each cursor reads forward until its samples bracket `elapsed`, or until
-    /// it reaches the end of its series.
-    pub fn advance(&mut self, elapsed: Duration) -> Result<(), ScenarioError> {
+    /// it reaches the end of its series. Returns a borrowed input view for this
+    /// frame, or `None` when every signal has passed its final sample.
+    pub fn advance(
+        &mut self,
+        elapsed: Duration,
+    ) -> Result<Option<ReplayInputs<'_>>, ScenarioError> {
         for cursor in &mut self.cursors {
             cursor.advance(elapsed)?;
         }
-        Ok(())
+        Ok((!self.completed()).then_some(ReplayInputs {
+            scenario: self,
+            elapsed,
+        }))
     }
 
     /// Returns whether every signal cursor has passed its final sample.
@@ -131,7 +184,10 @@ impl Scenario {
 /// interpolate the current simulator frame, keeping memory use independent of
 /// scenario duration. Once the reader reaches the final sample, it holds that
 /// value until every configured cursor has completed.
+#[derive(Debug)]
 pub struct Cursor {
+    /// Scenario filename retained for streaming error diagnostics.
+    path: PathBuf,
     /// Logical input signal name from configuration.
     signal: String,
     /// Prefixed simulator destination for this injection.
@@ -158,10 +214,23 @@ impl Cursor {
     /// It reads and validates the first pair of samples during construction so
     /// playback can fail fast on empty or malformed columns.
     fn new(path: &Path, injection: &InjectionConfig) -> Result<Cursor, ScenarioError> {
-        let mut reader = ReaderBuilder::new().trim(Trim::All).from_path(path)?;
-        let columns = Cursor::find_column_indices(reader.headers()?, injection)?;
+        let csv_error = |operation, source| ScenarioError::Csv {
+            path: path.to_path_buf(),
+            signal: injection.name.clone(),
+            operation,
+            source,
+        };
+        let mut reader = ReaderBuilder::new()
+            .trim(Trim::All)
+            .from_path(path)
+            .map_err(|source| csv_error("open", source))?;
+        let headers = reader
+            .headers()
+            .map_err(|source| csv_error("read header of", source))?;
+        let columns = Cursor::find_column_indices(headers, injection)?;
         let conversion = AffineRange::new(injection.source_range, injection.simulator_range)?;
         let mut cursor = Cursor {
+            path: path.to_path_buf(),
             signal: injection.name.clone(),
             variable: injection.variable.clone(),
             columns,
@@ -182,7 +251,25 @@ impl Cursor {
         signal: &str,
         line: Option<u64>,
     ) -> Result<Duration, ScenarioError> {
-        let time_seconds = text.parse::<f64>()?;
+        Self::parse_time_in_file(text, signal, line, Path::new("<scenario>"))
+    }
+
+    /// Parses a timestamp with file context when called by a streaming cursor.
+    fn parse_time_in_file(
+        text: &str,
+        signal: &str,
+        line: Option<u64>,
+        path: &Path,
+    ) -> Result<Duration, ScenarioError> {
+        let time_seconds = text
+            .parse::<f64>()
+            .map_err(|source| ScenarioError::ParseNumber {
+                path: path.to_path_buf(),
+                signal: signal.to_owned(),
+                column: "time",
+                line,
+                source,
+            })?;
         if !time_seconds.is_finite() {
             return Err(ScenarioError::NonFiniteTime {
                 signal: signal.to_owned(),
@@ -276,7 +363,15 @@ impl Cursor {
     /// [`ScenarioError::HalfPopulatedPair`].
     fn read_sample(&mut self) -> Result<Option<Sample>, ScenarioError> {
         self.row.clear();
-        let has_record = self.reader.read_record(&mut self.row)?;
+        let has_record =
+            self.reader
+                .read_record(&mut self.row)
+                .map_err(|source| ScenarioError::Csv {
+                    path: self.path.clone(),
+                    signal: self.signal.clone(),
+                    operation: "read row of",
+                    source,
+                })?;
         if !has_record {
             return Ok(None);
         }
@@ -294,8 +389,162 @@ impl Cursor {
             return Ok(None);
         }
 
-        let time = Cursor::parse_time(time_text, &self.signal, line)?;
-        let value = value_text.parse::<f64>()?;
-        Ok(Some(Sample::new(time, value)?))
+        let time = Cursor::parse_time_in_file(time_text, &self.signal, line, &self.path)?;
+        let value = value_text
+            .parse::<f64>()
+            .map_err(|source| ScenarioError::ParseNumber {
+                path: self.path.clone(),
+                signal: self.signal.clone(),
+                column: "value",
+                line,
+                source,
+            })?;
+        let sample = Sample::new(time, value).map_err(|source| ScenarioError::InvalidSample {
+            path: self.path.clone(),
+            signal: self.signal.clone(),
+            line,
+            source,
+        })?;
+        Ok(Some(sample))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    use super::Scenario;
+    use crate::config::Config;
+
+    fn time(seconds: f64) -> Duration {
+        Duration::try_from_secs_f64(seconds).unwrap()
+    }
+
+    #[derive(Debug)]
+    struct Fixture {
+        directory: PathBuf,
+        config_path: PathBuf,
+    }
+
+    impl Fixture {
+        fn new() -> Fixture {
+            let directory = std::env::temp_dir().join(format!(
+                "replay-gauge-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            fs::create_dir_all(&directory)
+                .unwrap_or_else(|error| panic!("failed to create fixture directory: {error}"));
+            let config_path = directory.join("replayer_config.toml");
+            fs::write(
+                &config_path,
+                r#"format_version = 1
+input_file = "scenario.csv"
+
+[inject.0]
+name = "sidestick_pitch_position"
+variable = "K:AXIS_ELEVATOR_SET"
+source_range = [-100.0, 100.0]
+simulator_range = [-1.0, 1.0]
+
+[record.0]
+name = "pitch"
+variable = "A:PLANE PITCH DEGREES"
+unit = "radians"
+"#,
+            )
+            .unwrap_or_else(|error| panic!("failed to write fixture config: {error}"));
+            fs::write(
+                directory.join("scenario.csv"),
+                "sidestick_pitch_position.time,sidestick_pitch_position.value\n0,0\n0.1,10\n",
+            )
+            .unwrap_or_else(|error| panic!("failed to write fixture scenario: {error}"));
+
+            Fixture {
+                directory,
+                config_path,
+            }
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    #[test]
+    fn preparation_opens_inputs_without_output_or_a_clock() {
+        let fixture = Fixture::new();
+        let config = Config::read_config_file(&fixture.config_path).unwrap();
+        let mut scenario =
+            Scenario::new(fixture.directory.join(&config.input_file), &config).unwrap();
+        assert_eq!(fs::read_dir(&fixture.directory).unwrap().count(), 2);
+        let inputs = scenario.advance(Duration::ZERO).unwrap().unwrap();
+        let input = inputs.iter().next().unwrap().unwrap();
+        assert_eq!(input.signal, "sidestick_pitch_position");
+        assert_eq!(input.variable, "K:AXIS_ELEVATOR_SET");
+        assert_eq!(input.value, 0.0);
+        assert!((input.conversion.convert(10.0).unwrap() - 0.1).abs() < 1e-12);
+    }
+
+    #[test]
+    fn interpolates_irregular_series_and_catches_up_across_multiple_intervals() {
+        let fixture = Fixture::new();
+        let config = Config::read_config_file(&fixture.config_path).unwrap();
+        let path = fixture.directory.join(&config.input_file);
+        fs::write(&path, "sidestick_pitch_position.time,sidestick_pitch_position.value\n0,0\n0.2,20\n0.5,50\n2,80\n").unwrap();
+        let mut scenario = Scenario::new(&path, &config).unwrap();
+        for (elapsed, expected) in [
+            (0.0, 0.0),
+            (0.1, 10.0),
+            (0.2, 20.0),
+            (1.25, 65.0),
+            (2.0, 80.0),
+        ] {
+            let inputs = scenario.advance(time(elapsed)).unwrap().unwrap();
+            assert_eq!(inputs.iter().next().unwrap().unwrap().value, expected);
+        }
+        assert!(scenario.advance(time(2.1)).unwrap().is_none());
+        assert!(scenario.advance(time(3.0)).unwrap().is_none());
+        assert_eq!(fs::read_dir(&fixture.directory).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn holds_shorter_series_until_the_longest_series_finishes() {
+        let fixture = Fixture::new();
+        let mut config = Config::read_config_file(&fixture.config_path).unwrap();
+        let mut second = config.inject[0].clone();
+        second.name = "roll".to_owned();
+        second.variable = "K:AXIS_AILERONS_SET".to_owned();
+        config.inject.push(second);
+        let path = fixture.directory.join(&config.input_file);
+        fs::write(&path, "sidestick_pitch_position.time,sidestick_pitch_position.value,roll.time,roll.value\n0,0,0,0\n0.1,10,1,100\n").unwrap();
+        let mut scenario = Scenario::new(&path, &config).unwrap();
+        let inputs = scenario.advance(time(0.5)).unwrap().unwrap();
+        let values: Vec<_> = inputs.iter().map(|input| input.unwrap().value).collect();
+        assert_eq!(values, [10.0, 50.0]);
+        assert!(scenario.advance(time(1.1)).unwrap().is_none());
+    }
+
+    #[test]
+    fn streaming_parse_failures_retain_location_and_signal() {
+        let fixture = Fixture::new();
+        let config = Config::read_config_file(&fixture.config_path).unwrap();
+        let path = fixture.directory.join(&config.input_file);
+        fs::write(
+            &path,
+            "sidestick_pitch_position.time,sidestick_pitch_position.value\n0,0\n1,10\n2,invalid\n",
+        )
+        .unwrap();
+        let mut scenario = Scenario::new(&path, &config).unwrap();
+        let error = scenario.advance(time(1.5)).err().unwrap();
+        let message = error.to_string();
+        assert!(message.contains("scenario.csv"));
+        assert!(message.contains("sidestick_pitch_position"));
+        assert!(message.contains("line 4"));
+        assert!(message.contains("value"));
     }
 }

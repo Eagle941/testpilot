@@ -1,9 +1,5 @@
 //! Aircraft-specific loading operations, separate from generic simulator I/O and readiness checks.
 
-mod a32nx;
-
-pub use a32nx::A32nxInitialiser;
-
 use crate::config::InitialisationConfig;
 use crate::error::InitialisationError;
 use crate::initialisation::AircraftInitialisationState;

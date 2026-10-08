@@ -10,7 +10,7 @@ if ! command -v wasm-opt >/dev/null 2>&1; then
 fi
 
 # Calling rustc instead of `cargo build` to force `cdylib`
-cargo rustc --locked --release --target wasm32-wasip1 --lib --crate-type cdylib
+cargo rustc --locked -p testpilot --release --target wasm32-wasip1 --lib --crate-type cdylib
 
 wasm-opt \
     -O1 \
