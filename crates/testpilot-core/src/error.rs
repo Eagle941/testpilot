@@ -12,16 +12,17 @@ use std::time::Duration;
 use thiserror::Error;
 
 /// Validation failures for replay TOML contents.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, PartialEq, Error)]
 pub enum ConfigError {
+    #[error(
+        "initialisation.zfw, initialisation.gw and initialisation.gwcg must be supplied together or all omitted"
+    )]
+    IncompleteInitialisationMassBalance,
     #[error("invalid initialisation.{field}: {reason}")]
     InvalidInitialisation {
         field: &'static str,
         reason: &'static str,
     },
-    #[error(transparent)]
-    FileIo(#[from] io::Error),
-
     #[error("invalid TOML configuration: {0}")]
     Toml(#[from] toml::de::Error),
 
@@ -92,9 +93,30 @@ pub enum ConfigError {
     DuplicateSignalAcrossSections { name: String },
 }
 
-/// Initialisation submission, readback, readiness and deadline failures.
+/// Configuration file loading adds a path without obscuring typed validation failures.
 #[derive(Debug, Error)]
+pub enum ConfigFileError {
+    #[error("failed to read configuration `{path}`: {source}")]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("invalid configuration `{path}`: {source}")]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: Box<ConfigError>,
+    },
+}
+
+/// Initialisation submission, readback, readiness and deadline failures.
+#[derive(Debug, Clone, PartialEq, Error)]
 pub enum InitialisationError {
+    #[error(
+        "invalid THS target {degrees} degrees: must be finite and between -4 and 13.5 inclusive"
+    )]
+    InvalidThsTarget { degrees: f64 },
     #[error("invalid A32NX loading targets {targets:?}: {reason}")]
     InvalidLoadingTargets {
         targets: crate::config::InitialisationConfig,
@@ -107,11 +129,11 @@ pub enum InitialisationError {
         targets: crate::config::InitialisationConfig,
     },
     #[error(
-        "aircraft initialisation timed out after 30 simulator seconds; targets (kg, kg, % MAC): {targets:?}; latest actual values: {latest:?}"
+        "aircraft initialisation timed out after 30 simulator seconds; targets (kg, kg, % MAC, THS degrees): {targets:?}; latest actual values: {latest:?}"
     )]
     Timeout {
-        targets: crate::config::InitialisationConfig,
-        latest: Option<crate::initialisation::AircraftMassBalance>,
+        targets: Box<crate::config::InitialisationConfig>,
+        latest: Option<crate::initialisation::AircraftInitialisationState>,
     },
     #[error("initialisation simulator time moved backwards from {previous:?} to {current:?}")]
     ClockMovedBackwards {
@@ -120,26 +142,29 @@ pub enum InitialisationError {
     },
     #[error("initialisation readback {field} must be finite, got {value}")]
     NonFiniteReadback { field: &'static str, value: f64 },
+    #[error("initialisation THS readback is missing")]
+    MissingThsReadback,
+    #[error("initialisation readback {field} is missing")]
+    MissingMassBalanceReadback { field: &'static str },
+    #[error("required initialisation variable L:A32NX_HYD_TRIM_WHEEL_PERCENT does not exist")]
+    MissingThsInterface,
     #[error("failed to submit aircraft initialisation targets: {0}")]
     Submit(#[source] SimulatorError),
-    #[error("failed to read actual aircraft mass and balance: {0}")]
+    #[error("failed to read actual aircraft initialisation state: {0}")]
     Readback(#[source] SimulatorError),
 }
 
-/// Replay lifecycle and simulator-clock failures.
-#[derive(Debug, PartialEq, Error)]
-pub enum ReplayerError {
-    #[error("a replay scenario is already loaded")]
-    ScenarioAlreadyLoaded,
+/// Runtime lifecycle, path resolution and simulator-clock failures.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum RuntimeError {
+    #[error("cannot start replay while initialisation is not active")]
+    InitialisationNotActive,
 
     #[error("configuration path `{path}` has no parent directory")]
     ConfigPathWithoutParent { path: PathBuf },
 
     #[error("scenario path `{path}` has no parent directory")]
     ScenarioPathWithoutParent { path: PathBuf },
-
-    #[error("scenario update requested while idle")]
-    UpdateWhileIdle,
 
     #[error("simulation time moved backwards from {started_at:?} to {current:?}")]
     SimulationTimeMovedBackwards {
@@ -148,8 +173,45 @@ pub enum ReplayerError {
     },
 }
 
+/// Input interpolation failures retain their logical signal.
+#[derive(Debug, Clone, PartialEq, Error)]
+pub enum InterpolationError {
+    #[error("failed to interpolate signal `{signal}`: {source}")]
+    InterpolateSignal {
+        signal: String,
+        #[source]
+        source: PlaybackError,
+    },
+}
+
+/// Cleanup attempts telemetry finalisation and arming reset independently.
+#[derive(Debug, Error)]
+pub enum CleanupError {
+    #[error("telemetry cleanup failed: {0}")]
+    Telemetry(#[source] RecordingError),
+    #[error("arming reset failed: {0}")]
+    Arming(#[source] SimulatorError),
+    #[error("telemetry cleanup failed: {telemetry}; arming reset also failed: {arming}")]
+    TelemetryAndArming {
+        #[source]
+        telemetry: RecordingError,
+        arming: SimulatorError,
+    },
+}
+
+/// Retains both the primary orchestration failure and any secondary cleanup failures.
+#[derive(Debug, Error)]
+pub enum TerminationError {
+    #[error("{primary:#}; cleanup also failed: {cleanup}")]
+    CleanupAfterFailure {
+        #[source]
+        primary: anyhow::Error,
+        cleanup: CleanupError,
+    },
+}
+
 /// MSFS calculator-code and simulator-variable failures.
-#[derive(Debug, PartialEq, Error)]
+#[derive(Debug, Clone, PartialEq, Error)]
 pub enum SimulatorError {
     #[error("failed to read simulator time")]
     SimulationTimeUnavailable,
@@ -194,11 +256,33 @@ pub enum SimulatorError {
 /// Structural and numeric validation failures for scenario CSV input.
 #[derive(Debug, Error)]
 pub enum ScenarioError {
-    #[error(transparent)]
-    ParseInvalid(#[from] ParseFloatError),
+    #[error("failed to {operation} scenario `{path}` for signal `{signal}`: {source}")]
+    Csv {
+        path: PathBuf,
+        signal: String,
+        operation: &'static str,
+        #[source]
+        source: csv::Error,
+    },
 
-    #[error(transparent)]
-    Csv(#[from] csv::Error),
+    #[error("invalid {column} for signal `{signal}` in `{path}`{line_suffix}: {source}", line_suffix = format_line(*line))]
+    ParseNumber {
+        path: PathBuf,
+        signal: String,
+        column: &'static str,
+        line: Option<u64>,
+        #[source]
+        source: ParseFloatError,
+    },
+
+    #[error("invalid sample for signal `{signal}` in `{path}`{line_suffix}: {source}", line_suffix = format_line(*line))]
+    InvalidSample {
+        path: PathBuf,
+        signal: String,
+        line: Option<u64>,
+        #[source]
+        source: PlaybackError,
+    },
 
     #[error(transparent)]
     Playback(#[from] PlaybackError),
@@ -276,15 +360,11 @@ pub enum ScenarioError {
     MissingSamples { signal: String },
 }
 
-/// Per-frame gauge orchestration and injection failures.
-#[derive(Debug, Error)]
-pub enum GaugeError {
-    #[error("failed to interpolate signal `{signal}`: {source}")]
-    InterpolateSignal {
-        signal: String,
-        #[source]
-        source: PlaybackError,
-    },
+/// Interpolation, conversion and simulator-write failures for one input frame.
+#[derive(Debug, Clone, PartialEq, Error)]
+pub enum InjectionError {
+    #[error(transparent)]
+    Interpolate(#[from] InterpolationError),
 
     #[error("failed to convert signal `{signal}`: {source}")]
     ConvertSignal {
@@ -299,7 +379,11 @@ pub enum GaugeError {
         #[source]
         source: SimulatorError,
     },
+}
 
+/// Recording source validation, sampling and frame serialization failures.
+#[derive(Debug, Error)]
+pub enum TelemetryError {
     #[error("recording signal `{signal}` is not readable: {source}")]
     ValidateRecordingSignal {
         signal: String,
@@ -313,9 +397,6 @@ pub enum GaugeError {
         #[source]
         source: SimulatorError,
     },
-
-    #[error(transparent)]
-    Simulator(#[from] SimulatorError),
 
     #[error("failed to record telemetry frame: {0}")]
     RecordFrame(#[from] RecordingError),
@@ -359,7 +440,7 @@ pub enum RecordingError {
 }
 
 /// Invalid samples, interpolation requests, and range conversions.
-#[derive(Debug, Clone, PartialEq, Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum PlaybackError {
     #[error("sample value must be finite, got {value}")]
     NonFiniteValue { value: f64 },

@@ -10,6 +10,7 @@ use time::OffsetDateTime;
 pub use crate::error::RecordingError;
 
 /// Streaming telemetry writer with one adjacent time/value pair per signal.
+#[derive(Debug)]
 pub struct TelemetryRecorder {
     /// Absolute path to the output CSV file.
     filename: PathBuf,
@@ -139,6 +140,15 @@ impl TelemetryRecorder {
                 path: self.filename.clone(),
                 source,
             })
+    }
+
+    #[cfg(test)]
+    /// Replaces the output with a real read-only file to exercise runtime write-failure cleanup.
+    pub(crate) fn make_output_read_only(&mut self) {
+        self.flush().unwrap();
+        self.writer = WriterBuilder::new()
+            .has_headers(false)
+            .from_writer(File::open(&self.filename).unwrap());
     }
 
     /// Writes the paired `<signal>.time`/`<signal>.value` CSV header columns.

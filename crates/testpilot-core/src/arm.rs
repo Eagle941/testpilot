@@ -1,31 +1,15 @@
 use crate::error::SimulatorError;
 use crate::simulator::SimulatorAdapter;
 
-/// Tracks sampled arming values and identifies a zero-to-one transition.
-#[derive(Debug, Default)]
-pub struct PositiveTrigger {
-    /// Previously sampled arming value, used for edge detection.
-    previous: f64,
-}
-
-impl PositiveTrigger {
-    /// Updates the sampled value and reports whether replay should start.
-    pub fn start(&mut self, current: f64) -> bool {
-        let start = self.previous == 0.0 && current == 1.0;
-        self.previous = current;
-        start
-    }
-}
-
 /// Tracks and applies the configured arming variable for simulator replay state.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ArmingMonitor {
     /// Simulator variable name to read/write for arming.
     variable: String,
-    /// Most recently sampled arming value.
-    armed_value: f64,
-    /// Transition detector for a 0->1 arming edge.
-    trigger: PositiveTrigger,
+    /// Previously sampled arming value, used for zero-to-one edge detection.
+    previous: f64,
+    /// A failed reset must succeed before another arming value is accepted.
+    reset_pending: bool,
 }
 
 impl ArmingMonitor {
@@ -33,28 +17,33 @@ impl ArmingMonitor {
     pub fn new(variable: impl Into<String>) -> Self {
         Self {
             variable: variable.into(),
-            armed_value: 0.0,
-            trigger: PositiveTrigger::default(),
+            previous: 0.0,
+            reset_pending: false,
         }
     }
 
     /// Reads the arming value, updates transition tracking, and reports whether
     /// the run should start from this frame.
-    pub fn ready_to_start(
+    pub fn trigger_initialise(
         &mut self,
         simulator: &mut dyn SimulatorAdapter,
     ) -> Result<bool, SimulatorError> {
+        if self.reset_pending {
+            self.reset(simulator)?;
+            return Ok(false);
+        }
         let armed = simulator.read(&self.variable, None)?;
-        let starting = self.trigger.start(armed);
-        self.armed_value = armed;
-        Ok(starting)
+        let start = self.previous == 0.0 && armed == 1.0;
+        self.previous = armed;
+        Ok(start)
     }
 
-    /// Resets the arming variable and edge detector to `0.0` after a successful write.
+    /// Resets arming to zero; failures are retried before accepting another start.
     pub fn reset(&mut self, simulator: &mut dyn SimulatorAdapter) -> Result<(), SimulatorError> {
+        self.reset_pending = true;
         simulator.write(&self.variable, 0.0)?;
-        self.armed_value = 0.0;
-        self.trigger = PositiveTrigger::default();
+        self.previous = 0.0;
+        self.reset_pending = false;
         Ok(())
     }
 }
@@ -63,12 +52,14 @@ impl ArmingMonitor {
 mod tests {
     use crate::simulator::SimulatorAdapter;
 
-    use super::{ArmingMonitor, PositiveTrigger};
+    use super::ArmingMonitor;
     use crate::error::SimulatorError;
 
+    #[derive(Debug, Clone, PartialEq)]
     struct FakeSimulator {
         values: Vec<f64>,
         writes: Vec<f64>,
+        fail_write: bool,
     }
 
     impl FakeSimulator {
@@ -76,6 +67,7 @@ mod tests {
             Self {
                 values: vec![0.0],
                 writes: Vec::new(),
+                fail_write: false,
             }
         }
     }
@@ -95,8 +87,14 @@ mod tests {
             unreachable!()
         }
 
-        fn write(&mut self, _variable: &str, value: f64) -> Result<(), SimulatorError> {
+        fn write(&mut self, variable: &str, value: f64) -> Result<(), SimulatorError> {
             self.writes.push(value);
+            if self.fail_write {
+                return Err(SimulatorError::CalculatorCodeWriteFailed {
+                    variable: variable.to_owned(),
+                    value,
+                });
+            }
             Ok(())
         }
 
@@ -120,21 +118,29 @@ mod tests {
 
     #[test]
     fn starts_when_armed_changes_from_zero_to_one() {
-        let mut state = PositiveTrigger::default();
+        let mut simulator = FakeSimulator::new();
+        let mut monitor = ArmingMonitor::new("L:REPLAYER_ARMED");
+        simulator.values.push(1.0);
 
-        assert!(state.start(1.0));
+        assert!(monitor.trigger_initialise(&mut simulator).unwrap());
     }
 
     #[test]
     fn does_not_start_without_a_zero_to_one_transition() {
-        let mut state = PositiveTrigger::default();
+        let mut simulator = FakeSimulator::new();
+        let mut monitor = ArmingMonitor::new("L:REPLAYER_ARMED");
 
-        assert!(!state.start(0.0));
-        assert!(state.start(1.0));
-        assert!(!state.start(1.0));
-        assert!(!state.start(0.0));
-        assert!(!state.start(0.5));
-        assert!(!state.start(1.0));
+        for (value, start) in [
+            (0.0, false),
+            (1.0, true),
+            (1.0, false),
+            (0.0, false),
+            (0.5, false),
+            (1.0, false),
+        ] {
+            simulator.values.push(value);
+            assert_eq!(monitor.trigger_initialise(&mut simulator).unwrap(), start);
+        }
     }
 
     #[test]
@@ -142,17 +148,13 @@ mod tests {
         let mut simulator = FakeSimulator::new();
         let mut monitor = ArmingMonitor::new("L:REPLAYER_ARMED");
 
-        assert!(!monitor.ready_to_start(&mut simulator).unwrap());
-        assert_eq!(monitor.armed_value, 0.0);
+        assert!(!monitor.trigger_initialise(&mut simulator).unwrap());
         simulator.values.push(1.0);
-        assert!(monitor.ready_to_start(&mut simulator).unwrap());
-        assert_eq!(monitor.armed_value, 1.0);
+        assert!(monitor.trigger_initialise(&mut simulator).unwrap());
         simulator.values.push(1.0);
-        assert!(!monitor.ready_to_start(&mut simulator).unwrap());
-        assert_eq!(monitor.armed_value, 1.0);
+        assert!(!monitor.trigger_initialise(&mut simulator).unwrap());
         simulator.values.push(0.0);
-        assert!(!monitor.ready_to_start(&mut simulator).unwrap());
-        assert_eq!(monitor.armed_value, 0.0);
+        assert!(!monitor.trigger_initialise(&mut simulator).unwrap());
     }
 
     #[test]
@@ -169,11 +171,31 @@ mod tests {
         let mut simulator = FakeSimulator::new();
         let mut monitor = ArmingMonitor::new("L:REPLAYER_ARMED");
         simulator.values.push(1.0);
-        assert!(monitor.ready_to_start(&mut simulator).unwrap());
+        assert!(monitor.trigger_initialise(&mut simulator).unwrap());
 
         monitor.reset(&mut simulator).unwrap();
         simulator.values.push(1.0);
-        assert!(monitor.ready_to_start(&mut simulator).unwrap());
-        assert_eq!(monitor.armed_value, 1.0);
+        assert!(monitor.trigger_initialise(&mut simulator).unwrap());
+    }
+
+    #[test]
+    fn failed_reset_is_retried_before_accepting_an_unobserved_arming_edge() {
+        let mut simulator = FakeSimulator::new();
+        let mut monitor = ArmingMonitor::new("L:REPLAYER_ARMED");
+        simulator.values = vec![1.0];
+        simulator.fail_write = true;
+
+        assert!(monitor.reset(&mut simulator).is_err());
+        assert!(monitor.trigger_initialise(&mut simulator).is_err());
+        assert_eq!(simulator.values, vec![1.0]);
+
+        simulator.fail_write = false;
+        assert!(!monitor.trigger_initialise(&mut simulator).unwrap());
+        assert_eq!(simulator.writes, vec![0.0; 3]);
+        // The successful reset leaves the actual simulator variable at zero.
+        simulator.values = vec![0.0];
+        assert!(!monitor.trigger_initialise(&mut simulator).unwrap());
+        simulator.values.push(1.0);
+        assert!(monitor.trigger_initialise(&mut simulator).unwrap());
     }
 }

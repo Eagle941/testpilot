@@ -9,7 +9,7 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use testpilot::cursor::{Frame, Scenario};
 use testpilot::playback::{AffineRange, Sample};
 use testpilot::recording::TelemetryRecorder;
-use testpilot::{config::InjectionConfig, config::ReplayConfig};
+use testpilot::{config::Config, config::InjectionConfig};
 
 fn unique_tmp_dir() -> PathBuf {
     let nanos = SystemTime::now()
@@ -37,7 +37,7 @@ fn build_scenario(rows: usize) -> (Scenario, PathBuf) {
     let directory = unique_tmp_dir();
     let scenario_path = directory.join("scenario.csv");
     make_scenario_csv(&scenario_path, rows);
-    let config = ReplayConfig {
+    let config = Config {
         initialisation: None,
         input_file: PathBuf::from("scenario.csv"),
         inject: vec![InjectionConfig {
@@ -112,7 +112,7 @@ fn benchmark_scenario_advance(c: &mut Criterion) {
             |(mut scenario, _)| {
                 for index in 0..128_u64 {
                     let elapsed = Duration::from_millis(2 * index);
-                    scenario
+                    let _ = scenario
                         .advance(black_box(elapsed))
                         .expect("advance should succeed");
                 }

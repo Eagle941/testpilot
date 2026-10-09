@@ -1,223 +1,76 @@
 # Project Instructions
 
-## Purpose
+## Scope and references
 
-This repository contains a Rust WebAssembly library for automated flight testing in Microsoft Flight Simulator 2020 (MSFS 2020), with primary compatibility targeting the FlyByWire Simulations A32NX.
+Build a Rust library/WASM gauge for automated flight testing in MSFS 2020,
+initially targeting the FlyByWire A32NX. Preserve the usage and file contracts in
+[README.md](README.md); use [example/](example/) as the configuration starting point.
+The MVP injects continuous sidestick pitch/roll and records aircraft attitudes
+and control-surface positions. Logical signal names remain strings.
 
-The library must:
+Use [msfs-rs](https://github.com/flybywiresim/msfs-rs) for simulator interaction.
+The current [A32NX source](https://github.com/flybywiresim/aircraft) is authoritative
+for aircraft-specific interfaces. [YourControls](https://github.com/Sequal32/yourcontrols)
+is an accepted baseline for straightforward mappings; resolve conflicts against
+A32NX and the MSFS SDK. Verify names, units, signs, ranges and WASM API availability
+before implementing mappings. Do not invent interfaces or assume external
+SimConnect techniques work inside WASM. Preserve required licenses and attribution
+when reusing code; GPLv3-compatible reuse is accepted.
 
-1. Read a configuration that identifies which parameters are injected from the input time series and which aircraft-response parameters are recorded.
-2. Read a text file containing timestamped time-series data. Each parameter sample is a `(time, value)` tuple, and sampling intervals may vary.
-3. Replay the complete time series in real time. Do not impose an application-defined duration or sample-count limit; supported run length is limited by available storage.
-4. At each MSFS frame, interpolate continuous input parameters to the current scenario time and inject them into MSFS/A32NX.
-5. Sample the configured aircraft-response parameters while the scenario runs.
-6. Write the timestamped response data incrementally to another text file for later analysis.
+## Architecture and execution
 
-The primary integration references are:
+- Keep parsing, scheduling, interpolation and serialization simulator-independent
+  and testable on the host. Keep generic simulator I/O and the clock behind a small
+  adapter; put aircraft detection, commands and readback in a separate component.
+- The runtime owns arming, phase transitions and cleanup, and delegates phase work
+  to its contexts. Read simulator time once per frame. Process only the phase active
+  at the start of an update; newly entered phases advance on the following update.
+- Stream scenarios and telemetry with bounded memory and no application-defined
+  duration/sample limit. Do not load entire files or retain complete recordings.
+  Keep frame work non-blocking and avoid hot-path allocation where practical.
+- Drive playback from simulator callbacks and elapsed simulator time, using explicit
+  timestamps and irregular-interval interpolation. Never use wall-clock time or
+  callback counts. Never interpolate discrete controls.
+- Read simulator identifiers only from trusted configuration. Reject malformed,
+  non-finite or out-of-range data instead of silently clamping. Keep physical
+  aircraft limits at the aircraft boundary and validate interfaces where possible.
+- Preserve explicit arming and the idle/initialising/running lifecycle. Check arming
+  edges only while idle; active runs ignore arming changes. All runs pass through
+  initialisation before playback. Supported aircraft must satisfy all configured
+  targets before the deadline; unsupported aircraft skip setup. Only configured
+  mass/balance or trim groups may be commanded and read back.
+- Stop injection on completion, failure or shutdown. Attempt all cleanup, flush and
+  retain partial telemetry, reset arming and return to idle even if cleanup fails.
+  Retry failed arming resets before accepting another start. Keep the gauge alive
+  after run failures and await event-stream closure before returning on shutdown
+  or setup failure. Make cleanup idempotent where practical.
+- Input override requires a verified A32NX-compatible bypass; competing input events
+  do not establish control ownership. Autopilot setup remains an operator precondition.
+  Do not change autopilot modes or restore prior control positions.
 
-- FlyByWire aircraft repository: <https://github.com/flybywiresim/aircraft>
-- `msfs-rs`: <https://github.com/flybywiresim/msfs-rs>
+## Errors and validation
 
-A secondary research reference is:
+- Return concrete `thiserror` enums with useful file, signal, line, column and
+  operation context. Use `#[from]` and `?` for direct conversions. Use `anyhow::Error`
+  only at orchestration boundaries; do not use `anyhow!`, `bail!`, `Context` or
+  `with_context`, or wrap an error in the same enum merely to add context.
+- Do not use `unwrap`, `expect`, `todo!()` or panics for recoverable runtime failures.
+  Unimplemented integration returns typed errors with TODO comments. Report errors
+  through the simulator's available logging facilities.
+- Use host tests with a fake simulator and controllable clock for parsing, irregular
+  interpolation and boundaries, conversions, bounded streaming, telemetry, lifecycle
+  and failure cleanup. Run checks appropriate to the change using the README commands.
+- Simulator changes require a WASM build and documented manual validation against
+  stated MSFS/A32NX versions. Host tests or compilation alone do not prove compatibility.
+- Keep changes focused. Add dependencies only when they materially simplify the code
+  and work on the required WASM target; pin integration revisions for reproducibility.
 
-- `yourcontrols`: <https://github.com/Sequal32/yourcontrols>
+## Documentation
 
-Use `msfs-rs` for interaction with MSFS. Treat the current FlyByWire A32NX implementation as the source of truth for A32NX-specific variable names, events, units, and behavior.
-
-Study `yourcontrols` to understand how its shared-cockpit implementation synchronizes control state, applies remote values, and bypasses or arbitrates local simulator inputs. Treat its A32NX mapping file as an accepted baseline for straightforward parameters, including the MVP signals. For complex mappings or conflicts with current behavior, prefer the current A32NX source and MSFS SDK. Always verify that the required interface is available from an `msfs-rs` WASM module; do not assume every external SimConnect technique is usable in the WASM sandbox.
-
-## MVP Signal Scope
-
-For the MVP, support these continuous input signals from the time series:
-
-- sidestick pitch position;
-- sidestick roll position.
-
-Record these aircraft-response signals:
-
-- pitch;
-- roll;
-- elevator position;
-- aileron position.
-
-These are logical scenario and telemetry names, not simulator variable names. Keep configured injection and recording signal names as strings so the core data model is not restricted to predefined enums. Each `inject.N` section also contains a `variable` string with its prefixed simulator destination, such as `K:AXIS_ELEVATOR_SET` or `L:SOME_LOCAL_VARIABLE`. Before implementing the simulator adapter, determine and document each signal's precise semantics, A32NX/MSFS interface, engineering unit, sign convention, valid range, and update behavior. The `yourcontrols` A32NX mapping is an accepted source for these straightforward MVP mappings; cross-check current FlyByWire A32NX source when the mapping is ambiguous, unavailable through `msfs-rs`, or contradicted by current behavior. Do not add speculative simulator mappings before this end-to-end path works.
-
-## Scope and Compatibility
-
-- Target MSFS 2020 and the FlyByWire A32NX first.
-- Build the simulator module for the WebAssembly target supported by the selected `msfs-rs` revision, normally `wasm32-wasip1` for current upstream examples.
-- Keep dependency versions and APIs compatible with the selected `msfs-rs` and A32NX revisions. Pin Git revisions when reproducibility matters.
-- Do not assume stock-aircraft simulation variables and events behave identically in the A32NX. The A32NX may use local variables, named variables, custom events, or custom system logic.
-- Verify A32NX interfaces against upstream source or documentation before implementing them. Do not invent variable names, event names, units, ranges, or update semantics.
-- This library will be open-sourced and GPLv3 compatibility with FlyByWire and `yourcontrols` code is accepted. Their GPL-licensed code may be reused when it materially helps the implementation, provided the repository uses a compatible license and preserves all required copyright notices, attribution, source availability, license text, and modification notices. Verify the license of non-code assets and bundled third-party components separately before reuse.
-
-## Architecture
-
-Keep simulator-independent logic separate from MSFS bindings. Prefer modules with responsibilities similar to:
-
-- replay configuration parsing and validation;
-- time-series parsing and validation;
-- playback scheduling and interpolation;
-- simulator input injection;
-- telemetry sampling;
-- output serialization;
-- lifecycle and error reporting.
-
-The configuration parser, time-series parser, scheduler, interpolation, and serialization code should run and be testable on the host without MSFS. Keep direct `msfs-rs` calls behind a small adapter or boundary so tests can use a fake simulator implementation.
-
-Keep `SimulatorAdapter` limited to generic simulator I/O and the clock. Put
-aircraft detection, loading submission and mass/balance readback in a separate aircraft
-initialisation component. `GaugeRuntime` coordinates arming, readiness checks
-and playback start; `Replayer` prepares and advances the scenario without
-receiving a simulator adapter. Keep tolerance and deadline checks pure.
-
-Run-time memory use must not grow with the full scenario or telemetry duration. Stream or process input and output in bounded chunks with only the lookahead required for interpolation. Do not load an arbitrarily long time series or retain all recorded samples in memory.
-
-Prefer a library/WASM entry point appropriate for `msfs-rs` rather than a conventional long-running native `main` loop. Follow the current `msfs-rs` gauge/module lifecycle and examples when establishing entry points and Cargo crate settings.
-
-## Real-Time Execution
-
-- Drive playback from MSFS update events or another supported non-blocking simulator callback. Never block the simulator thread with sleeps, busy loops, or synchronous waits for the next sample.
-- Drive scenario-relative playback time from elapsed simulator-clock time since the run started. Do not use wall-clock time or callback counts as the playback clock.
-- For the MVP, assume MSFS is not paused and simulation rate remains `1x` throughout a run. Pause, rate changes, and simulator-time discontinuities are outside validated MVP behavior.
-- Use scenario time rather than callback counts to locate the two source samples surrounding each MSFS frame time.
-- Every source data point is an explicit `(time, value)` tuple. Never derive a sample timestamp from its index or assume a constant interval between samples.
-- At every MSFS update, linearly interpolate each continuous injected parameter between the two timestamped source samples surrounding the current scenario time. Compute the interpolation factor from their actual timestamps so irregularly sampled input is handled correctly. Injection follows the simulator frame rate independently of source sample timing.
-- Never interpolate discrete or enumerated controls; apply an explicitly documented hold/transition policy for them.
-- Define exact behavior at sample boundaries, before the first sample, after the final sample, and when a frame crosses one or more source intervals. The final sample marks the end of playback unless the format explicitly defines otherwise.
-- Preserve deterministic processing when frames are late or source intervals are skipped. Do not silently omit required discrete transitions.
-- Keep work per simulator update bounded. Avoid allocations, repeated parsing, and file access in the hot path where practical.
-
-## Replay Configuration
-
-Use an explicit, documented configuration format. The configuration must define:
-
-- the input time-series file;
-- the parameters and paired time/value columns to inject;
-- the aircraft-response parameters to record;
-- each injected parameter's logical name, prefixed simulator `variable`, paired CSV columns, source range, and simulator range;
-- each recorded parameter's logical name and prefixed simulator `variable`; recordings using the `A:` prefix require an MSFS `unit`, while recordings using any other prefix must not specify `unit`;
-- optional metadata needed to reproduce the test.
-
-An optional `[initialisation]` table contains all three numeric targets: `zfw`
-and `gw` in kilograms, and `gwcg` in percent MAC. Require finite values, positive
-masses, and `gw >= zfw`; reject missing or unknown fields. Keep this backwards
-compatible optional addition under `format_version = 1`. Actual aircraft loading
-limits belong to the simulator adapter, not speculative parser limits.
-
-Do not add configuration fields for behavior fixed by the format or supported signal catalog. In particular, the MVP configuration does not contain a scenario time unit, time origin, telemetry section, parameter type, or interpolation parameter. Document fixed time-unit, time-origin, signal-type, interpolation, telemetry sampling, and sampling-order semantics in the format specification.
-
-For the MVP, load configuration from the hardcoded `/work/replayer_config.toml` path in the package-specific writable MSFS mount and resolve relative input paths from `/work`. The configuration filename is lowercase. The configuration `format_version` governs both the TOML and scenario CSV contract.
-
-Reject duplicate or conflicting parameter selections, but do not restrict configured injection or recording names to predefined enums. Validate simulator identifiers and interfaces at the adapter boundary. Do not require every time-series column to be injected or every supported aircraft parameter to be recorded.
-
-## Scenario Input
-
-Use an explicit, documented text format such as CSV unless the existing code establishes another format. A scenario format must define:
-
-- format version;
-- fixed time unit and time origin;
-- signal/parameter names and column order;
-- value types;
-- numeric scales and supported ranges;
-- how each parameter's `(time, value)` tuples are represented and associated with that parameter;
-- optional metadata needed to reproduce the test.
-
-Every data point must carry an explicit time value in scenario-relative seconds. The MVP supports no other timestamp unit. Do not require or assume constant-rate sampling.
-
-For independently sampled series, use a standard rectangular CSV with adjacent `<signal>.time` and `<signal>.value` columns for each parameter. Values in different pairs on the same row are associated by sample ordinal only and need not have the same timestamp. Keep each pair densely populated from the first data row and permit only trailing empty pairs when series lengths differ. Require both fields of a pair to be present or both empty. Do not introduce custom blocks or mixed row types that make ordinary batch reads difficult.
-
-Do not impose a fixed duration, row-count, or file-size limit. Design parsing and playback so scenarios can use the available disk capacity without requiring proportional RAM. The MVP skips a full-file preflight pass and assumes the scenario is correctly formatted.
-
-Open the scenario independently once per configured injection so each signal has its own sequential file position and bounded two-sample lookahead. During preparation on the arm frame, read each cursor's CSV header and first two data rows. If `[initialisation]` is absent, interpolate and inject the first frame immediately at scenario time zero; otherwise detect aircraft support on the arm frame. Supported aircraft must pass the initialisation gate before starting scenario time, injection, and telemetry. Unsupported or unidentified aircraft log that initialisation was skipped and start playback immediately. On each subsequent playback frame, read each cursor forward until its samples bracket the current scenario time or the series reaches EOF; this may consume multiple rows after a late frame. Never load the complete scenario into memory. File access, CSV parsing, or numeric parsing errors encountered during playback must include useful file, line, column, or signal context and terminate safely without panicking.
-
-## Input Injection and Safety
-
-- Represent each configured injection through its logical scenario name, prefixed simulator `variable`, value type, and valid ranges. The simulator adapter selects the appropriate `msfs-rs` operation from the identifier prefix.
-- Keep conversions at the simulator boundary and test them independently.
-- For each continuous injected signal, linearly interpolate on its source scale, then apply the configured affine range conversion from source range `[x, y]` to simulator range `[a, b]`: `a + (value - x) * (b - a) / (y - x)`.
-- Require finite, strictly ordered range endpoints. Reject source values outside the configured source range and simulator ranges outside the signal catalog's safe range; do not silently clamp them.
-- Read simulator identifiers only from the trusted replay configuration, never from scenario CSV column names or values.
-- Before playback, verify that required simulator/A32NX interfaces can be resolved where the API permits it.
-- Stop or fail safely when a required injection fails. Do not continue a test while presenting it as valid.
-- Arm a run by setting the library-owned `L:REPLAYER_ARMED` local variable to `1`. Without `[initialisation]`, start playback immediately; otherwise let `A32nxInitialiser` detect support once per arm using `ATC MODEL` and the existence of `L:A32NX_IS_READY`. Match `A20N` or its configured `TT:ATCCOM.AC_MODEL_A20N.0.text` key, ignoring case and surrounding whitespace. For a matching model, use the non-registering `check_named_variable` lookup for `A32NX_IS_READY`; require existence without reading its value, so zero is accepted. Do not inspect livery titles. A missing variable or failed lookup counts as unsupported. Keep model matching and the existence requirement inside `A32nxInitialiser`. Detection has only supported and unsupported outcomes; unidentified aircraft and detection read failures count as unsupported, log that initialisation was skipped, and start playback immediately without enforcing mass/CG targets. Do not detect when the section is absent. For supported aircraft, submit actual aircraft loading targets once, then check actual ZFW, GW and gross-weight CG each frame. Start when all three simultaneously satisfy inclusive tolerances of 100 kg, 100 kg and 0.01 percentage points of MAC, without a dwell period. Fail at or after 30 elapsed simulator seconds from the arm frame, with timeout taking precedence over readiness. No replay controls or telemetry are produced while waiting; replay time zero and the telemetry filename's host UTC timestamp are established only when playback starts. Use actual aircraft state, not flight-management entries. Until verified simulator integration exists, use TODO comments and typed unimplemented errors, never `todo!()` panics. Initialize and reset arming to `0` while idle and after any terminal run state. Reject overlapping runs during initialisation and playback. Setting arming to `0` while initialising or running has no effect in the current MVP; operator-requested abort handling is a future requirement.
-- While running, replay commands must override local pilot controls using a verified A32NX-compatible input-bypass mechanism. Do not rely on racing competing input events.
-- Treat autopilot configuration as a precondition established by the operator before arming. The MVP does not engage, disengage, change, or restore autopilot modes; scenarios requiring autopilot arbitration are outside scope.
-- On completion or failure, stop injection, reset `L:REPLAYER_ARMED` to `0`, and give control back to the user. Do not restore prior positions or autopilot modes unless a verified restoration mechanism is deliberately added later. Future abort handling and input interception must provide the same cleanup guarantees.
-- Flight-test automation can command the aircraft unexpectedly. Do not automatically start control injection merely because the module loaded.
-
-## Telemetry Recording
-
-Output must be a machine-readable CSV saved in the package-specific writable `/work` mount when running in MSFS. On the validated Microsoft Store installation, this maps under `%LOCALAPPDATA%\Packages\Microsoft.FlightSimulator_8wekyb3d8bbwe\LocalState\packages\flybywire-aircraft-a320-neo\work`. Host-side tests may write beside the input scenario. Generate the filename from the host UTC date and time at replay start using `telemetry_YYYYMMDDTHHMMSS.csv`; do not configure or overwrite a fixed telemetry name. If the generated path already exists, fail rather than overwrite it.
-
-- Give each selected `record.N` parameter an adjacent `<signal>.time,<signal>.value` column pair in numeric configuration order so telemetry uses the scenario-input shape and can be replayed as input.
-- For the complete MVP selection, use `pitch.time,pitch.value,roll.time,roll.value,elevator_position.time,elevator_position.value,aileron_position.time,aileron_position.value`.
-- Sample telemetry every MSFS frame after that frame's input injection. Repeat that frame's scenario-relative simulator elapsed seconds in every recorded signal's `.time` column.
-- Treat pitch and roll as aggregate MSFS aircraft attitudes and elevator/aileron positions as aggregate MSFS control-surface positions, not individual A32NX surfaces.
-- Preserve the native MSFS sign convention for all logical signals. Keep low-level event sign conversions inside the simulator adapter.
-- Use stable column order and deterministic numeric formatting.
-- Stream telemetry incrementally with bounded buffering so recording length is limited by available output storage rather than RAM.
-- Flush telemetry on completion and failure, and detect/report disk-full and partial-write failures. Future abort handling must also flush telemetry.
-- Retain partial telemetry after failures under its normal timestamped name; the MVP does not mark partial files in their name or schema. Future aborted runs must follow the same policy.
-- File access in MSFS WASM may be sandboxed or restricted. Use only file-system locations and APIs supported by the MSFS SDK and `msfs-rs`; surface access failures clearly.
-- Never claim a recording is complete if output creation, serialization, write, or finalization failed.
-
-## Reliability and Error Handling
-
-- Do not use `unwrap`, `expect`, or panics for recoverable runtime failures in simulator-facing code.
-- Domain and library functions must return concrete `thiserror` enums. Use `#[from]` and `?` for underlying errors where direct conversion is sufficient, and add structured variants when file, signal, line, column, or operation details are required.
-- Convert typed errors to `anyhow::Error` only at application or orchestration boundaries that combine unrelated error domains. Do not use `anyhow!`, `bail!`, `Context`, or `with_context`; encode actionable context in typed error variants instead.
-- Do not wrap an error inside another variant of the same error enum merely to add context. Use `map_err` only when converting to a different error layer or adding structured domain information.
-- Report terminal errors through the logging/error facilities available in `msfs-rs`.
-- On a terminal failure, perform best-effort control release, flush and close but do not delete partial telemetry, and stop processing simulator updates or further arming requests. Await gauge event-stream closure before returning from the WASM entry point, preserving the `msfs-rs` reload lifecycle without panicking. Initialisation failures release prepared cursors and reset arming without creating telemetry.
-- Model the implemented run lifecycle explicitly, for example: idle, loading, ready, running, stopping, completed, and failed. Add an aborted state when operator-requested abort handling is implemented.
-- Make start, stop, and cleanup operations idempotent where practical.
-- Reject overlapping runs unless concurrency is deliberately implemented and tested.
-- Favor deterministic behavior and reproducible output over implicit convenience behavior.
-
-## Testing
-
-Add host-side unit and integration tests for simulator-independent code. Cover at least:
-
-- valid and malformed configuration and scenario files;
-- irregular timestamp intervals, timestamp ordering, duplicates, and boundary timestamps;
-- exact sample times and frame times between irregularly spaced samples;
-- frames that cross multiple source intervals;
-- linear interpolation of continuous values and hold/transition behavior of discrete values;
-- configured injection and recording parameter selection;
-- bounded-memory processing of long scenarios and telemetry streams;
-- simulator-clock scheduling under the MVP `1x`, unpaused assumption;
-- arming-variable start transitions and release of replay control;
-- unit and range conversion;
-- output schema, host-UTC timestamped file naming, and numeric formatting;
-- write failures and partial-run status;
-- failure cleanup and panic-free module termination;
-- lifecycle transitions; add abort coverage when operator-requested abort handling is implemented.
-
-Use a fake simulator adapter and a controllable clock for scheduling tests. Do not require a running copy of MSFS for ordinary parser, scheduler, or serializer tests.
-
-For simulator integration changes, document the manual validation setup: MSFS version, A32NX channel/version or commit, `msfs-rs` revision, scenario, expected behavior, and generated output location.
-
-## Build and Validation
-
-Use the commands supported by the repository once configured. Typical checks are:
-
-```sh
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test
-sh scripts/build-wasm.sh
-```
-
-Do not report simulator or A32NX compatibility based only on a successful host build. WASM compilation verifies the target build; actual compatibility requires an in-simulator test against the stated A32NX version.
-
-## Change Guidelines
-
-- Keep changes focused and avoid unrelated refactoring.
-- Prefer small, explicit data types over loosely typed maps in scheduling and simulator-facing code.
-- Document public file formats and behavior that affects test reproducibility.
-- Update tests and format documentation when changing parsing, scheduling, injection, or output behavior.
-- Treat changes to timing, units, interpolation, signal mapping, sampling order, and output columns as behavior changes and call them out clearly.
-- Do not add dependencies unless they work on the required WASM target and materially simplify the implementation.
+README covers purpose, setup and public data/behavior contracts. AGENTS covers
+enduring development rules. Code and tests describe implementation details.
+Update documentation only when those contracts, setup commands or rules change;
+internal refactors and renames require no Markdown updates. Do not add inventories
+of private types, fields, methods or per-change implementation history.
 
 @RTK.md

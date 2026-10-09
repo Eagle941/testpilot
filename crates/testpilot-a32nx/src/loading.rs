@@ -1,59 +1,91 @@
-//! A32NX detection, loading calculation, submission and actual mass/balance readback.
+//! Pure A32NX loading model and bounded payload solver.
 
-use super::AircraftInitialiser;
-use crate::config::InitialisationConfig;
-use crate::error::InitialisationError;
-use crate::initialisation::AircraftMassBalance;
-use crate::simulator::SimulatorAdapter;
+use testpilot_core::config::InitialisationConfig;
+use testpilot_core::error::InitialisationError;
 
-const PAX_WEIGHT_KG: f64 = 84.0;
-const BAG_WEIGHT_KG: f64 = 20.0;
+/// Assumed body mass of one passenger, in kilograms.
+pub(super) const PAX_WEIGHT_KG: f64 = 84.0;
+/// Minimum baggage mass per passenger, in kilograms.
+pub(super) const BAG_WEIGHT_KG: f64 = 20.0;
+/// Empty aircraft mass, in kilograms.
 const EMPTY_KG: f64 = 42500.0;
+/// Empty aircraft longitudinal arm, in feet.
 const EMPTY_ARM_FT: f64 = -9.42;
+/// Longitudinal arm of the leading edge of the mean aerodynamic chord, in feet.
 const LEMAC_FT: f64 = -5.383;
+/// Mean aerodynamic chord length, in feet.
 const MAC_FT: f64 = 13.464;
+/// Maximum zero-fuel weight, in kilograms.
 const MAX_ZFW_KG: f64 = 64300.0;
+/// Maximum gross weight, in kilograms.
 const MAX_GW_KG: f64 = 79000.0;
+/// Fuel density used to convert tank gallons to kilograms.
 const KG_PER_GALLON: f64 = 3.039075693483925;
+/// Combined fuel tank capacity, in gallons.
 const MAX_FUEL_GALLONS: f64 = 6267.0;
+/// Combined passenger capacity of cabins A/B/C/D.
 const MAX_PAX: u32 = 174;
+/// Combined cargo hold capacity, in kilograms.
 const MAX_CARGO_KG: f64 = 9435.0;
+/// Tolerance for floating-point mass comparisons, in kilograms.
 const EPS: f64 = 1e-7;
+/// Tolerance for floating-point payload moment comparisons, in kilogram feet.
 const MOMENT_EPS: f64 = 1e-6;
+/// Passenger capacities of cabins A/B/C/D.
 const PAX_CAPACITIES: [u32; 4] = [36, 42, 48, 48];
+/// Longitudinal arms of cabins A/B/C/D, in feet.
 const PAX_ARMS: [f64; 4] = [20.5, 1.5, -16.6, -35.6];
+/// Cargo capacities ordered from the forward hold to the aft bulk hold, in kilograms.
 const CARGO_CAPACITIES: [f64; 4] = [3402.0, 2426.0, 2110.0, 1497.0];
+/// Cargo longitudinal arms ordered from the forward hold to the aft bulk hold, in feet.
 const CARGO_ARMS: [f64; 4] = [17.3, -24.1, -34.1, -42.4];
+/// Longitudinal arms of left/right auxiliary, left/right main and centre fuel tanks, in feet.
 const FUEL_ARMS: [f64; 5] = [-16.9, -16.9, -8.0, -8.0, -4.5];
 
-/// A32NX detection, loading submission and actual mass/balance readback.
-pub struct A32nxInitialiser;
-
 /// Native LVAR values, calculated before any loading writes are performed.
-#[derive(Debug, PartialEq)]
-struct A32nxLoading {
-    pax_a: f64,
-    pax_b: f64,
-    pax_c: f64,
-    pax_d: f64,
-    cargo_fwd_baggage_container: f64,
-    cargo_aft_container: f64,
-    cargo_aft_baggage: f64,
-    cargo_aft_bulk_loose: f64,
-    fuel_left_aux: f64,
-    fuel_right_aux: f64,
-    fuel_left_main: f64,
-    fuel_right_main: f64,
-    fuel_center: f64,
-    fuel_total: f64,
-    fuel_percent: f64,
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct A32nxLoading {
+    /// Desired occupied-seat bitmask for cabin A.
+    pub(super) pax_a: f64,
+    /// Desired occupied-seat bitmask for cabin B.
+    pub(super) pax_b: f64,
+    /// Desired occupied-seat bitmask for cabin C.
+    pub(super) pax_c: f64,
+    /// Desired occupied-seat bitmask for cabin D.
+    pub(super) pax_d: f64,
+    /// Desired forward baggage container mass, in kilograms.
+    pub(super) cargo_fwd_baggage_container: f64,
+    /// Desired aft container mass, in kilograms.
+    pub(super) cargo_aft_container: f64,
+    /// Desired aft baggage mass, in kilograms.
+    pub(super) cargo_aft_baggage: f64,
+    /// Desired aft bulk hold mass, in kilograms.
+    pub(super) cargo_aft_bulk_loose: f64,
+    /// Desired left auxiliary tank fuel, in gallons.
+    pub(super) fuel_left_aux: f64,
+    /// Desired right auxiliary tank fuel, in gallons.
+    pub(super) fuel_right_aux: f64,
+    /// Desired left main tank fuel, in gallons.
+    pub(super) fuel_left_main: f64,
+    /// Desired right main tank fuel, in gallons.
+    pub(super) fuel_right_main: f64,
+    /// Desired centre tank fuel, in gallons.
+    pub(super) fuel_center: f64,
+    /// Desired combined fuel quantity, in gallons.
+    pub(super) fuel_total: f64,
+    /// Desired fuel quantity as a percentage of combined tank capacity.
+    pub(super) fuel_percent: f64,
 }
 
 impl A32nxLoading {
     /// Reduced `calculate`: GW fixes fuel; its moment fixes the required payload moment.
-    fn from_targets(targets: InitialisationConfig) -> Result<Self, InitialisationError> {
-        let InitialisationConfig { zfw, gw, gwcg } = targets;
+    pub(super) fn from_targets(targets: InitialisationConfig) -> Result<Self, InitialisationError> {
         let invalid = |reason| InitialisationError::InvalidLoadingTargets { targets, reason };
+        let (Some(zfw), Some(gw), Some(gwcg)) = (targets.zfw, targets.gw, targets.gwcg) else {
+            return Err(invalid(
+                "ZFW, GW and GWCG must all be supplied for aircraft loading",
+            ));
+        };
         if ![zfw, gw, gwcg].into_iter().all(f64::is_finite) {
             return Err(invalid("all inputs must be finite"));
         }
@@ -113,48 +145,7 @@ impl A32nxLoading {
         })
     }
 
-    fn submit(self, simulator: &mut dyn SimulatorAdapter) -> Result<(), InitialisationError> {
-        // Desired values first, then instant loading rates, then start requests.
-        // Stop at the first failed write; never start loading after a target failure.
-        for (variable, value) in [
-            ("L:A32NX_WB_PER_PAX_WEIGHT", PAX_WEIGHT_KG),
-            ("L:A32NX_WB_PER_BAG_WEIGHT", BAG_WEIGHT_KG),
-            ("L:A32NX_PAX_A_DESIRED", self.pax_a),
-            ("L:A32NX_PAX_B_DESIRED", self.pax_b),
-            ("L:A32NX_PAX_C_DESIRED", self.pax_c),
-            ("L:A32NX_PAX_D_DESIRED", self.pax_d),
-            (
-                "L:A32NX_CARGO_FWD_BAGGAGE_CONTAINER_DESIRED",
-                self.cargo_fwd_baggage_container,
-            ),
-            (
-                "L:A32NX_CARGO_AFT_CONTAINER_DESIRED",
-                self.cargo_aft_container,
-            ),
-            ("L:A32NX_CARGO_AFT_BAGGAGE_DESIRED", self.cargo_aft_baggage),
-            (
-                "L:A32NX_CARGO_AFT_BULK_LOOSE_DESIRED",
-                self.cargo_aft_bulk_loose,
-            ),
-            ("L:A32NX_FUEL_LEFT_AUX_DESIRED", self.fuel_left_aux),
-            ("L:A32NX_FUEL_RIGHT_AUX_DESIRED", self.fuel_right_aux),
-            ("L:A32NX_FUEL_LEFT_MAIN_DESIRED", self.fuel_left_main),
-            ("L:A32NX_FUEL_RIGHT_MAIN_DESIRED", self.fuel_right_main),
-            ("L:A32NX_FUEL_CENTER_DESIRED", self.fuel_center),
-            ("L:A32NX_FUEL_TOTAL_DESIRED", self.fuel_total),
-            ("L:A32NX_FUEL_DESIRED_PERCENT", self.fuel_percent),
-            ("L:A32NX_BOARDING_RATE", 0.0),
-            ("L:A32NX_EFB_REFUEL_RATE_SETTING", 2.0),
-            ("L:A32NX_BOARDING_STARTED_BY_USR", 1.0),
-            ("L:A32NX_REFUEL_STARTED_BY_USR", 1.0),
-        ] {
-            simulator
-                .write(variable, value)
-                .map_err(InitialisationError::Submit)?;
-        }
-        Ok(())
-    }
-
+    /// Allocates fuel to auxiliary, main and then centre tanks, returning gallons per tank.
     fn fuel_distribution(fuel_kg: f64) -> [f64; 5] {
         let mut remaining = fuel_kg / KG_PER_GALLON;
         let auxiliary = remaining.min(456.0);
@@ -170,6 +161,7 @@ impl A32nxLoading {
         ]
     }
 
+    /// Sums each station's load multiplied by its longitudinal arm.
     fn moment<const N: usize>(loads: &[f64; N], arms: &[f64; N]) -> f64 {
         loads.iter().zip(arms).map(|(load, arm)| load * arm).sum()
     }
@@ -185,6 +177,7 @@ impl A32nxLoading {
         loads
     }
 
+    /// Distributes passengers across cabins A/B/C/D using the EFB proportions.
     fn efb_passengers(total: u32) -> [u32; 4] {
         let mut counts = [0; 4];
         let mut remaining = total;
@@ -313,194 +306,9 @@ impl A32nxLoading {
     }
 }
 
-impl AircraftInitialiser for A32nxInitialiser {
-    /// Matches the A20N model code and its configured ATC localisation key (see README).
-    /// Requires the FlyByWire readiness variable to exist, without reading its value.
-    fn supported_model(&mut self, simulator: &mut dyn SimulatorAdapter) -> bool {
-        let Ok(model) = simulator.read_string("A:ATC MODEL") else {
-            return false;
-        };
-        let model = model.trim();
-        if !model.eq_ignore_ascii_case("A20N")
-            && !model.eq_ignore_ascii_case("TT:ATCCOM.AC_MODEL_A20N.0.text")
-        {
-            return false;
-        }
-        simulator
-            .local_variable_exists("L:A32NX_IS_READY")
-            .unwrap_or(false)
-    }
-
-    fn submit(
-        &mut self,
-        simulator: &mut dyn SimulatorAdapter,
-        targets: InitialisationConfig,
-    ) -> Result<(), InitialisationError> {
-        A32nxLoading::from_targets(targets)?.submit(simulator)
-    }
-
-    fn readback(
-        &mut self,
-        simulator: &mut dyn SimulatorAdapter,
-    ) -> Result<AircraftMassBalance, InitialisationError> {
-        // A32NX publishes actual airframe masses in kg and CG in percent MAC.
-        // L: reads use their native numeric scale without an SDK unit conversion.
-        Ok(AircraftMassBalance {
-            zfw: simulator
-                .read("L:A32NX_AIRFRAME_ZFW", None)
-                .map_err(InitialisationError::Readback)?,
-            gw: simulator
-                .read("L:A32NX_AIRFRAME_GW", None)
-                .map_err(InitialisationError::Readback)?,
-            gwcg: simulator
-                .read("L:A32NX_AIRFRAME_GW_CG_PERCENT_MAC", None)
-                .map_err(InitialisationError::Readback)?,
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::SimulatorError;
-    use std::time::Duration;
-
-    #[derive(Default)]
-    struct LoadingSimulator {
-        writes: Vec<(String, f64)>,
-        fail_at: Option<usize>,
-    }
-
-    impl SimulatorAdapter for LoadingSimulator {
-        fn write(&mut self, variable: &str, value: f64) -> Result<(), SimulatorError> {
-            self.writes.push((variable.to_owned(), value));
-            if self.fail_at == Some(self.writes.len() - 1) {
-                return Err(SimulatorError::CalculatorCodeWriteFailed {
-                    variable: variable.to_owned(),
-                    value,
-                });
-            }
-            Ok(())
-        }
-
-        fn local_variable_exists(&mut self, _: &str) -> Result<bool, SimulatorError> {
-            unreachable!("submission only writes loading variables")
-        }
-
-        fn read_string(&mut self, _: &str) -> Result<String, SimulatorError> {
-            unreachable!("submission only writes loading variables")
-        }
-
-        fn simulation_time(&self) -> Result<Duration, SimulatorError> {
-            unreachable!("submission only writes loading variables")
-        }
-
-        fn validate_read(&mut self, _: &str, _: Option<&str>) -> Result<(), SimulatorError> {
-            unreachable!("submission only writes loading variables")
-        }
-
-        fn read(&mut self, _: &str, _: Option<&str>) -> Result<f64, SimulatorError> {
-            unreachable!("submission only writes loading variables")
-        }
-    }
-
-    fn loading() -> A32nxLoading {
-        A32nxLoading {
-            pax_a: 1.0,
-            pax_b: 2.0,
-            pax_c: 3.0,
-            pax_d: 4.0,
-            cargo_fwd_baggage_container: 5.0,
-            cargo_aft_container: 6.0,
-            cargo_aft_baggage: 7.0,
-            cargo_aft_bulk_loose: 8.0,
-            fuel_left_aux: 9.0,
-            fuel_right_aux: 10.0,
-            fuel_left_main: 11.0,
-            fuel_right_main: 12.0,
-            fuel_center: 13.0,
-            fuel_total: 55.0,
-            fuel_percent: 0.88,
-        }
-    }
-
-    const EXPECTED: [(&str, f64); 21] = [
-        ("L:A32NX_WB_PER_PAX_WEIGHT", 84.0),
-        ("L:A32NX_WB_PER_BAG_WEIGHT", 20.0),
-        ("L:A32NX_PAX_A_DESIRED", 1.0),
-        ("L:A32NX_PAX_B_DESIRED", 2.0),
-        ("L:A32NX_PAX_C_DESIRED", 3.0),
-        ("L:A32NX_PAX_D_DESIRED", 4.0),
-        ("L:A32NX_CARGO_FWD_BAGGAGE_CONTAINER_DESIRED", 5.0),
-        ("L:A32NX_CARGO_AFT_CONTAINER_DESIRED", 6.0),
-        ("L:A32NX_CARGO_AFT_BAGGAGE_DESIRED", 7.0),
-        ("L:A32NX_CARGO_AFT_BULK_LOOSE_DESIRED", 8.0),
-        ("L:A32NX_FUEL_LEFT_AUX_DESIRED", 9.0),
-        ("L:A32NX_FUEL_RIGHT_AUX_DESIRED", 10.0),
-        ("L:A32NX_FUEL_LEFT_MAIN_DESIRED", 11.0),
-        ("L:A32NX_FUEL_RIGHT_MAIN_DESIRED", 12.0),
-        ("L:A32NX_FUEL_CENTER_DESIRED", 13.0),
-        ("L:A32NX_FUEL_TOTAL_DESIRED", 55.0),
-        ("L:A32NX_FUEL_DESIRED_PERCENT", 0.88),
-        ("L:A32NX_BOARDING_RATE", 0.0),
-        ("L:A32NX_EFB_REFUEL_RATE_SETTING", 2.0),
-        ("L:A32NX_BOARDING_STARTED_BY_USR", 1.0),
-        ("L:A32NX_REFUEL_STARTED_BY_USR", 1.0),
-    ];
-
-    #[test]
-    fn submits_all_desired_values_before_rates_and_start_requests() {
-        let mut simulator = LoadingSimulator::default();
-        loading().submit(&mut simulator).unwrap();
-        let writes: Vec<_> = simulator
-            .writes
-            .iter()
-            .map(|(v, n)| (v.as_str(), *n))
-            .collect();
-        assert_eq!(writes, EXPECTED);
-    }
-
-    #[test]
-    fn each_write_failure_stops_submission_and_preserves_variable_context() {
-        for (index, (expected_variable, expected_value)) in EXPECTED.iter().enumerate() {
-            let mut simulator = LoadingSimulator {
-                fail_at: Some(index),
-                ..Default::default()
-            };
-            let error = loading().submit(&mut simulator).unwrap_err();
-            match error {
-                InitialisationError::Submit(SimulatorError::CalculatorCodeWriteFailed {
-                    variable,
-                    value,
-                }) => {
-                    assert_eq!(variable, *expected_variable);
-                    assert_eq!(value, *expected_value);
-                }
-                error => panic!("unexpected error: {error}"),
-            }
-            assert_eq!(simulator.writes.len(), index + 1);
-        }
-    }
-
-    #[test]
-    fn unreachable_loading_performs_no_loading_writes() {
-        let mut simulator = LoadingSimulator::default();
-        let error = A32nxInitialiser
-            .submit(
-                &mut simulator,
-                InitialisationConfig {
-                    zfw: 60000.0,
-                    gw: 65000.0,
-                    gwcg: 99.0,
-                },
-            )
-            .unwrap_err();
-        assert!(matches!(
-            error,
-            InitialisationError::UnreachableLoading { .. }
-        ));
-        assert!(simulator.writes.is_empty());
-    }
 
     // Forward fixtures independently reconstruct mass and CG from physical loads.
     fn targets(counts: [u32; 4], cargo: [f64; 4], fuel: [f64; 5]) -> InitialisationConfig {
@@ -522,7 +330,12 @@ mod tests {
             .map(|(volume, arm)| volume * 3.039075693483925 * arm)
             .sum::<f64>();
         let gwcg = (-5.383 - (-400350.0 + payload_moment + fuel_moment) / gw) * 100.0 / 13.464;
-        InitialisationConfig { zfw, gw, gwcg }
+        InitialisationConfig {
+            zfw: Some(zfw),
+            gw: Some(gw),
+            gwcg: Some(gwcg),
+            ths: None,
+        }
     }
 
     fn counts(load: &A32nxLoading) -> [u32; 4] {
@@ -557,9 +370,9 @@ mod tests {
         let cargo = cargo(load);
         let fuel = fuel(load);
         let actual = targets(counts, cargo, fuel);
-        close(actual.zfw, requested.zfw);
-        close(actual.gw, requested.gw);
-        close(actual.gwcg, requested.gwcg);
+        close(actual.zfw.unwrap(), requested.zfw.unwrap());
+        close(actual.gw.unwrap(), requested.gw.unwrap());
+        close(actual.gwcg.unwrap(), requested.gwcg.unwrap());
         assert!(cargo.iter().sum::<f64>() + 1e-7 >= counts.iter().sum::<u32>() as f64 * 20.0);
         for (n, capacity) in counts.into_iter().zip([36, 42, 48, 48]) {
             assert!(n <= capacity);
@@ -580,9 +393,10 @@ mod tests {
         for (requested, expected_counts, expected_cargo, main) in [
             (
                 InitialisationConfig {
-                    zfw: 50000.0,
-                    gw: 56000.0,
-                    gwcg: 30.5,
+                    zfw: Some(50000.0),
+                    gw: Some(56000.0),
+                    gwcg: Some(30.5),
+                    ths: None,
                 },
                 [14, 18, 20, 20],
                 [873.6258759536895, 0.0, 0.0, 578.3741240463105],
@@ -590,9 +404,10 @@ mod tests {
             ),
             (
                 InitialisationConfig {
-                    zfw: 60000.0,
-                    gw: 65000.0,
-                    gwcg: 25.0,
+                    zfw: Some(60000.0),
+                    gw: Some(65000.0),
+                    gwcg: Some(25.0),
+                    ths: None,
                 },
                 [32, 42, 47, 47],
                 [
@@ -665,9 +480,9 @@ mod tests {
             assert_eq!(counts(&load), expected_counts);
         }
         let mut requested = targets([36, 42, 48, 48], [2400.0, 2400.0, 1500.0, 884.0], [0.0; 5]);
-        let fuel = A32nxLoading::fuel_distribution(79000.0 - requested.zfw);
+        let fuel = A32nxLoading::fuel_distribution(79000.0 - requested.zfw.unwrap());
         requested = targets([36, 42, 48, 48], [2400.0, 2400.0, 1500.0, 884.0], fuel);
-        close(requested.gw, 79000.0);
+        close(requested.gw.unwrap(), 79000.0);
         verify(&A32nxLoading::from_targets(requested).unwrap(), requested);
     }
 
@@ -690,34 +505,35 @@ mod tests {
     #[test]
     fn rejects_invalid_and_unreachable_targets() {
         let base = InitialisationConfig {
-            zfw: 50000.0,
-            gw: 56000.0,
-            gwcg: 30.5,
+            zfw: Some(50000.0),
+            gw: Some(56000.0),
+            gwcg: Some(30.5),
+            ths: None,
         };
         for requested in [
             InitialisationConfig {
-                zfw: 42499.0,
+                zfw: Some(42499.0),
                 ..base
             },
             InitialisationConfig {
-                zfw: 64301.0,
-                gw: 65000.0,
+                zfw: Some(64301.0),
+                gw: Some(65000.0),
                 ..base
             },
             InitialisationConfig {
-                gw: 49999.0,
+                gw: Some(49999.0),
                 ..base
             },
             InitialisationConfig {
-                gw: 79001.0,
+                gw: Some(79001.0),
                 ..base
             },
             InitialisationConfig {
-                gw: 70000.0,
+                gw: Some(70000.0),
                 ..base
             },
             InitialisationConfig {
-                gwcg: f64::MAX,
+                gwcg: Some(f64::MAX),
                 ..base
             },
         ]
@@ -727,10 +543,16 @@ mod tests {
                 .into_iter()
                 .flat_map(|value| {
                     [
-                        InitialisationConfig { zfw: value, ..base },
-                        InitialisationConfig { gw: value, ..base },
                         InitialisationConfig {
-                            gwcg: value,
+                            zfw: Some(value),
+                            ..base
+                        },
+                        InitialisationConfig {
+                            gw: Some(value),
+                            ..base
+                        },
+                        InitialisationConfig {
+                            gwcg: Some(value),
                             ..base
                         },
                     ]
@@ -742,15 +564,19 @@ mod tests {
             ));
         }
         for requested in [
-            InitialisationConfig { gwcg: 99.0, ..base },
             InitialisationConfig {
-                gwcg: -99.0,
+                gwcg: Some(99.0),
                 ..base
             },
             InitialisationConfig {
-                zfw: 42500.0,
-                gw: 42500.0,
-                gwcg: 30.0,
+                gwcg: Some(-99.0),
+                ..base
+            },
+            InitialisationConfig {
+                zfw: Some(42500.0),
+                gw: Some(42500.0),
+                gwcg: Some(30.0),
+                ths: None,
             },
         ] {
             assert!(matches!(

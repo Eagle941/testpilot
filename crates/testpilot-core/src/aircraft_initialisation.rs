@@ -1,12 +1,8 @@
 //! Aircraft-specific loading operations, separate from generic simulator I/O and readiness checks.
 
-mod a32nx;
-
-pub use a32nx::A32nxInitialiser;
-
 use crate::config::InitialisationConfig;
 use crate::error::InitialisationError;
-use crate::initialisation::AircraftMassBalance;
+use crate::initialisation::AircraftInitialisationState;
 use crate::simulator::SimulatorAdapter;
 
 /// Detection is deliberately non-failing: unreadable or unknown aircraft are unsupported.
@@ -33,16 +29,16 @@ pub trait AircraftInitialiser {
         }
     }
 
-    /// Submits actual aircraft loading targets once on arming.
+    /// Submits all configured targets on each initialisation frame until ready.
     fn submit(
         &mut self,
         simulator: &mut dyn SimulatorAdapter,
         targets: InitialisationConfig,
     ) -> Result<(), InitialisationError>;
 
-    /// Reads actual mass and balance, independently of configured telemetry signals.
+    /// Reads back aircraft configuration independently of telemetry signals.
     fn readback(
         &mut self,
         simulator: &mut dyn SimulatorAdapter,
-    ) -> Result<AircraftMassBalance, InitialisationError>;
+    ) -> Result<AircraftInitialisationState, InitialisationError>;
 }

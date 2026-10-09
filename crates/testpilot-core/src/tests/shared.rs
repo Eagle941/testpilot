@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use csv::{Position, ReaderBuilder, StringRecord, Trim};
 
-use crate::config::ReplayConfig;
+use crate::config::Config;
 use crate::error::ScenarioError;
 
 pub(super) const CONFIG: &str = r#"
@@ -35,20 +35,20 @@ pub(super) fn time(seconds: f64) -> Duration {
     Duration::try_from_secs_f64(seconds).unwrap()
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ColumnPair {
     pub(super) time_idx: usize,
     pub(super) value_idx: usize,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct ValidationState {
     pub(super) sample_count: u64,
     pub(super) last_time: Option<Duration>,
     pub(super) ended: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SignalSummary {
     /// Logical signal name represented by the paired CSV columns.
     pub(super) signal: String,
@@ -58,7 +58,7 @@ pub(super) struct SignalSummary {
     pub(super) final_time: Duration,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ScenarioSummary {
     /// Latest final timestamp across all configured input series.
     pub(super) duration: Duration,
@@ -66,8 +66,8 @@ pub(super) struct ScenarioSummary {
     pub(super) signals: Vec<SignalSummary>,
 }
 
-pub(super) fn config() -> ReplayConfig {
-    ReplayConfig::new(CONFIG).unwrap_or_else(|error| panic!("valid test config rejected: {error}"))
+pub(super) fn config() -> Config {
+    Config::new(CONFIG).unwrap_or_else(|error| panic!("valid test config rejected: {error}"))
 }
 
 pub(super) fn parse_time(
@@ -75,7 +75,15 @@ pub(super) fn parse_time(
     signal: &str,
     line: Option<u64>,
 ) -> Result<Duration, ScenarioError> {
-    let time_seconds = text.parse::<f64>()?;
+    let time_seconds = text
+        .parse::<f64>()
+        .map_err(|source| ScenarioError::ParseNumber {
+            path: "<scenario>".into(),
+            signal: signal.to_owned(),
+            column: "time",
+            line,
+            source,
+        })?;
     if !time_seconds.is_finite() {
         return Err(ScenarioError::NonFiniteTime {
             signal: signal.to_owned(),
@@ -176,7 +184,15 @@ pub(super) fn validate_pair(
     }
 
     let time = parse_time(time_text, injection_name, line)?;
-    let value = value_text.parse::<f64>()?;
+    let value = value_text
+        .parse::<f64>()
+        .map_err(|source| ScenarioError::ParseNumber {
+            path: "<scenario>".into(),
+            signal: injection_name.to_owned(),
+            column: "value",
+            line,
+            source,
+        })?;
 
     if !value.is_finite() {
         return Err(ScenarioError::NonFiniteValue {
@@ -217,7 +233,7 @@ pub(super) fn validate_pair(
 }
 
 pub(super) fn summarize(
-    config: &ReplayConfig,
+    config: &Config,
     states: Vec<ValidationState>,
 ) -> Result<ScenarioSummary, ScenarioError> {
     let mut duration = Duration::ZERO;
@@ -246,10 +262,16 @@ pub(super) fn validate(body: &str) -> Result<ScenarioSummary, ScenarioError> {
 
 pub(super) fn validate_scenario<R: Read>(
     reader: R,
-    config: &ReplayConfig,
+    config: &Config,
 ) -> Result<ScenarioSummary, ScenarioError> {
     let mut csv = ReaderBuilder::new().trim(Trim::All).from_reader(reader);
-    let headers = csv.headers()?.clone();
+    let csv_error = |source| ScenarioError::Csv {
+        path: "<scenario>".into(),
+        signal: "<all>".to_owned(),
+        operation: "read",
+        source,
+    };
+    let headers = csv.headers().map_err(csv_error)?.clone();
     validate_unique_headers(&headers)?;
 
     let columns = config
@@ -260,7 +282,7 @@ pub(super) fn validate_scenario<R: Read>(
     let mut states = vec![ValidationState::default(); config.inject.len()];
 
     for record in csv.records() {
-        let record = record?;
+        let record = record.map_err(csv_error)?;
         let line = record.position().map(Position::line);
         for ((injection, columns), state) in config.inject.iter().zip(&columns).zip(&mut states) {
             validate_pair(

@@ -35,10 +35,12 @@ fn initializes_rows_and_catches_up_across_multiple_intervals() {
     assert_eq!(rows[1].previous, Sample::new(Duration::ZERO, 2.0).unwrap());
     assert_eq!(rows[1].next, Some(Sample::new(time(0.75), 4.0).unwrap()));
 
-    playback
-        .advance(time(0.35))
-        .unwrap_or_else(|error| panic!("catch-up read failed: {error:#}"));
-    assert!(!playback.completed());
+    assert!(
+        playback
+            .advance(time(0.35))
+            .unwrap_or_else(|error| panic!("catch-up read failed: {error:#}"))
+            .is_some()
+    );
     let rows = playback.interpolation_rows().collect::<Vec<_>>();
     assert_eq!(rows[0].previous, Sample::new(time(0.2), 5.0).unwrap());
     assert_eq!(rows[0].next, Some(Sample::new(time(0.5), 7.0).unwrap()));
@@ -50,17 +52,19 @@ fn initializes_rows_and_catches_up_across_multiple_intervals() {
 
 #[test]
 fn advances_and_holds_unequal_length_series() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("example/scenario.csv");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../example/scenario.csv");
     let mut playback = Scenario::new(path, &config())
         .unwrap_or_else(|error| panic!("failed to open default scenario: {error:#}"));
 
     let mut held_pitch = false;
     for frame in 0..=1200 {
         let elapsed = time(f64::from(frame) / 30.0);
-        playback
-            .advance(elapsed)
-            .unwrap_or_else(|error| panic!("advance failed at {elapsed:?}: {error:#}"));
-        assert!(!playback.completed());
+        assert!(
+            playback
+                .advance(elapsed)
+                .unwrap_or_else(|error| panic!("advance failed at {elapsed:?}: {error:#}"))
+                .is_some()
+        );
         for rows in playback.interpolation_rows() {
             assert!(rows.previous.time <= elapsed);
             match rows.next {
@@ -80,8 +84,10 @@ fn advances_and_holds_unequal_length_series() {
     }
     assert!(held_pitch);
 
-    playback
-        .advance(time(40.1))
-        .unwrap_or_else(|error| panic!("completion advance failed: {error:#}"));
-    assert!(playback.completed());
+    assert!(
+        playback
+            .advance(time(40.1))
+            .unwrap_or_else(|error| panic!("completion advance failed: {error:#}"))
+            .is_none()
+    );
 }

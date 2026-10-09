@@ -1,8 +1,6 @@
-//! Simulator-independent replay parsing and playback primitives plus the MSFS
-//! WASM gauge entry point.
+//! Replay configuration, streaming, playback and lifecycle orchestration.
 //!
-//! The public modules can be tested on the host. Direct `msfs-rs` integration
-//! is compiled only for `wasm32` targets.
+//! Simulator and aircraft services are supplied through host-testable traits.
 
 #![cfg_attr(
     not(test),
@@ -17,33 +15,21 @@
     )
 )]
 
-#[cfg(any(target_arch = "wasm32", test))]
 /// Arming state and transition tracking used by runtime start/stop control.
 mod arm;
 
-#[cfg(any(target_arch = "wasm32", test))]
-mod aircraft_initialisation;
-
-#[cfg(target_arch = "wasm32")]
-/// MSFS gauge entrypoint and event loop.
-mod gauge;
-
-#[cfg(any(target_arch = "wasm32", test))]
-mod gauge_runtime;
-
-#[cfg(any(target_arch = "wasm32", test))]
-mod replayer;
-
-#[cfg(any(target_arch = "wasm32", test))]
-mod simulator;
-
+pub mod aircraft_initialisation;
 pub mod config;
 /// Scenario cursor abstraction, readers, and row interpolation sources.
 pub mod cursor;
 pub mod error;
 pub mod initialisation;
+mod injection;
 pub mod playback;
 pub mod recording;
+pub mod runtime;
+pub mod simulator;
+mod telemetry;
 
 #[cfg(test)]
 mod tests {

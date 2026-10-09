@@ -1,36 +1,19 @@
 //! MSFS simulator-variable writes through legacy calculator code.
 
 use std::fmt::Write;
+#[cfg(target_arch = "wasm32")]
 use std::time::Duration;
 
-use crate::error::SimulatorError;
+use testpilot_core::simulator::SimulatorAdapter;
+
+use testpilot_core::error::SimulatorError;
 
 /// Packed calculator code used to query simulation time.
 #[cfg(target_arch = "wasm32")]
 const SIMULATION_TIME_CODE: &str = "(E:SIMULATION TIME, seconds)";
 
-/// Simulator operations required by replay injection.
-pub trait SimulatorAdapter {
-    /// Checks whether an `L:` variable exists, without registering it or reading its value.
-    fn local_variable_exists(&mut self, variable: &str) -> Result<bool, SimulatorError>;
-
-    /// Reads an aircraft (`A:`) string variable using the SDK's string unit.
-    fn read_string(&mut self, variable: &str) -> Result<String, SimulatorError>;
-
-    /// Returns the current simulator-clock time.
-    fn simulation_time(&self) -> Result<Duration, SimulatorError>;
-
-    /// Writes a value to a prefixed simulator destination.
-    fn write(&mut self, variable: &str, value: f64) -> Result<(), SimulatorError>;
-
-    /// Validates that a prefixed simulator source can be read with the given unit.
-    fn validate_read(&mut self, variable: &str, unit: Option<&str>) -> Result<(), SimulatorError>;
-
-    /// Reads a finite value from a prefixed simulator source.
-    fn read(&mut self, variable: &str, unit: Option<&str>) -> Result<f64, SimulatorError>;
-}
-
 /// MSFS implementation backed by legacy calculator code.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MsfsSimulator {
     /// Reusable calculator-code scratch buffer for write/read commands.
     calculator_code_buffer: String,
@@ -226,12 +209,13 @@ fn build_read_calculator_code(
 mod tests {
     use std::time::Duration;
 
-    use crate::error::SimulatorError;
+    use testpilot_core::error::SimulatorError;
 
     use super::{
         MsfsSimulator, SimulatorAdapter, build_calculator_code, build_read_calculator_code,
     };
 
+    #[derive(Debug, Clone, PartialEq)]
     struct FakeSimulator {
         time: Duration,
         read_value: f64,
