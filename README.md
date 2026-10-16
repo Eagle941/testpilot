@@ -41,6 +41,20 @@ simulator seconds of arming or the run fails. Inclusive tolerances are 100 kg fo
 ZFW/GW, 0.01 percentage points for GWCG and 0.01 degrees for THS; timeout takes
 precedence over readiness. Waiting produces no replay inputs or telemetry.
 
+Flap setup sends the selected lever event and becomes ready when both
+`L:A32NX_IS_FLAPS_MOVING` and `L:A32NX_IS_SLATS_MOVING` are `0`. The first
+readback can satisfy readiness immediately; no command-submission delay or
+observed-motion requirement is imposed. These flags confirm stopped motion,
+not the requested physical configuration or command acceptance. Lever 1 allows
+A32NX's automatic CONF 1/1+F selection.
+
+Gear setup sends `K:GEAR_UP` or `K:GEAR_DOWN` and waits for one normally valid
+`L:A32NX_LGCIU_1_DISCRETE_WORD_1` or `L:A32NX_LGCIU_2_DISCRETE_WORD_1` to
+confirm the requested selection, all three gear locks and closed, locked doors.
+Other valid computer statuses keep initialisation waiting. Missing interfaces,
+malformed readback or simulator I/O failures fail the run. Electrical/hydraulic
+availability remains an operator precondition.
+
 Arming changes during a run are ignored. Completion, failure and shutdown stop
 injection, flush telemetry and reset arming to `0`. Failures retain partial output
 and return to idle; a failed arming reset is retried before accepting another run.
@@ -68,8 +82,15 @@ Optional `[initialisation]` accepts `zfw` and `gw` in kilograms and `gwcg` in pe
 MAC, all three together or all absent. Values must be finite, masses positive and
 `gw >= zfw`. Independently optional `ths` is in degrees, finite and within
 `[-4, 13.5]`. Unknown fields and partial mass/balance groups are rejected. An empty
-table behaves as an omitted section. Only requested groups are commanded and
+table behaves as an omitted section. Independently optional `flaps` is an integer
+lever detent from `0` (UP) through `4` (FULL), and `landing_gear` is exactly
+`"up"` or `"down"`. Either lever setting alone is valid; they use absolute K events
+and are resubmitted on each initialisation update until all configured groups
+are ready. Only requested groups are commanded and
 checked; actual loading limits are enforced by the aircraft integration.
+
+See [A32NX initialisation](crates/testpilot-a32nx/README.md) for aircraft-specific
+options, loading limits, command mappings and readiness checks.
 
 ## Scenario CSV
 

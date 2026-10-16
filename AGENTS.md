@@ -37,8 +37,8 @@ when reusing code; GPLv3-compatible reuse is accepted.
 - Preserve explicit arming and the idle/initialising/running lifecycle. Check arming
   edges only while idle; active runs ignore arming changes. All runs pass through
   initialisation before playback. Supported aircraft must satisfy all configured
-  targets before the deadline; unsupported aircraft skip setup. Only configured
-  mass/balance or trim groups may be commanded and read back.
+  readiness checks before the deadline; unsupported aircraft skip setup. Only
+  configured initialisation groups may be commanded and read back.
 - Stop injection on completion, failure or shutdown. Attempt all cleanup, flush and
   retain partial telemetry, reset arming and return to idle even if cleanup fails.
   Retry failed arming resets before accepting another start. Keep the gauge alive

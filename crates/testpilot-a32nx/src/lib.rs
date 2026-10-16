@@ -1,4 +1,4 @@
-//! A32NX detection, aircraft loading, trim initialisation and actual-state readback.
+//! A32NX detection, initialisation submission and actual-state readback.
 
 #![cfg_attr(
     not(test),
@@ -14,91 +14,103 @@
 )]
 
 use testpilot_core::aircraft_initialisation::AircraftInitialiser;
-use testpilot_core::config::InitialisationConfig;
+use testpilot_core::config::{InitialisationConfig, LandingGear};
 use testpilot_core::error::InitialisationError;
-use testpilot_core::initialisation::AircraftInitialisationState;
 use testpilot_core::simulator::SimulatorAdapter;
 
+mod configuration;
+mod flaps;
+mod landing_gear;
 mod loading;
+mod ths;
 
 #[cfg(test)]
 mod runtime_tests;
 
-use loading::{A32nxLoading, BAG_WEIGHT_KG, PAX_WEIGHT_KG};
-
-impl A32nxLoading {
-    /// Submits prepared loading targets before setting rates and requesting instant loading.
-    fn submit(self, simulator: &mut dyn SimulatorAdapter) -> Result<(), InitialisationError> {
-        // Desired values first, then instant loading rates, then start requests.
-        // Stop at the first failed write; never start loading after a target failure.
-        for (variable, value) in [
-            ("L:A32NX_WB_PER_PAX_WEIGHT", PAX_WEIGHT_KG),
-            ("L:A32NX_WB_PER_BAG_WEIGHT", BAG_WEIGHT_KG),
-            ("L:A32NX_PAX_A_DESIRED", self.pax_a),
-            ("L:A32NX_PAX_B_DESIRED", self.pax_b),
-            ("L:A32NX_PAX_C_DESIRED", self.pax_c),
-            ("L:A32NX_PAX_D_DESIRED", self.pax_d),
-            (
-                "L:A32NX_CARGO_FWD_BAGGAGE_CONTAINER_DESIRED",
-                self.cargo_fwd_baggage_container,
-            ),
-            (
-                "L:A32NX_CARGO_AFT_CONTAINER_DESIRED",
-                self.cargo_aft_container,
-            ),
-            ("L:A32NX_CARGO_AFT_BAGGAGE_DESIRED", self.cargo_aft_baggage),
-            (
-                "L:A32NX_CARGO_AFT_BULK_LOOSE_DESIRED",
-                self.cargo_aft_bulk_loose,
-            ),
-            ("L:A32NX_FUEL_LEFT_AUX_DESIRED", self.fuel_left_aux),
-            ("L:A32NX_FUEL_RIGHT_AUX_DESIRED", self.fuel_right_aux),
-            ("L:A32NX_FUEL_LEFT_MAIN_DESIRED", self.fuel_left_main),
-            ("L:A32NX_FUEL_RIGHT_MAIN_DESIRED", self.fuel_right_main),
-            ("L:A32NX_FUEL_CENTER_DESIRED", self.fuel_center),
-            ("L:A32NX_FUEL_TOTAL_DESIRED", self.fuel_total),
-            ("L:A32NX_FUEL_DESIRED_PERCENT", self.fuel_percent),
-            ("L:A32NX_BOARDING_RATE", 0.0),
-            ("L:A32NX_EFB_REFUEL_RATE_SETTING", 2.0),
-            ("L:A32NX_BOARDING_STARTED_BY_USR", 1.0),
-            ("L:A32NX_REFUEL_STARTED_BY_USR", 1.0),
-        ] {
-            simulator
-                .write(variable, value)
-                .map_err(InitialisationError::Submit)?;
-        }
-        Ok(())
-    }
-}
+use flaps::A32nxFlaps;
+use landing_gear::A32nxLandingGear;
+use loading::A32nxLoading;
+use ths::A32nxThs;
 
 /// A32NX detection, loading submission and configured actual-state readback.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct A32nxInitialiser {
-    /// Whether the latest submitted configuration requests THS readback.
-    read_ths: bool,
-    /// Whether the latest submission omitted the mass/balance group.
-    skip_mass_balance: bool,
+    /// Prepared mass/balance commands from the latest successful submission.
+    mass_balance: Option<A32nxLoading>,
+    /// Prepared THS command from the latest successful submission.
+    ths: Option<A32nxThs>,
+    /// Prepared flap/slat command from the latest successful submission.
+    flaps: Option<A32nxFlaps>,
+    /// Prepared landing gear command from the latest successful submission.
+    landing_gear: Option<A32nxLandingGear>,
 }
 
 impl A32nxInitialiser {
-    /// Trim-wheel position published by A32NX in percent.
-    const TRIM_POSITION: &str = "L:A32NX_HYD_TRIM_WHEEL_PERCENT";
-    /// Transient manual trim demand consumed each simulator tick.
-    const TRIM_EVENT: &str = "K:AXIS_ELEV_TRIM_SET";
+    /// Prepares all configured groups and validates their interfaces without writing commands.
+    fn new(
+        targets: InitialisationConfig,
+        simulator: &mut dyn SimulatorAdapter,
+    ) -> Result<Self, InitialisationError> {
+        Ok(Self {
+            mass_balance: targets
+                .has_mass_balance()
+                .then(|| A32nxLoading::prepare(targets))
+                .transpose()?,
+            ths: targets
+                .ths
+                .map(|target| A32nxThs::prepare(simulator, target))
+                .transpose()?,
+            flaps: targets
+                .flaps
+                .map(|target| A32nxFlaps::prepare(simulator, target))
+                .transpose()?,
+            landing_gear: targets
+                .landing_gear
+                .map(|target| A32nxLandingGear::prepare(simulator, target))
+                .transpose()?,
+        })
+    }
 
-    /// Maps THS degrees to the SDK's integer event range without clamping.
-    fn trim_axis_demand(degrees: f64) -> Result<f64, InitialisationError> {
-        if !degrees.is_finite() || !(-4.0..=13.5).contains(&degrees) {
-            return Err(InitialisationError::InvalidThsTarget { degrees });
+    /// Reads a configured mass/balance value and checks its inclusive absolute tolerance.
+    fn mass_balance_ready(
+        &self,
+        simulator: &mut dyn SimulatorAdapter,
+        field: &'static str,
+        variable: &'static str,
+        target: Option<f64>,
+        tolerance: f64,
+    ) -> Result<bool, InitialisationError> {
+        let Some(target) = target else {
+            return Ok(true);
+        };
+        self.mass_balance
+            .as_ref()
+            .ok_or(InitialisationError::MissingMassBalanceReadback { field })?;
+        let actual = configuration::read_native(simulator, variable)?;
+        Self::within(field, actual, target, tolerance)
+    }
+
+    /// Rejects non-finite readback and compares inclusive endpoints to preserve boundary rounding.
+    fn within(
+        field: &'static str,
+        actual: f64,
+        target: f64,
+        tolerance: f64,
+    ) -> Result<bool, InitialisationError> {
+        if !actual.is_finite() {
+            return Err(InitialisationError::NonFiniteReadback {
+                field,
+                value: actual,
+            });
         }
-        Ok((-16383.0 + (degrees + 4.0) * 32767.0 / 17.5).round())
+        Ok(actual >= target - tolerance && actual <= target + tolerance)
     }
 }
 
 impl AircraftInitialiser for A32nxInitialiser {
     /// Matches the A20N model code and its configured ATC localisation key (see README).
     /// Requires the FlyByWire readiness variable to exist, without reading its value.
-    fn supported_model(&mut self, simulator: &mut dyn SimulatorAdapter) -> bool {
+    fn supported(&mut self, simulator: &mut dyn SimulatorAdapter) -> bool {
         let Ok(model) = simulator.read_string("A:ATC MODEL") else {
             return false;
         };
@@ -118,80 +130,99 @@ impl AircraftInitialiser for A32nxInitialiser {
         simulator: &mut dyn SimulatorAdapter,
         targets: InitialisationConfig,
     ) -> Result<(), InitialisationError> {
-        self.read_ths = false;
-        self.skip_mass_balance = true;
-        // Prepare every target before performing any writes.
-        let loading = targets
-            .has_mass_balance()
-            .then(|| A32nxLoading::from_targets(targets))
-            .transpose()?;
-        let trim = targets
-            .ths
-            .map(|target| {
-                let axis = Self::trim_axis_demand(target)?;
-                if !simulator
-                    .local_variable_exists(Self::TRIM_POSITION)
-                    .map_err(InitialisationError::Readback)?
-                {
-                    return Err(InitialisationError::MissingThsInterface);
-                }
-                simulator
-                    .validate_read(Self::TRIM_POSITION, None)
-                    .map_err(InitialisationError::Readback)?;
-                Ok(axis)
-            })
-            .transpose()?;
-        if let Some(loading) = loading {
-            loading.submit(simulator)?;
+        let next = Self::new(targets, simulator)?;
+        if let Some(mass_balance) = &next.mass_balance {
+            mass_balance.submit(simulator)?;
         }
-        if let Some(axis) = trim {
-            simulator
-                .write(Self::TRIM_EVENT, axis)
-                .map_err(InitialisationError::Submit)?;
+        if let Some(ths) = &next.ths {
+            ths.submit(simulator)?;
         }
-        self.skip_mass_balance = !targets.has_mass_balance();
-        self.read_ths = targets.ths.is_some();
+        if let Some(flaps) = &next.flaps {
+            flaps.submit(simulator)?;
+        }
+        if let Some(landing_gear) = &next.landing_gear {
+            landing_gear.submit(simulator)?;
+        }
+        *self = next;
         Ok(())
     }
 
-    fn readback(
-        &mut self,
+    fn check_zfw(
+        &self,
         simulator: &mut dyn SimulatorAdapter,
-    ) -> Result<AircraftInitialisationState, InitialisationError> {
-        // A32NX publishes actual airframe masses in kg and CG in percent MAC.
-        // L: reads use their native numeric scale without an SDK unit conversion.
-        Ok(AircraftInitialisationState {
-            zfw: (!self.skip_mass_balance)
-                .then(|| {
-                    simulator
-                        .read("L:A32NX_AIRFRAME_ZFW", None)
-                        .map_err(InitialisationError::Readback)
-                })
-                .transpose()?,
-            gw: (!self.skip_mass_balance)
-                .then(|| {
-                    simulator
-                        .read("L:A32NX_AIRFRAME_GW", None)
-                        .map_err(InitialisationError::Readback)
-                })
-                .transpose()?,
-            gwcg: (!self.skip_mass_balance)
-                .then(|| {
-                    simulator
-                        .read("L:A32NX_AIRFRAME_GW_CG_PERCENT_MAC", None)
-                        .map_err(InitialisationError::Readback)
-                })
-                .transpose()?,
-            ths: self
-                .read_ths
-                .then(|| {
-                    simulator
-                        .read(Self::TRIM_POSITION, None)
-                        .map(|percent| -4.0 + percent * 17.5 / 100.0)
-                        .map_err(InitialisationError::Readback)
-                })
-                .transpose()?,
-        })
+        target: Option<f64>,
+    ) -> Result<bool, InitialisationError> {
+        self.mass_balance_ready(simulator, "zfw", "L:A32NX_AIRFRAME_ZFW", target, 100.0)
+    }
+
+    fn check_gw(
+        &self,
+        simulator: &mut dyn SimulatorAdapter,
+        target: Option<f64>,
+    ) -> Result<bool, InitialisationError> {
+        self.mass_balance_ready(simulator, "gw", "L:A32NX_AIRFRAME_GW", target, 100.0)
+    }
+
+    fn check_gwcg(
+        &self,
+        simulator: &mut dyn SimulatorAdapter,
+        target: Option<f64>,
+    ) -> Result<bool, InitialisationError> {
+        self.mass_balance_ready(
+            simulator,
+            "gwcg",
+            "L:A32NX_AIRFRAME_GW_CG_PERCENT_MAC",
+            target,
+            0.01,
+        )
+    }
+
+    fn check_ths(
+        &self,
+        simulator: &mut dyn SimulatorAdapter,
+        target: Option<f64>,
+    ) -> Result<bool, InitialisationError> {
+        let Some(target) = target else {
+            return Ok(true);
+        };
+        let ths = self
+            .ths
+            .as_ref()
+            .ok_or(InitialisationError::MissingThsReadback)?;
+        Self::within("THS", ths.readback(simulator)?, target, 0.01)
+    }
+
+    fn check_flaps(
+        &self,
+        simulator: &mut dyn SimulatorAdapter,
+        target: Option<u8>,
+    ) -> Result<bool, InitialisationError> {
+        if target.is_none() {
+            return Ok(true);
+        }
+        let flaps = self
+            .flaps
+            .as_ref()
+            .ok_or(InitialisationError::MissingReadback { field: "flaps" })?;
+        let (flaps_moving, slats_moving) = flaps.readback(simulator)?;
+        Ok(!flaps_moving && !slats_moving)
+    }
+
+    fn check_landing_gear(
+        &self,
+        simulator: &mut dyn SimulatorAdapter,
+        target: Option<LandingGear>,
+    ) -> Result<bool, InitialisationError> {
+        let Some(target) = target else {
+            return Ok(true);
+        };
+        let gear = self
+            .landing_gear
+            .as_ref()
+            .ok_or(InitialisationError::MissingReadback {
+                field: "landing_gear",
+            })?;
+        A32nxLandingGear::is_ready(gear.readback(simulator)?, target)
     }
 }
 
@@ -200,30 +231,6 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use testpilot_core::error::SimulatorError;
-
-    #[test]
-    fn axis_conversion_preserves_endpoints_and_rounds_to_integer_events() {
-        for (degrees, axis) in [
-            (-4.0, -16383.0),
-            (0.0, -8893.0),
-            (4.75, 1.0),
-            (13.5, 16384.0),
-        ] {
-            assert_eq!(A32nxInitialiser::trim_axis_demand(degrees).unwrap(), axis);
-        }
-        for value in [
-            -4.000001,
-            13.500001,
-            f64::NAN,
-            f64::INFINITY,
-            f64::NEG_INFINITY,
-        ] {
-            assert!(matches!(
-                A32nxInitialiser::trim_axis_demand(value),
-                Err(InitialisationError::InvalidThsTarget { .. })
-            ));
-        }
-    }
 
     #[derive(Debug, Clone, Default, PartialEq)]
     struct LoadingSimulator {
@@ -353,6 +360,8 @@ mod tests {
                     gw: Some(65000.0),
                     gwcg: Some(99.0),
                     ths: None,
+                    flaps: None,
+                    landing_gear: None,
                 },
             )
             .unwrap_err();
@@ -361,5 +370,29 @@ mod tests {
             InitialisationError::UnreachableLoading { .. }
         ));
         assert!(simulator.writes.is_empty());
+    }
+
+    #[test]
+    fn readiness_tolerances_are_inclusive() {
+        for (field, target, tolerance) in [
+            ("zfw", 60000.0, 100.0),
+            ("gw", 65000.0, 100.0),
+            ("gwcg", 25.0, 0.01),
+            ("THS", 1.0, 0.01),
+        ] {
+            for actual in [target - tolerance, target, target + tolerance] {
+                assert!(A32nxInitialiser::within(field, actual, target, tolerance).unwrap());
+            }
+            for actual in [target - tolerance - 0.000001, target + tolerance + 0.000001] {
+                assert!(!A32nxInitialiser::within(field, actual, target, tolerance).unwrap());
+            }
+            for actual in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                assert!(matches!(
+                    A32nxInitialiser::within(field, actual, target, tolerance),
+                    Err(InitialisationError::NonFiniteReadback { field: missing, .. })
+                        if missing == field
+                ));
+            }
+        }
     }
 }

@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use crate::aircraft_initialisation::{AircraftInitialiser, AircraftSupport};
+use crate::aircraft_initialisation::AircraftInitialiser;
 use crate::arm::ArmingMonitor;
 use crate::config::{Config, InitialisationConfig, RecordingConfig};
 use crate::cursor::Scenario;
@@ -251,7 +251,7 @@ struct InitContext {
     scenario: Scenario,
     /// Output location, without an open telemetry file.
     telemetry_directory: PathBuf,
-    /// Pure readiness and deadline state, absent when no aircraft setup is required.
+    /// Readiness diagnostics and deadline state, absent when no aircraft setup is required.
     initialisation: Option<Initialisation>,
 }
 
@@ -288,12 +288,11 @@ impl InitContext {
         aircraft: &mut dyn AircraftInitialiser,
         simulator: &mut dyn SimulatorAdapter,
     ) -> Option<Initialisation> {
-        match aircraft.detect(simulator) {
-            AircraftSupport::Supported => Some(Initialisation::new(targets, simulation_time)),
-            AircraftSupport::Unsupported => {
-                println!("TESTPILOT: initialisation skipped: unsupported or unidentified aircraft");
-                None
-            }
+        if aircraft.supported(simulator) {
+            Some(Initialisation::new(targets, simulation_time))
+        } else {
+            println!("TESTPILOT: initialisation skipped: unsupported or unidentified aircraft");
+            None
         }
     }
 
@@ -309,8 +308,7 @@ impl InitContext {
         };
         initialisation.timed_out(simulation_time)?;
         aircraft.submit(simulator, initialisation.targets())?;
-        let actual = aircraft.readback(simulator)?;
-        if initialisation.is_complete(actual)? {
+        if aircraft.is_ready(simulator, initialisation.targets())? {
             Ok(InitProgress::Ready)
         } else {
             Ok(InitProgress::Waiting)
@@ -401,10 +399,10 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 
-    use crate::config::InitialisationConfig;
+    use crate::aircraft_initialisation::tests::FakeAircraftInitialiser as Readiness;
+    use crate::config::{InitialisationConfig, LandingGear};
     use crate::error::InitialisationError;
     use crate::error::{InjectionError, RuntimeError, SimulatorError, TelemetryError};
-    use crate::initialisation::AircraftInitialisationState;
     use crate::simulator::SimulatorAdapter;
 
     use super::{ARMED_VARIABLE, RunState, Runtime};
@@ -475,7 +473,7 @@ unit = "radians"
         ReadString(String),
         LocalVariableExists(String),
         Initialise(InitialisationConfig),
-        ReadMassBalance,
+        CheckReadiness,
         Write {
             variable: String,
             value: f64,
@@ -554,7 +552,9 @@ unit = "radians"
 
     #[derive(Debug, Clone, Default, PartialEq)]
     struct FakeAircraftInitialiser {
-        mass_balance: VecDeque<Result<AircraftInitialisationState, InitialisationError>>,
+        readiness_reads: VecDeque<Result<(), InitialisationError>>,
+        readiness_frames: VecDeque<[Result<bool, InitialisationError>; 6]>,
+        readiness: Readiness,
         fail_initialisation: bool,
         unsupported: bool,
     }
@@ -569,7 +569,7 @@ unit = "radians"
     }
 
     impl crate::aircraft_initialisation::AircraftInitialiser for SharedAircraftInitialiser {
-        fn supported_model(&mut self, _simulator: &mut dyn SimulatorAdapter) -> bool {
+        fn supported(&mut self, _simulator: &mut dyn SimulatorAdapter) -> bool {
             self.simulator
                 .borrow_mut()
                 .operations
@@ -597,19 +597,76 @@ unit = "radians"
             Ok(())
         }
 
-        fn readback(
-            &mut self,
-            _simulator: &mut dyn SimulatorAdapter,
-        ) -> Result<AircraftInitialisationState, InitialisationError> {
+        fn is_ready(
+            &self,
+            simulator: &mut dyn SimulatorAdapter,
+            targets: InitialisationConfig,
+        ) -> Result<bool, InitialisationError> {
             self.simulator
                 .borrow_mut()
                 .operations
-                .push(Operation::ReadMassBalance);
-            self.state
-                .borrow_mut()
-                .mass_balance
+                .push(Operation::CheckReadiness);
+            let mut state = self.state.borrow_mut();
+            state
+                .readiness_reads
                 .pop_front()
-                .expect("missing queued mass/balance readback")
+                .expect("missing queued readiness result")?;
+            state.readiness.outcomes = state
+                .readiness_frames
+                .pop_front()
+                .unwrap_or_else(|| std::array::from_fn(|_| Ok(true)));
+            state.readiness.is_ready(simulator, targets)
+        }
+
+        fn check_zfw(
+            &self,
+            simulator: &mut dyn SimulatorAdapter,
+            target: Option<f64>,
+        ) -> Result<bool, InitialisationError> {
+            self.state.borrow().readiness.check_zfw(simulator, target)
+        }
+
+        fn check_gw(
+            &self,
+            simulator: &mut dyn SimulatorAdapter,
+            target: Option<f64>,
+        ) -> Result<bool, InitialisationError> {
+            self.state.borrow().readiness.check_gw(simulator, target)
+        }
+
+        fn check_gwcg(
+            &self,
+            simulator: &mut dyn SimulatorAdapter,
+            target: Option<f64>,
+        ) -> Result<bool, InitialisationError> {
+            self.state.borrow().readiness.check_gwcg(simulator, target)
+        }
+
+        fn check_ths(
+            &self,
+            simulator: &mut dyn SimulatorAdapter,
+            target: Option<f64>,
+        ) -> Result<bool, InitialisationError> {
+            self.state.borrow().readiness.check_ths(simulator, target)
+        }
+
+        fn check_flaps(
+            &self,
+            simulator: &mut dyn SimulatorAdapter,
+            target: Option<u8>,
+        ) -> Result<bool, InitialisationError> {
+            self.state.borrow().readiness.check_flaps(simulator, target)
+        }
+
+        fn check_landing_gear(
+            &self,
+            simulator: &mut dyn SimulatorAdapter,
+            target: Option<LandingGear>,
+        ) -> Result<bool, InitialisationError> {
+            self.state
+                .borrow()
+                .readiness
+                .check_landing_gear(simulator, target)
         }
     }
 
@@ -830,16 +887,9 @@ unit = "radians"
             .unwrap_or_else(|error| panic!("invalid test duration: {error}"))
     }
 
-    const MATCHED: AircraftInitialisationState = AircraftInitialisationState {
-        zfw: Some(60000.0),
-        gw: Some(65000.0),
-        gwcg: Some(25.0),
-        ths: None,
-    };
-    const UNMATCHED: AircraftInitialisationState = AircraftInitialisationState {
-        gwcg: Some(26.0),
-        ..MATCHED
-    };
+    fn waiting_for(index: usize) -> [Result<bool, InitialisationError>; 6] {
+        std::array::from_fn(|check| Ok(check != index))
+    }
 
     fn initialisation_fixture() -> Fixture {
         let (input_config, _) = CONFIG.split_once("[record.0]").unwrap();
@@ -926,7 +976,7 @@ unit = "radians"
                 .borrow_mut()
                 .operations
                 .iter()
-                .any(|op| matches!(op, Operation::Initialise(_) | Operation::ReadMassBalance))
+                .any(|op| matches!(op, Operation::Initialise(_) | Operation::CheckReadiness))
         );
         runtime.stop().unwrap();
         assert!(fixture.telemetry_contents().ends_with("\n0,0\n"));
@@ -938,18 +988,12 @@ unit = "radians"
         let mut initialiser = FakeAircraftInitialiser::default();
         let mut simulator = FakeSimulator::new(duration(100.0));
         simulator.queue_reads(ARMED_VARIABLE, [1.0; 5]);
-        initialiser.mass_balance.extend([
-            Ok(AircraftInitialisationState {
-                zfw: Some(61000.0),
-                ..MATCHED
-            }),
-            Ok(AircraftInitialisationState {
-                gw: Some(66000.0),
-                ..MATCHED
-            }),
-            Ok(UNMATCHED),
-            Ok(MATCHED),
-        ]);
+        initialiser
+            .readiness_reads
+            .extend([Ok(()), Ok(()), Ok(()), Ok(())]);
+        initialiser
+            .readiness_frames
+            .extend([waiting_for(0), waiting_for(1), waiting_for(2)]);
         let (mut runtime, simulator, _) =
             runtime_with_initialiser(&fixture, simulator, initialiser);
         runtime.pre_update().unwrap();
@@ -979,7 +1023,7 @@ unit = "radians"
                 .borrow_mut()
                 .operations
                 .iter()
-                .filter(|op| matches!(op, Operation::ReadMassBalance))
+                .filter(|op| matches!(op, Operation::CheckReadiness))
                 .count(),
             4
         );
@@ -992,6 +1036,8 @@ unit = "radians"
                     gw: Some(65000.0),
                     gwcg: Some(25.0),
                     ths: None,
+                    flaps: None,
+                    landing_gear: None,
                 }))
         );
         runtime.stop().unwrap();
@@ -1007,7 +1053,7 @@ unit = "radians"
         let mut initialiser = FakeAircraftInitialiser::default();
         let mut simulator = FakeSimulator::new(duration(100.0));
         simulator.queue_reads(ARMED_VARIABLE, [1.0]);
-        initialiser.mass_balance.push_back(Ok(MATCHED));
+        initialiser.readiness_reads.push_back(Ok(()));
         let (mut runtime, simulator, _) =
             runtime_with_initialiser(&fixture, simulator, initialiser);
 
@@ -1026,7 +1072,7 @@ unit = "radians"
         assert!(matches!(runtime.state, RunState::Running(_)));
         assert!(matches!(
             simulator.borrow().operations.as_slice(),
-            [Operation::Initialise(_), Operation::ReadMassBalance]
+            [Operation::Initialise(_), Operation::CheckReadiness]
         ));
         assert_eq!(fixture.telemetry_contents().lines().count(), 1);
 
@@ -1051,9 +1097,8 @@ unit = "radians"
             let mut initialiser = FakeAircraftInitialiser::default();
             let mut simulator = FakeSimulator::new(duration(100.0));
             simulator.queue_reads(ARMED_VARIABLE, [1.0]);
-            initialiser
-                .mass_balance
-                .extend([Ok(UNMATCHED), Ok(MATCHED)]);
+            initialiser.readiness_reads.extend([Ok(()), Ok(())]);
+            initialiser.readiness_frames.push_back(waiting_for(2));
             let (mut runtime, simulator, initialiser) =
                 runtime_with_initialiser(&fixture, simulator, initialiser);
             runtime.pre_update().unwrap();
@@ -1063,18 +1108,12 @@ unit = "radians"
             let error = runtime.pre_update().unwrap_err();
             assert!(matches!(
                 error.downcast_ref::<InitialisationError>(),
-                Some(InitialisationError::Timeout {
-                    latest: Some(crate::initialisation::AircraftInitialisationState {
-                        zfw: Some(60000.0),
-                        gw: Some(65000.0),
-                        gwcg: Some(26.0),
-                        ths: None
-                    }),
-                    ..
-                })
+                Some(InitialisationError::Timeout { targets })
+                    if targets.zfw == Some(60000.0) && targets.gw == Some(65000.0)
+                        && targets.gwcg == Some(25.0)
             ));
             assert_eq!(
-                initialiser.borrow().mass_balance.len(),
+                initialiser.borrow().readiness_reads.len(),
                 1,
                 "deadline must be checked before readback"
             );
@@ -1114,19 +1153,25 @@ unit = "radians"
             match case {
                 0 => initialiser.fail_initialisation = true,
                 1 => initialiser
-                    .mass_balance
+                    .readiness_reads
                     .push_back(Err(InitialisationError::Readback(
                         SimulatorError::CalculatorCodeReadFailed {
                             variable: "L:TEST_LOADING".to_owned(),
                         },
                     ))),
-                2 => initialiser
-                    .mass_balance
-                    .push_back(Ok(AircraftInitialisationState {
-                        gw: Some(f64::NAN),
-                        ..MATCHED
-                    })),
-                _ => initialiser.mass_balance.push_back(Ok(UNMATCHED)),
+                2 => {
+                    initialiser.readiness_reads.push_back(Ok(()));
+                    let mut checks = waiting_for(0);
+                    checks[1] = Err(InitialisationError::NonFiniteReadback {
+                        field: "gw",
+                        value: f64::NAN,
+                    });
+                    initialiser.readiness_frames.push_back(checks);
+                }
+                _ => {
+                    initialiser.readiness_reads.push_back(Ok(()));
+                    initialiser.readiness_frames.push_back(waiting_for(2));
+                }
             }
             let (mut runtime, simulator, _) =
                 runtime_with_initialiser(&fixture, simulator, initialiser);
@@ -1157,9 +1202,10 @@ unit = "radians"
         let mut initialiser = FakeAircraftInitialiser::default();
         let mut simulator = FakeSimulator::new(duration(100.0));
         simulator.queue_reads(ARMED_VARIABLE, [1.0]);
+        initialiser.readiness_reads.extend([Ok(()), Ok(()), Ok(())]);
         initialiser
-            .mass_balance
-            .extend([Ok(UNMATCHED), Ok(UNMATCHED), Ok(MATCHED)]);
+            .readiness_frames
+            .extend([waiting_for(2), waiting_for(2)]);
         let (mut runtime, simulator, _) =
             runtime_with_initialiser(&fixture, simulator, initialiser);
         runtime.pre_update().unwrap();
@@ -1180,7 +1226,7 @@ unit = "radians"
             assert!(matches!(runtime.state, RunState::Initialising(_)));
             assert!(matches!(
                 simulator.borrow().operations.as_slice(),
-                [Operation::Initialise(_), Operation::ReadMassBalance]
+                [Operation::Initialise(_), Operation::CheckReadiness]
             ));
             assert_no_telemetry(&fixture);
         }
@@ -1191,9 +1237,48 @@ unit = "radians"
         assert!(matches!(runtime.state, RunState::Running(_)));
         assert!(matches!(
             simulator.borrow().operations.as_slice(),
-            [Operation::Initialise(_), Operation::ReadMassBalance]
+            [Operation::Initialise(_), Operation::CheckReadiness]
         ));
         simulator.borrow_mut().time = duration(102.0);
+        runtime.pre_update().unwrap();
+        runtime.stop().unwrap();
+        assert!(fixture.telemetry_contents().ends_with("\n0,0\n"));
+    }
+
+    #[test]
+    fn readiness_check_failure_cleans_up_and_a_subsequent_run_uses_fresh_checks() {
+        let fixture = initialisation_fixture();
+        let mut initialiser = FakeAircraftInitialiser::default();
+        initialiser.readiness_reads.extend([Ok(()), Ok(())]);
+        let mut checks = waiting_for(0);
+        checks[2] = Err(InitialisationError::MissingMassBalanceReadback { field: "gwcg" });
+        initialiser.readiness_frames.push_back(checks);
+        let mut simulator = FakeSimulator::new(duration(100.0));
+        simulator.queue_reads(ARMED_VARIABLE, [1.0, 0.0, 1.0]);
+        let (mut runtime, simulator, initialiser) =
+            runtime_with_initialiser(&fixture, simulator, initialiser);
+
+        runtime.pre_update().unwrap();
+        let error = runtime.pre_update().unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<InitialisationError>(),
+            Some(InitialisationError::MissingMassBalanceReadback { field: "gwcg" })
+        ));
+        assert!(matches!(runtime.state, RunState::Idle(_)));
+        assert_eq!(initialiser.borrow().readiness.calls.borrow().len(), 3);
+        assert_no_telemetry(&fixture);
+        assert_no_replay_writes(&simulator.borrow());
+        assert!(matches!(
+            simulator.borrow().operations.last(),
+            Some(Operation::Write { variable, value: 0.0 }) if variable == ARMED_VARIABLE
+        ));
+
+        runtime.pre_update().unwrap();
+        runtime.pre_update().unwrap();
+        assert!(matches!(runtime.state, RunState::Initialising(_)));
+        runtime.pre_update().unwrap();
+        assert!(matches!(runtime.state, RunState::Running(_)));
+        assert_eq!(initialiser.borrow().readiness.calls.borrow().len(), 9);
         runtime.pre_update().unwrap();
         runtime.stop().unwrap();
         assert!(fixture.telemetry_contents().ends_with("\n0,0\n"));
@@ -1911,7 +1996,7 @@ variable = "L:ELEVATOR_POSITION"
             assert!(matches!(runtime.state, RunState::Idle(_)));
             assert!(!simulator.borrow().operations.iter().any(|op| matches!(
                 op,
-                Operation::DetectAircraft | Operation::Initialise(_) | Operation::ReadMassBalance
+                Operation::DetectAircraft | Operation::Initialise(_) | Operation::CheckReadiness
             )));
             assert_eq!(
                 simulator.borrow().operations.last(),
@@ -1923,7 +2008,7 @@ variable = "L:ELEVATOR_POSITION"
             assert_no_telemetry(&fixture);
             fs::write(&fixture.config_path, valid_config).unwrap();
             fs::write(fixture.directory.join("scenario.csv"), SCENARIO).unwrap();
-            initialiser.borrow_mut().mass_balance.push_back(Ok(MATCHED));
+            initialiser.borrow_mut().readiness_reads.push_back(Ok(()));
             simulator
                 .borrow_mut()
                 .queue_reads(ARMED_VARIABLE, [0.0, 1.0]);
@@ -1945,9 +2030,8 @@ variable = "L:ELEVATOR_POSITION"
         let mut simulator = FakeSimulator::new(duration(100.0));
         simulator.queue_reads(ARMED_VARIABLE, [1.0, 1.0]);
         let mut initialiser = FakeAircraftInitialiser::default();
-        initialiser
-            .mass_balance
-            .extend([Ok(UNMATCHED), Ok(MATCHED)]);
+        initialiser.readiness_reads.extend([Ok(()), Ok(())]);
+        initialiser.readiness_frames.push_back(waiting_for(2));
         let (mut runtime, simulator, _) =
             runtime_with_initialiser(&fixture, simulator, initialiser);
         runtime.pre_update().unwrap();

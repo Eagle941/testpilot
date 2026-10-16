@@ -26,3 +26,9 @@ explicit policy, such as background or chunked prefetching, or bounded catch-up
 that temporarily suspends injection until every cursor reaches the current
 scenario time. Such a policy must not present stale or incomplete injection as
 a valid replay frame.
+
+## Initialisation diagnostics
+
+TODO: Design an aircraft-neutral snapshot for initialisation readback and timeout
+diagnostics. Readiness checks currently read through the aircraft component, and
+timeouts report the configured targets without retaining actual-state observations.

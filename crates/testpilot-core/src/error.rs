@@ -113,6 +113,18 @@ pub enum ConfigFileError {
 /// Initialisation submission, readback, readiness and deadline failures.
 #[derive(Debug, Clone, PartialEq, Error)]
 pub enum InitialisationError {
+    #[error("invalid flap lever detent {detent}: must be between 0 and 4 inclusive")]
+    InvalidFlapsTarget { detent: u8 },
+    #[error("required initialisation readback variable {variable} does not exist")]
+    MissingInterface { variable: &'static str },
+    #[error("initialisation readback {field} is missing")]
+    MissingReadback { field: &'static str },
+    #[error("invalid initialisation readback from {variable}: {value}; {reason}")]
+    InvalidReadback {
+        variable: &'static str,
+        value: f64,
+        reason: &'static str,
+    },
     #[error(
         "invalid THS target {degrees} degrees: must be finite and between -4 and 13.5 inclusive"
     )]
@@ -128,12 +140,9 @@ pub enum InitialisationError {
     UnreachableLoading {
         targets: crate::config::InitialisationConfig,
     },
-    #[error(
-        "aircraft initialisation timed out after 30 simulator seconds; targets (kg, kg, % MAC, THS degrees): {targets:?}; latest actual values: {latest:?}"
-    )]
+    #[error("aircraft initialisation timed out after 30 simulator seconds; targets: {targets:?}")]
     Timeout {
         targets: Box<crate::config::InitialisationConfig>,
-        latest: Option<crate::initialisation::AircraftInitialisationState>,
     },
     #[error("initialisation simulator time moved backwards from {previous:?} to {current:?}")]
     ClockMovedBackwards {

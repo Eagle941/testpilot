@@ -34,7 +34,17 @@ const INJECT_SECTION_FIELDS: [&str; 4] = ["name", "variable", "source_range", "s
 /// Allowed fields for each `[record.N]` section.
 const RECORD_SECTION_FIELDS: [&str; 4] = ["name", "variable", "unit", "max_sampling_rate"];
 
-/// Demanded actual aircraft mass, balance and optional THS, independent of flight-management entries.
+/// Requested landing gear lever state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LandingGear {
+    /// Retract the landing gear.
+    Up,
+    /// Extend the landing gear.
+    Down,
+}
+
+/// Optional aircraft setup targets, independent of flight-management entries.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InitialisationConfig {
@@ -46,6 +56,10 @@ pub struct InitialisationConfig {
     pub gwcg: Option<f64>,
     /// Optional trimmable horizontal stabilizer demand in degrees, from -4 to 13.5.
     pub ths: Option<f64>,
+    /// Optional flap lever detent, from 0 (UP) to 4 (FULL).
+    pub flaps: Option<u8>,
+    /// Optional landing gear lever demand.
+    pub landing_gear: Option<LandingGear>,
 }
 
 impl InitialisationConfig {
@@ -56,11 +70,20 @@ impl InitialisationConfig {
 
     /// Whether the section requests any initialisation work.
     pub const fn has_targets(&self) -> bool {
-        self.has_mass_balance() || self.ths.is_some()
+        self.has_mass_balance()
+            || self.ths.is_some()
+            || self.flaps.is_some()
+            || self.landing_gear.is_some()
     }
 
     /// Checks finite targets and basic mass consistency; aircraft limits belong to the adapter.
     fn validate(&self) -> Result<(), ConfigError> {
+        if self.flaps.is_some_and(|detent| detent > 4) {
+            return Err(ConfigError::InvalidInitialisation {
+                field: "flaps",
+                reason: "must be an integer between 0 and 4 inclusive",
+            });
+        }
         if self.has_mass_balance()
             && (self.zfw.is_none() || self.gw.is_none() || self.gwcg.is_none())
         {
@@ -127,7 +150,11 @@ impl Config {
         })?;
         Self::reject_unknown_fields("root", root, &ROOT_FIELDS)?;
         if let Some(section) = root.get("initialisation").and_then(Value::as_table) {
-            Self::reject_unknown_fields("initialisation", section, &["zfw", "gw", "gwcg", "ths"])?;
+            Self::reject_unknown_fields(
+                "initialisation",
+                section,
+                &["zfw", "gw", "gwcg", "ths", "flaps", "landing_gear"],
+            )?;
         }
 
         let raw: RawReplayConfig = value.try_into().map_err(ConfigError::Toml)?;
@@ -465,6 +492,69 @@ struct RawReplayConfig {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn lever_targets_are_independently_optional_and_strictly_typed() {
+        let parse =
+            |body: &str| Config::new(&format!("{VALID_CONFIG}\n[initialisation]\n{body}\n"));
+        for detent in 0..=4 {
+            let targets = parse(&format!("flaps = {detent}"))
+                .unwrap()
+                .initialisation
+                .unwrap();
+            assert_eq!(targets.flaps, Some(detent));
+            assert!(targets.has_targets());
+            assert_eq!(targets.landing_gear, None);
+        }
+        for (name, gear) in [("up", LandingGear::Up), ("down", LandingGear::Down)] {
+            let targets = parse(&format!("landing_gear = '{name}'"))
+                .unwrap()
+                .initialisation
+                .unwrap();
+            assert_eq!(targets.landing_gear, Some(gear));
+            assert_eq!(targets.flaps, None);
+            assert!(targets.has_targets());
+        }
+        let targets = parse("flaps = 4\nlanding_gear = 'down'\nths = 1.0")
+            .unwrap()
+            .initialisation
+            .unwrap();
+        assert_eq!(targets.flaps, Some(4));
+        assert_eq!(targets.landing_gear, Some(LandingGear::Down));
+        assert_eq!(targets.ths, Some(1.0));
+        assert!(!targets.has_mass_balance());
+        for value in [
+            "-1", "5", "256", "1.0", "1.5", "nan", "inf", "true", "'2'", "[]",
+        ] {
+            assert!(
+                parse(&format!("flaps = {value}")).is_err(),
+                "accepted flaps={value}"
+            );
+        }
+        for value in [
+            "'UP'",
+            "'Down'",
+            "'extended'",
+            "''",
+            "0",
+            "1.0",
+            "true",
+            "[]",
+        ] {
+            assert!(
+                parse(&format!("landing_gear = {value}")).is_err(),
+                "accepted gear={value}"
+            );
+        }
+        assert!(matches!(
+            parse("flaps = 5"),
+            Err(ConfigError::InvalidInitialisation { field: "flaps", .. })
+        ));
+        assert!(matches!(
+            parse("flaps_lever = 1"),
+            Err(ConfigError::UnexpectedField { .. })
+        ));
+    }
+
+    #[test]
     fn validates_optional_ths_degrees() {
         let parse = |value: &str| {
             Config::new(&format!(
@@ -513,6 +603,8 @@ mod tests {
                 gw: Some(65000.0),
                 gwcg: Some(25.0),
                 ths: None,
+                flaps: None,
+                landing_gear: None,
             })
         );
         assert!(parse("zfw = 60000\ngw = 60000\ngwcg = 25").is_ok());

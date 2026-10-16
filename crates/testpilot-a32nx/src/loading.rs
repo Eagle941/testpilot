@@ -1,7 +1,8 @@
-//! Pure A32NX loading model and bounded payload solver.
+//! A32NX loading model, bounded payload solver and simulator submission.
 
 use testpilot_core::config::InitialisationConfig;
 use testpilot_core::error::InitialisationError;
+use testpilot_core::simulator::SimulatorAdapter;
 
 /// Assumed body mass of one passenger, in kilograms.
 pub(super) const PAX_WEIGHT_KG: f64 = 84.0;
@@ -79,7 +80,7 @@ pub(super) struct A32nxLoading {
 
 impl A32nxLoading {
     /// Reduced `calculate`: GW fixes fuel; its moment fixes the required payload moment.
-    pub(super) fn from_targets(targets: InitialisationConfig) -> Result<Self, InitialisationError> {
+    pub(super) fn prepare(targets: InitialisationConfig) -> Result<Self, InitialisationError> {
         let invalid = |reason| InitialisationError::InvalidLoadingTargets { targets, reason };
         let (Some(zfw), Some(gw), Some(gwcg)) = (targets.zfw, targets.gw, targets.gwcg) else {
             return Err(invalid(
@@ -143,6 +144,52 @@ impl A32nxLoading {
             fuel_total,
             fuel_percent: fuel_total / MAX_FUEL_GALLONS * 100.0,
         })
+    }
+
+    /// Submits prepared loading targets before setting rates and requesting instant loading.
+    pub(super) fn submit(
+        &self,
+        simulator: &mut dyn SimulatorAdapter,
+    ) -> Result<(), InitialisationError> {
+        // Desired values first, then instant loading rates, then start requests.
+        // Stop at the first failed write; never start loading after a target failure.
+        for (variable, value) in [
+            ("L:A32NX_WB_PER_PAX_WEIGHT", PAX_WEIGHT_KG),
+            ("L:A32NX_WB_PER_BAG_WEIGHT", BAG_WEIGHT_KG),
+            ("L:A32NX_PAX_A_DESIRED", self.pax_a),
+            ("L:A32NX_PAX_B_DESIRED", self.pax_b),
+            ("L:A32NX_PAX_C_DESIRED", self.pax_c),
+            ("L:A32NX_PAX_D_DESIRED", self.pax_d),
+            (
+                "L:A32NX_CARGO_FWD_BAGGAGE_CONTAINER_DESIRED",
+                self.cargo_fwd_baggage_container,
+            ),
+            (
+                "L:A32NX_CARGO_AFT_CONTAINER_DESIRED",
+                self.cargo_aft_container,
+            ),
+            ("L:A32NX_CARGO_AFT_BAGGAGE_DESIRED", self.cargo_aft_baggage),
+            (
+                "L:A32NX_CARGO_AFT_BULK_LOOSE_DESIRED",
+                self.cargo_aft_bulk_loose,
+            ),
+            ("L:A32NX_FUEL_LEFT_AUX_DESIRED", self.fuel_left_aux),
+            ("L:A32NX_FUEL_RIGHT_AUX_DESIRED", self.fuel_right_aux),
+            ("L:A32NX_FUEL_LEFT_MAIN_DESIRED", self.fuel_left_main),
+            ("L:A32NX_FUEL_RIGHT_MAIN_DESIRED", self.fuel_right_main),
+            ("L:A32NX_FUEL_CENTER_DESIRED", self.fuel_center),
+            ("L:A32NX_FUEL_TOTAL_DESIRED", self.fuel_total),
+            ("L:A32NX_FUEL_DESIRED_PERCENT", self.fuel_percent),
+            ("L:A32NX_BOARDING_RATE", 0.0),
+            ("L:A32NX_EFB_REFUEL_RATE_SETTING", 2.0),
+            ("L:A32NX_BOARDING_STARTED_BY_USR", 1.0),
+            ("L:A32NX_REFUEL_STARTED_BY_USR", 1.0),
+        ] {
+            simulator
+                .write(variable, value)
+                .map_err(InitialisationError::Submit)?;
+        }
+        Ok(())
     }
 
     /// Allocates fuel to auxiliary, main and then centre tanks, returning gallons per tank.
@@ -335,6 +382,8 @@ mod tests {
             gw: Some(gw),
             gwcg: Some(gwcg),
             ths: None,
+            flaps: None,
+            landing_gear: None,
         }
     }
 
@@ -397,6 +446,8 @@ mod tests {
                     gw: Some(56000.0),
                     gwcg: Some(30.5),
                     ths: None,
+                    flaps: None,
+                    landing_gear: None,
                 },
                 [14, 18, 20, 20],
                 [873.6258759536895, 0.0, 0.0, 578.3741240463105],
@@ -408,6 +459,8 @@ mod tests {
                     gw: Some(65000.0),
                     gwcg: Some(25.0),
                     ths: None,
+                    flaps: None,
+                    landing_gear: None,
                 },
                 [32, 42, 47, 47],
                 [
@@ -419,7 +472,7 @@ mod tests {
                 594.6185367347856,
             ),
         ] {
-            let load = A32nxLoading::from_targets(requested).unwrap();
+            let load = A32nxLoading::prepare(requested).unwrap();
             assert_eq!(counts(&load), expected_counts);
             for (actual, expected) in cargo(&load).into_iter().zip(expected_cargo) {
                 close(actual, expected);
@@ -428,7 +481,7 @@ mod tests {
                 close(actual, expected);
             }
             verify(&load, requested);
-            assert_eq!(load, A32nxLoading::from_targets(requested).unwrap());
+            assert_eq!(load, A32nxLoading::prepare(requested).unwrap());
         }
     }
 
@@ -452,7 +505,7 @@ mod tests {
                 [400.0, 500.0, 300.0, 300.0],
                 expected_fuel,
             );
-            let load = A32nxLoading::from_targets(requested).unwrap();
+            let load = A32nxLoading::prepare(requested).unwrap();
             verify(&load, requested);
             for (actual, expected) in fuel(&load).into_iter().zip(expected_fuel) {
                 close(actual, expected);
@@ -475,7 +528,7 @@ mod tests {
             ),
         ] {
             let requested = targets(pax, cargo, [0.0; 5]);
-            let load = A32nxLoading::from_targets(requested).unwrap();
+            let load = A32nxLoading::prepare(requested).unwrap();
             verify(&load, requested);
             assert_eq!(counts(&load), expected_counts);
         }
@@ -483,7 +536,7 @@ mod tests {
         let fuel = A32nxLoading::fuel_distribution(79000.0 - requested.zfw.unwrap());
         requested = targets([36, 42, 48, 48], [2400.0, 2400.0, 1500.0, 884.0], fuel);
         close(requested.gw.unwrap(), 79000.0);
-        verify(&A32nxLoading::from_targets(requested).unwrap(), requested);
+        verify(&A32nxLoading::prepare(requested).unwrap(), requested);
     }
 
     #[test]
@@ -509,6 +562,8 @@ mod tests {
             gw: Some(56000.0),
             gwcg: Some(30.5),
             ths: None,
+            flaps: None,
+            landing_gear: None,
         };
         for requested in [
             InitialisationConfig {
@@ -559,7 +614,7 @@ mod tests {
                 }),
         ) {
             assert!(matches!(
-                A32nxLoading::from_targets(requested),
+                A32nxLoading::prepare(requested),
                 Err(InitialisationError::InvalidLoadingTargets { .. })
             ));
         }
@@ -577,10 +632,12 @@ mod tests {
                 gw: Some(42500.0),
                 gwcg: Some(30.0),
                 ths: None,
+                flaps: None,
+                landing_gear: None,
             },
         ] {
             assert!(matches!(
-                A32nxLoading::from_targets(requested),
+                A32nxLoading::prepare(requested),
                 Err(InitialisationError::UnreachableLoading { .. })
             ));
         }
