@@ -1,6 +1,11 @@
 format_version = 1
 input_file = "scenario.csv"
 
+# Optional A32NX initial flight conditions; both targets must be finite and positive.
+# [initialisation]
+# pressure_altitude = 10000.0 # feet; readiness within 10 ft
+# calibrated_airspeed = 250.0 # knots; readiness within 1 kt
+
 [inject.0]
 name = "sidestick_pitch_position"
 variable = "K:AXIS_ELEVATOR_SET"

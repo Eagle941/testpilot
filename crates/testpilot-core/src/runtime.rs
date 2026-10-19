@@ -115,6 +115,8 @@ impl Runtime {
 
         match &mut self.state {
             RunState::Idle(context) => {
+                // Retry a failed aircraft release before accepting another arming edge.
+                self.aircraft_initialiser.cleanup(self.simulator.as_mut())?;
                 if context.trigger_initialise(self.simulator.as_mut())? {
                     self.start_initialising(simulation_time)?;
                 }
@@ -153,6 +155,7 @@ impl Runtime {
 
     /// Loads configuration and primes input cursors before any aircraft loading.
     fn start_initialising(&mut self, simulation_time: Duration) -> anyhow::Result<()> {
+        self.aircraft_initialiser.reset();
         let config = Config::read_config_file(&self.config_path)?;
         let config_directory =
             self.config_path
@@ -196,6 +199,7 @@ impl Runtime {
             context.telemetry.path().display()
         );
         self.state = RunState::Running(Box::new(context));
+        self.aircraft_initialiser.cleanup(self.simulator.as_mut())?;
         // Install the context first so a validation failure follows the same flush/close path.
         if let RunState::Running(context) = &self.state {
             context.validate(self.simulator.as_mut())?;
@@ -205,17 +209,23 @@ impl Runtime {
 
     /// Releases a run and resets arming, leaving the runtime idle even if cleanup fails.
     pub fn stop(&mut self) -> Result<(), CleanupError> {
+        let aircraft = self.aircraft_initialiser.cleanup(self.simulator.as_mut());
         let flush = match &mut self.state {
             RunState::Running(context) => context.finish(),
             _ => Ok(()),
         };
         // Release all resources even when flushing failed, before resetting arming.
         let arming = self.enter_idle();
-        match (flush, arming) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(source), Ok(())) => Err(CleanupError::Telemetry(source)),
-            (Ok(()), Err(source)) => Err(CleanupError::Arming(source)),
-            (Err(telemetry), Err(arming)) => {
+        match (aircraft, flush, arming) {
+            (Err(source), telemetry, arming) => Err(CleanupError::Aircraft {
+                source,
+                telemetry: telemetry.err().map(Box::new),
+                arming: arming.err(),
+            }),
+            (Ok(()), Ok(()), Ok(())) => Ok(()),
+            (Ok(()), Err(source), Ok(())) => Err(CleanupError::Telemetry(source)),
+            (Ok(()), Ok(()), Err(source)) => Err(CleanupError::Arming(source)),
+            (Ok(()), Err(telemetry), Err(arming)) => {
                 Err(CleanupError::TelemetryAndArming { telemetry, arming })
             }
         }
@@ -306,12 +316,20 @@ impl InitContext {
         let Some(initialisation) = &mut self.initialisation else {
             return Ok(InitProgress::Ready);
         };
-        initialisation.timed_out(simulation_time)?;
-        aircraft.submit(simulator, initialisation.targets())?;
-        if aircraft.is_ready(simulator, initialisation.targets())? {
-            Ok(InitProgress::Ready)
-        } else {
+        if let Err(mut error) = initialisation.timed_out(simulation_time) {
+            if let InitialisationError::Timeout { details, .. } = &mut error {
+                *details = aircraft.timeout_diagnostics(simulator, initialisation.targets());
+            }
+            return Err(error);
+        }
+        aircraft.submit(simulator, initialisation.targets(), simulation_time)?;
+        let pending = aircraft.pending_targets(simulator, initialisation.targets())?;
+        initialisation.set_timeout(aircraft.initialisation_timeout()?);
+        initialisation.update_pending(pending);
+        if pending.has_targets() {
             Ok(InitProgress::Waiting)
+        } else {
+            Ok(InitProgress::Ready)
         }
     }
 }
@@ -553,7 +571,7 @@ unit = "radians"
     #[derive(Debug, Clone, Default, PartialEq)]
     struct FakeAircraftInitialiser {
         readiness_reads: VecDeque<Result<(), InitialisationError>>,
-        readiness_frames: VecDeque<[Result<bool, InitialisationError>; 6]>,
+        readiness_frames: VecDeque<[Result<bool, InitialisationError>; 10]>,
         readiness: Readiness,
         fail_initialisation: bool,
         unsupported: bool,
@@ -581,6 +599,7 @@ unit = "radians"
             &mut self,
             _simulator: &mut dyn SimulatorAdapter,
             targets: InitialisationConfig,
+            _now: Duration,
         ) -> Result<(), InitialisationError> {
             self.simulator
                 .borrow_mut()
@@ -597,11 +616,11 @@ unit = "radians"
             Ok(())
         }
 
-        fn is_ready(
-            &self,
+        fn pending_targets(
+            &mut self,
             simulator: &mut dyn SimulatorAdapter,
             targets: InitialisationConfig,
-        ) -> Result<bool, InitialisationError> {
+        ) -> Result<InitialisationConfig, InitialisationError> {
             self.simulator
                 .borrow_mut()
                 .operations
@@ -615,7 +634,7 @@ unit = "radians"
                 .readiness_frames
                 .pop_front()
                 .unwrap_or_else(|| std::array::from_fn(|_| Ok(true)));
-            state.readiness.is_ready(simulator, targets)
+            state.readiness.pending_targets(simulator, targets)
         }
 
         fn check_zfw(
@@ -668,6 +687,44 @@ unit = "radians"
                 .readiness
                 .check_landing_gear(simulator, target)
         }
+
+        fn check_pressure_altitude(
+            &self,
+            simulator: &mut dyn SimulatorAdapter,
+            target: Option<f64>,
+        ) -> Result<bool, InitialisationError> {
+            self.state
+                .borrow()
+                .readiness
+                .check_pressure_altitude(simulator, target)
+        }
+
+        fn check_calibrated_airspeed(
+            &self,
+            simulator: &mut dyn SimulatorAdapter,
+            target: Option<f64>,
+        ) -> Result<bool, InitialisationError> {
+            self.state
+                .borrow()
+                .readiness
+                .check_calibrated_airspeed(simulator, target)
+        }
+
+        fn check_pitch(
+            &self,
+            simulator: &mut dyn SimulatorAdapter,
+            target: Option<f64>,
+        ) -> Result<bool, InitialisationError> {
+            self.state.borrow().readiness.check_pitch(simulator, target)
+        }
+
+        fn check_roll(
+            &self,
+            simulator: &mut dyn SimulatorAdapter,
+            target: Option<f64>,
+        ) -> Result<bool, InitialisationError> {
+            self.state.borrow().readiness.check_roll(simulator, target)
+        }
     }
 
     impl SimulatorAdapter for Rc<RefCell<FakeSimulator>> {
@@ -683,8 +740,13 @@ unit = "radians"
             self.borrow().simulation_time()
         }
 
-        fn write(&mut self, variable: &str, value: f64) -> Result<(), SimulatorError> {
-            self.borrow_mut().write(variable, value)
+        fn write(
+            &mut self,
+            variable: &str,
+            value: f64,
+            _unit: Option<&str>,
+        ) -> Result<(), SimulatorError> {
+            self.borrow_mut().write(variable, value, _unit)
         }
 
         fn validate_read(
@@ -729,7 +791,12 @@ unit = "radians"
             Ok(self.time)
         }
 
-        fn write(&mut self, variable: &str, value: f64) -> Result<(), SimulatorError> {
+        fn write(
+            &mut self,
+            variable: &str,
+            value: f64,
+            _unit: Option<&str>,
+        ) -> Result<(), SimulatorError> {
             self.operations.push(Operation::Write {
                 variable: variable.to_owned(),
                 value,
@@ -887,7 +954,7 @@ unit = "radians"
             .unwrap_or_else(|error| panic!("invalid test duration: {error}"))
     }
 
-    fn waiting_for(index: usize) -> [Result<bool, InitialisationError>; 6] {
+    fn waiting_for(index: usize) -> [Result<bool, InitialisationError>; 10] {
         std::array::from_fn(|check| Ok(check != index))
     }
 
@@ -1003,11 +1070,11 @@ unit = "radians"
             assert_no_telemetry(&fixture);
             assert_no_replay_writes(&simulator.borrow());
         }
-        simulator.borrow_mut().time = duration(129.999);
+        simulator.borrow_mut().time = duration(159.999);
         runtime.pre_update().unwrap();
-        simulator.borrow_mut().time = duration(130.0);
+        simulator.borrow_mut().time = duration(160.0);
         runtime.pre_update().unwrap();
-        simulator.borrow_mut().time = duration(130.5);
+        simulator.borrow_mut().time = duration(160.5);
         runtime.pre_update().unwrap();
         assert_eq!(
             simulator
@@ -1038,6 +1105,11 @@ unit = "radians"
                     ths: None,
                     flaps: None,
                     landing_gear: None,
+                    pressure_altitude: None,
+                    calibrated_airspeed: None,
+                    vertical_speed: None,
+                    pitch: None,
+                    roll: None,
                 }))
         );
         runtime.stop().unwrap();
@@ -1092,7 +1164,7 @@ unit = "radians"
 
     #[test]
     fn initialisation_timeout_precedes_readiness_and_allows_a_new_run() {
-        for now in [130.0, 135.0] {
+        for now in [160.0, 165.0] {
             let fixture = initialisation_fixture();
             let mut initialiser = FakeAircraftInitialiser::default();
             let mut simulator = FakeSimulator::new(duration(100.0));
@@ -1106,11 +1178,15 @@ unit = "radians"
             runtime.pre_update().unwrap();
             simulator.borrow_mut().time = duration(now);
             let error = runtime.pre_update().unwrap_err();
+            assert_eq!(
+                format!("{error:#}"),
+                "aircraft initialisation timed out after 60 simulator seconds; pending parameters at the last check: [\"gwcg\"]"
+            );
             assert!(matches!(
                 error.downcast_ref::<InitialisationError>(),
-                Some(InitialisationError::Timeout { targets })
+                Some(InitialisationError::Timeout { targets, pending, .. })
                     if targets.zfw == Some(60000.0) && targets.gw == Some(65000.0)
-                        && targets.gwcg == Some(25.0)
+                        && targets.gwcg == Some(25.0) && pending == &["gwcg"]
             ));
             assert_eq!(
                 initialiser.borrow().readiness_reads.len(),
@@ -1278,7 +1354,7 @@ unit = "radians"
         assert!(matches!(runtime.state, RunState::Initialising(_)));
         runtime.pre_update().unwrap();
         assert!(matches!(runtime.state, RunState::Running(_)));
-        assert_eq!(initialiser.borrow().readiness.calls.borrow().len(), 9);
+        assert_eq!(initialiser.borrow().readiness.calls.borrow().len(), 13);
         runtime.pre_update().unwrap();
         runtime.stop().unwrap();
         assert!(fixture.telemetry_contents().ends_with("\n0,0\n"));

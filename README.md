@@ -22,6 +22,8 @@ The installer requires Docker and Python on `PATH`. It builds the gauge, copies
 [scenario](example/scenario.csv), and updates the aircraft panel and layout.
 It overwrites files without backups. Supply `-WorkPath "C:\path\to\work"` when
 the default Microsoft Store work directory is unsuitable.
+Use `-SkipExampleFiles` with `install.ps1` to preserve the existing configuration
+and scenario.
 
 Configuration is loaded from `/work/replayer_config.toml` on every arm; relative
 input paths resolve from `/work`. On Microsoft Store installations, that mount is:
@@ -30,30 +32,13 @@ input paths resolve from `/work`. On Microsoft Store installations, that mount i
 %LOCALAPPDATA%\Packages\Microsoft.FlightSimulator_8wekyb3d8bbwe\LocalState\packages\flybywire-aircraft-a320-neo\work
 ```
 
-Load the aircraft, then set `L:REPLAYER_ARMED` from `0` to `1`. Loading the gauge
-alone never starts injection. Every run passes through initialisation; each
-update processes its starting phase, and playback time zero is established on
-the first running update. Time advances with the simulator clock.
+Load the aircraft, then set `L:REPLAYER_ARMED` from `0` to `1`. Every run passes
+through initialisation before playback, using elapsed simulator time. Loading
+the gauge alone never starts injection.
 
-Optional aircraft setup is skipped for unsupported or unidentified aircraft.
-For supported aircraft, all requested targets must become ready within 30
-simulator seconds of arming or the run fails. Inclusive tolerances are 100 kg for
-ZFW/GW, 0.01 percentage points for GWCG and 0.01 degrees for THS; timeout takes
-precedence over readiness. Waiting produces no replay inputs or telemetry.
-
-Flap setup sends the selected lever event and becomes ready when both
-`L:A32NX_IS_FLAPS_MOVING` and `L:A32NX_IS_SLATS_MOVING` are `0`. The first
-readback can satisfy readiness immediately; no command-submission delay or
-observed-motion requirement is imposed. These flags confirm stopped motion,
-not the requested physical configuration or command acceptance. Lever 1 allows
-A32NX's automatic CONF 1/1+F selection.
-
-Gear setup sends `K:GEAR_UP` or `K:GEAR_DOWN` and waits for one normally valid
-`L:A32NX_LGCIU_1_DISCRETE_WORD_1` or `L:A32NX_LGCIU_2_DISCRETE_WORD_1` to
-confirm the requested selection, all three gear locks and closed, locked doors.
-Other valid computer statuses keep initialisation waiting. Missing interfaces,
-malformed readback or simulator I/O failures fail the run. Electrical/hydraulic
-availability remains an operator precondition.
+Optional aircraft setup waits for all configured readiness checks. Unsupported
+or unidentified aircraft skip setup. Timeouts report pending parameters; waiting
+produces no replay inputs or telemetry.
 
 Arming changes during a run are ignored. Completion, failure and shutdown stop
 injection, flush telemetry and reset arming to `0`. Failures retain partial output
@@ -78,19 +63,10 @@ Source samples outside their configured range are rejected without clamping.
 Simulator ranges must respect the selected interface's valid limits; the MVP
 axis events use raw values in `[-16383, 16384]`.
 
-Optional `[initialisation]` accepts `zfw` and `gw` in kilograms and `gwcg` in percent
-MAC, all three together or all absent. Values must be finite, masses positive and
-`gw >= zfw`. Independently optional `ths` is in degrees, finite and within
-`[-4, 13.5]`. Unknown fields and partial mass/balance groups are rejected. An empty
-table behaves as an omitted section. Independently optional `flaps` is an integer
-lever detent from `0` (UP) through `4` (FULL), and `landing_gear` is exactly
-`"up"` or `"down"`. Either lever setting alone is valid; they use absolute K events
-and are resubmitted on each initialisation update until all configured groups
-are ready. Only requested groups are commanded and
-checked; actual loading limits are enforced by the aircraft integration.
-
-See [A32NX initialisation](crates/testpilot-a32nx/README.md) for aircraft-specific
-options, loading limits, command mappings and readiness checks.
+Optional `[initialisation]` configures A32NX mass/balance, trim, flaps, gear,
+altitude, airspeed and attitude. Omit it to skip setup; an empty table has the
+same effect. See [A32NX initialisation](crates/testpilot-a32nx/README.md) for
+options, units, limits and prerequisites.
 
 ## Scenario CSV
 
@@ -133,10 +109,8 @@ failures are reported; partial files keep their normal timestamped names.
 
 ## Development
 
-Keep configuration, streaming, interpolation and serialization usable on the
-host. Isolate generic simulator I/O from aircraft-specific setup, and keep
-lifecycle orchestration separate from phase work. See [AGENTS.md](AGENTS.md) for
-contributor rules and [CHALLENGES.md](CHALLENGES.md) for known engineering limits.
+See [AGENTS.md](AGENTS.md) for development rules and [CHALLENGES.md](CHALLENGES.md)
+for known limits.
 
 ```sh
 cargo fmt --check
@@ -160,7 +134,3 @@ cleanup.
 Interface references: [FlyByWire aircraft](https://github.com/flybywiresim/aircraft),
 [msfs-rs](https://github.com/flybywiresim/msfs-rs) and
 [YourControls](https://github.com/Sequal32/yourcontrols).
-Future work includes selectable replay configurations.
-
-Keep documentation focused on usage, public file contracts and enduring rules.
-Internal renames and refactors do not require documentation updates.

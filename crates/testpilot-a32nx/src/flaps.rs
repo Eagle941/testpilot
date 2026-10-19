@@ -39,7 +39,7 @@ impl A32nxFlaps {
         simulator: &mut dyn SimulatorAdapter,
     ) -> Result<(), InitialisationError> {
         simulator
-            .write(self.event, 0.0)
+            .write(self.event, 0.0, None)
             .map_err(InitialisationError::Submit)
     }
 

@@ -46,6 +46,8 @@ const FUEL_ARMS: [f64; 5] = [-16.9, -16.9, -8.0, -8.0, -4.5];
 /// Native LVAR values, calculated before any loading writes are performed.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct A32nxLoading {
+    /// ZFW, GW and GWCG inputs identifying this reusable loading plan.
+    pub(super) targets: [f64; 3],
     /// Desired occupied-seat bitmask for cabin A.
     pub(super) pax_a: f64,
     /// Desired occupied-seat bitmask for cabin B.
@@ -79,9 +81,17 @@ pub(super) struct A32nxLoading {
 }
 
 impl A32nxLoading {
+    /// Reuses the bounded payload solution only for the same mass/balance demand.
+    pub(super) fn matches_targets(&self, targets: InitialisationConfig) -> bool {
+        [targets.zfw, targets.gw, targets.gwcg] == self.targets.map(Some)
+    }
+
     /// Reduced `calculate`: GW fixes fuel; its moment fixes the required payload moment.
     pub(super) fn prepare(targets: InitialisationConfig) -> Result<Self, InitialisationError> {
-        let invalid = |reason| InitialisationError::InvalidLoadingTargets { targets, reason };
+        let invalid = |reason| InitialisationError::InvalidLoadingTargets {
+            targets: Box::new(targets),
+            reason,
+        };
         let (Some(zfw), Some(gw), Some(gwcg)) = (targets.zfw, targets.gw, targets.gwcg) else {
             return Err(invalid(
                 "ZFW, GW and GWCG must all be supplied for aircraft loading",
@@ -110,8 +120,12 @@ impl A32nxLoading {
                 "CG is outside the numeric range of the aircraft model",
             ));
         }
-        let (counts, cargo) = Self::solve_payload(zfw - EMPTY_KG, payload_moment)
-            .ok_or(InitialisationError::UnreachableLoading { targets })?;
+        let (counts, cargo) =
+            Self::solve_payload(zfw - EMPTY_KG, payload_moment).ok_or_else(|| {
+                InitialisationError::UnreachableLoading {
+                    targets: Box::new(targets),
+                }
+            })?;
         let [pax_a, pax_b, pax_c, pax_d] = counts.map(Self::seat_mask);
         let [
             cargo_fwd_baggage_container,
@@ -128,6 +142,7 @@ impl A32nxLoading {
         ] = fuel;
         let fuel_total = fuel.iter().sum();
         Ok(Self {
+            targets: [zfw, gw, gwcg],
             pax_a,
             pax_b,
             pax_c,
@@ -186,7 +201,7 @@ impl A32nxLoading {
             ("L:A32NX_REFUEL_STARTED_BY_USR", 1.0),
         ] {
             simulator
-                .write(variable, value)
+                .write(variable, value, None)
                 .map_err(InitialisationError::Submit)?;
         }
         Ok(())
@@ -384,6 +399,11 @@ mod tests {
             ths: None,
             flaps: None,
             landing_gear: None,
+            pressure_altitude: None,
+            calibrated_airspeed: None,
+            vertical_speed: None,
+            pitch: None,
+            roll: None,
         }
     }
 
@@ -448,6 +468,11 @@ mod tests {
                     ths: None,
                     flaps: None,
                     landing_gear: None,
+                    pressure_altitude: None,
+                    calibrated_airspeed: None,
+                    vertical_speed: None,
+                    pitch: None,
+                    roll: None,
                 },
                 [14, 18, 20, 20],
                 [873.6258759536895, 0.0, 0.0, 578.3741240463105],
@@ -461,6 +486,11 @@ mod tests {
                     ths: None,
                     flaps: None,
                     landing_gear: None,
+                    pressure_altitude: None,
+                    calibrated_airspeed: None,
+                    vertical_speed: None,
+                    pitch: None,
+                    roll: None,
                 },
                 [32, 42, 47, 47],
                 [
@@ -540,6 +570,29 @@ mod tests {
     }
 
     #[test]
+    fn reported_loading_demand_includes_the_missing_165_passengers() {
+        let requested = InitialisationConfig {
+            zfw: Some(59745.0),
+            gw: Some(67624.0),
+            gwcg: Some(29.99),
+            ..InitialisationConfig::default()
+        };
+        let load = A32nxLoading::prepare(requested).unwrap();
+        assert_eq!(counts(&load).iter().sum::<u32>(), 165);
+        assert!(
+            [load.pax_a, load.pax_b, load.pax_c, load.pax_d]
+                .into_iter()
+                .all(|mask| mask > i32::MAX as f64)
+        );
+        close(cargo(&load).iter().sum(), 3385.0);
+        close(fuel(&load).iter().sum::<f64>() * KG_PER_GALLON, 7879.0);
+        // The reported weights are the solved cargo and fuel with zero passengers.
+        close(EMPTY_KG + cargo(&load).iter().sum::<f64>(), 45885.0);
+        close(45885.0 + load.fuel_total * KG_PER_GALLON, 53764.0);
+        verify(&load, requested);
+    }
+
+    #[test]
     fn seat_masks_skip_bit_31_and_remain_exact_as_f64() {
         for (count, expected) in [
             (0, 0),
@@ -564,6 +617,11 @@ mod tests {
             ths: None,
             flaps: None,
             landing_gear: None,
+            pressure_altitude: None,
+            calibrated_airspeed: None,
+            vertical_speed: None,
+            pitch: None,
+            roll: None,
         };
         for requested in [
             InitialisationConfig {
@@ -634,6 +692,11 @@ mod tests {
                 ths: None,
                 flaps: None,
                 landing_gear: None,
+                pressure_altitude: None,
+                calibrated_airspeed: None,
+                vertical_speed: None,
+                pitch: None,
+                roll: None,
             },
         ] {
             assert!(matches!(

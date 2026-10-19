@@ -41,7 +41,7 @@ impl ArmingMonitor {
     /// Resets arming to zero; failures are retried before accepting another start.
     pub fn reset(&mut self, simulator: &mut dyn SimulatorAdapter) -> Result<(), SimulatorError> {
         self.reset_pending = true;
-        simulator.write(&self.variable, 0.0)?;
+        simulator.write(&self.variable, 0.0, None)?;
         self.previous = 0.0;
         self.reset_pending = false;
         Ok(())
@@ -87,7 +87,12 @@ mod tests {
             unreachable!()
         }
 
-        fn write(&mut self, variable: &str, value: f64) -> Result<(), SimulatorError> {
+        fn write(
+            &mut self,
+            variable: &str,
+            value: f64,
+            _unit: Option<&str>,
+        ) -> Result<(), SimulatorError> {
             self.writes.push(value);
             if self.fail_write {
                 return Err(SimulatorError::CalculatorCodeWriteFailed {

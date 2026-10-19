@@ -7,5 +7,4 @@ if not exist %envfile% (
     type nul > %envfile%
 )
 
-docker image inspect %image% 1> nul || docker system prune --filter label=flybywiresim=true -f
 docker run --rm -it -v "%cd%:/external" --env-file %envfile% %image% %*

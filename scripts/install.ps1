@@ -3,7 +3,9 @@ param(
     [string] $PackagePath,
 
     [Parameter(Mandatory = $false, Position = 1)]
-    [string] $WorkPath
+    [string] $WorkPath,
+
+    [switch] $SkipExampleFiles
 )
 
 $ErrorActionPreference = "Stop"
@@ -38,9 +40,11 @@ $wasmSource = Join-Path $repoRoot "target/wasm32-wasip1/release/testpilot-msfs.w
 $wasmTarget = Join-Path $panel "testpilot.wasm"
 Copy-Item -Force -Path $wasmSource -Destination $wasmTarget
 
-New-Item -ItemType Directory -Path $WorkPath -Force | Out-Null
-Copy-Item -Force -Path "example/replayer_config.toml" -Destination (Join-Path $WorkPath "replayer_config.toml")
-Copy-Item -Force -Path "example/scenario.csv" -Destination (Join-Path $WorkPath "scenario.csv")
+if (-not $SkipExampleFiles) {
+    New-Item -ItemType Directory -Path $WorkPath -Force | Out-Null
+    Copy-Item -Force -Path "example/replayer_config.toml" -Destination (Join-Path $WorkPath "replayer_config.toml")
+    Copy-Item -Force -Path "example/scenario.csv" -Destination (Join-Path $WorkPath "scenario.csv")
+}
 
 $panelFile = Join-Path $panel "panel.cfg"
 if (-not (Test-Path -Path $panelFile -PathType Leaf)) {

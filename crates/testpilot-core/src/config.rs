@@ -60,6 +60,16 @@ pub struct InitialisationConfig {
     pub flaps: Option<u8>,
     /// Optional landing gear lever demand.
     pub landing_gear: Option<LandingGear>,
+    /// Optional strictly positive pressure altitude in feet.
+    pub pressure_altitude: Option<f64>,
+    /// Optional strictly positive calibrated airspeed in knots.
+    pub calibrated_airspeed: Option<f64>,
+    /// Optional vertical speed in ft/min, positive climb; flight setup defaults to zero.
+    pub vertical_speed: Option<f64>,
+    /// Optional pitch in degrees, positive nose up, from -90 to 90 inclusive.
+    pub pitch: Option<f64>,
+    /// Optional roll in degrees, positive right wing down, from -180 to 180 inclusive.
+    pub roll: Option<f64>,
 }
 
 impl InitialisationConfig {
@@ -74,10 +84,28 @@ impl InitialisationConfig {
             || self.ths.is_some()
             || self.flaps.is_some()
             || self.landing_gear.is_some()
+            || self.pressure_altitude.is_some()
+            || self.calibrated_airspeed.is_some()
+            || self.vertical_speed.is_some()
+            || self.pitch.is_some()
+            || self.roll.is_some()
+    }
+
+    /// Whether setup includes a flight path to settle using the aircraft's flight controls.
+    pub const fn has_flight_conditions(&self) -> bool {
+        self.pressure_altitude.is_some()
+            || self.calibrated_airspeed.is_some()
+            || self.vertical_speed.is_some()
     }
 
     /// Checks finite targets and basic mass consistency; aircraft limits belong to the adapter.
     fn validate(&self) -> Result<(), ConfigError> {
+        if self.vertical_speed.is_some_and(|value| !value.is_finite()) {
+            return Err(ConfigError::InvalidInitialisation {
+                field: "vertical_speed",
+                reason: "must be finite",
+            });
+        }
         if self.flaps.is_some_and(|detent| detent > 4) {
             return Err(ConfigError::InvalidInitialisation {
                 field: "flaps",
@@ -122,6 +150,37 @@ impl InitialisationConfig {
                 reason: "must be finite and between -4 and 13.5 degrees inclusive",
             });
         }
+        for (field, target) in [
+            ("pressure_altitude", self.pressure_altitude),
+            ("calibrated_airspeed", self.calibrated_airspeed),
+        ] {
+            if target.is_some_and(|value| !value.is_finite() || value <= 0.0) {
+                return Err(ConfigError::InvalidInitialisation {
+                    field,
+                    reason: "must be finite and strictly positive",
+                });
+            }
+        }
+        for (field, target, maximum, reason) in [
+            (
+                "pitch",
+                self.pitch,
+                90.0,
+                "must be finite and between -90 and 90 degrees inclusive",
+            ),
+            (
+                "roll",
+                self.roll,
+                180.0,
+                "must be finite and between -180 and 180 degrees inclusive",
+            ),
+        ] {
+            if target
+                .is_some_and(|value| !value.is_finite() || !(-maximum..=maximum).contains(&value))
+            {
+                return Err(ConfigError::InvalidInitialisation { field, reason });
+            }
+        }
         Ok(())
     }
 }
@@ -129,7 +188,7 @@ impl InitialisationConfig {
 /// Validated replay configuration in deterministic processing order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
-    /// Optional demanded aircraft mass, balance and THS before playback.
+    /// Optional aircraft setup targets before playback.
     pub initialisation: Option<InitialisationConfig>,
     /// Scenario CSV path exactly as specified by `input_file`.
     pub input_file: PathBuf,
@@ -153,7 +212,19 @@ impl Config {
             Self::reject_unknown_fields(
                 "initialisation",
                 section,
-                &["zfw", "gw", "gwcg", "ths", "flaps", "landing_gear"],
+                &[
+                    "zfw",
+                    "gw",
+                    "gwcg",
+                    "ths",
+                    "flaps",
+                    "landing_gear",
+                    "pressure_altitude",
+                    "calibrated_airspeed",
+                    "vertical_speed",
+                    "pitch",
+                    "roll",
+                ],
             )?;
         }
 
@@ -492,6 +563,126 @@ struct RawReplayConfig {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn vertical_speed_accepts_level_climb_and_descent_and_rejects_nonfinite_values() {
+        let parse = |value: &str| {
+            Config::new(&format!(
+                "{VALID_CONFIG}\n[initialisation]\nvertical_speed = {value}\n"
+            ))
+        };
+        for value in [-1500.0, 0.0, 1200.0] {
+            let targets = parse(&value.to_string()).unwrap().initialisation.unwrap();
+            assert_eq!(targets.vertical_speed, Some(value));
+            assert!(targets.has_targets() && targets.has_flight_conditions());
+        }
+        for value in ["nan", "inf", "-inf"] {
+            assert!(matches!(
+                parse(value),
+                Err(ConfigError::InvalidInitialisation {
+                    field: "vertical_speed",
+                    ..
+                })
+            ));
+        }
+        for value in ["'1000'", "true", "[]"] {
+            assert!(parse(value).is_err());
+        }
+        let targets = Config::new(&format!(
+            "{VALID_CONFIG}\n[initialisation]\ncalibrated_airspeed = 250\n"
+        ))
+        .unwrap()
+        .initialisation
+        .unwrap();
+        assert_eq!(targets.vertical_speed, None);
+    }
+
+    #[test]
+    fn pitch_and_roll_are_independent_signed_degree_targets() {
+        let parse =
+            |body: &str| Config::new(&format!("{VALID_CONFIG}\n[initialisation]\n{body}\n"));
+        for (field, limit) in [("pitch", 90.0), ("roll", 180.0)] {
+            for value in [-limit, -3.5, 0.0, 3.5, limit] {
+                let targets = parse(&format!("{field} = {value}"))
+                    .unwrap()
+                    .initialisation
+                    .unwrap();
+                assert_eq!(
+                    if field == "pitch" {
+                        targets.pitch
+                    } else {
+                        targets.roll
+                    },
+                    Some(value)
+                );
+                assert!(targets.has_targets());
+                assert_eq!(targets.pressure_altitude, None);
+                assert_ne!(targets.pitch.is_some(), targets.roll.is_some());
+            }
+            for value in [
+                "nan".to_owned(),
+                "inf".to_owned(),
+                "-inf".to_owned(),
+                (limit + 0.001).to_string(),
+                (-limit - 0.001).to_string(),
+            ] {
+                assert!(matches!(parse(&format!("{field} = {value}")),
+                    Err(ConfigError::InvalidInitialisation { field: actual, .. }) if actual == field));
+            }
+            for value in ["'3'", "true", "[]"] {
+                assert!(parse(&format!("{field} = {value}")).is_err());
+            }
+        }
+        let targets = parse("pressure_altitude = 10000\npitch = 3.5\nroll = -15")
+            .unwrap()
+            .initialisation
+            .unwrap();
+        assert_eq!(targets.pitch, Some(3.5));
+        assert_eq!(targets.roll, Some(-15.0));
+        let targets = parse("pressure_altitude = 10000")
+            .unwrap()
+            .initialisation
+            .unwrap();
+        assert_eq!((targets.pitch, targets.roll), (None, None));
+    }
+
+    #[test]
+    fn flight_conditions_are_independent_positive_finite_targets() {
+        let parse =
+            |body: &str| Config::new(&format!("{VALID_CONFIG}\n[initialisation]\n{body}\n"));
+        for (field, other) in [
+            ("pressure_altitude", "calibrated_airspeed"),
+            ("calibrated_airspeed", "pressure_altitude"),
+        ] {
+            for value in ["1", "0.001", "10000.0", "1e100"] {
+                let targets = parse(&format!("{field} = {value}"))
+                    .unwrap()
+                    .initialisation
+                    .unwrap();
+                assert!(targets.has_targets());
+                assert!(!targets.has_mass_balance());
+                assert_ne!(
+                    targets.pressure_altitude.is_some(),
+                    targets.calibrated_airspeed.is_some()
+                );
+                assert!(parse(&format!("{field} = {value}\n{other} = 250.0\nths = 1.0")).is_ok());
+            }
+            for value in ["0", "-0.0", "-1", "nan", "inf", "-inf"] {
+                assert!(matches!(
+                    parse(&format!("{field} = {value}")),
+                    Err(ConfigError::InvalidInitialisation { field: actual, .. }) if actual == field
+                ));
+            }
+            for value in ["'250'", "true", "[]"] {
+                assert!(parse(&format!("{field} = {value}")).is_err());
+            }
+        }
+        assert_eq!(parse("").unwrap().initialisation, None);
+        assert!(matches!(
+            parse("pressure_altitude_ft = 10000"),
+            Err(ConfigError::UnexpectedField { .. })
+        ));
+    }
+
+    #[test]
     fn lever_targets_are_independently_optional_and_strictly_typed() {
         let parse =
             |body: &str| Config::new(&format!("{VALID_CONFIG}\n[initialisation]\n{body}\n"));
@@ -605,6 +796,11 @@ mod tests {
                 ths: None,
                 flaps: None,
                 landing_gear: None,
+                pressure_altitude: None,
+                calibrated_airspeed: None,
+                vertical_speed: None,
+                pitch: None,
+                roll: None,
             })
         );
         assert!(parse("zfw = 60000\ngw = 60000\ngwcg = 25").is_ok());

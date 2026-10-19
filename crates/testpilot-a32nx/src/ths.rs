@@ -6,7 +6,7 @@ use testpilot_core::simulator::SimulatorAdapter;
 use crate::configuration::read_native;
 
 /// Trim-wheel position published by A32NX in percent.
-const TRIM_POSITION: &str = "L:A32NX_HYD_TRIM_WHEEL_PERCENT";
+pub(super) const TRIM_POSITION: &str = "L:A32NX_HYD_TRIM_WHEEL_PERCENT";
 /// Transient manual trim demand consumed each simulator tick.
 const TRIM_EVENT: &str = "K:AXIS_ELEV_TRIM_SET";
 
@@ -42,7 +42,7 @@ impl A32nxThs {
         simulator: &mut dyn SimulatorAdapter,
     ) -> Result<(), InitialisationError> {
         simulator
-            .write(TRIM_EVENT, self.axis)
+            .write(TRIM_EVENT, self.axis, None)
             .map_err(InitialisationError::Submit)
     }
 
@@ -51,7 +51,7 @@ impl A32nxThs {
         &self,
         simulator: &mut dyn SimulatorAdapter,
     ) -> Result<f64, InitialisationError> {
-        read_native(simulator, TRIM_POSITION).map(|percent| -4.0 + percent * 17.5 / 100.0)
+        read_trim_degrees(simulator)
     }
 
     /// Maps THS degrees to the SDK's integer event range without clamping.
@@ -61,6 +61,21 @@ impl A32nxThs {
         }
         Ok((-16383.0 + (degrees + 4.0) * 32767.0 / 17.5).round())
     }
+}
+
+/// Validates the native trim wheel percentage and converts it to stabilizer degrees.
+pub(super) fn read_trim_degrees(
+    simulator: &mut dyn SimulatorAdapter,
+) -> Result<f64, InitialisationError> {
+    let percent = read_native(simulator, TRIM_POSITION)?;
+    if !percent.is_finite() || !(0.0..=100.0).contains(&percent) {
+        return Err(InitialisationError::InvalidReadback {
+            variable: TRIM_POSITION,
+            value: percent,
+            reason: "trim wheel position must be finite and between 0 and 100 percent",
+        });
+    }
+    Ok(-4.0 + percent * 17.5 / 100.0)
 }
 
 #[cfg(test)]

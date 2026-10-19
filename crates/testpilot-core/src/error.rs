@@ -113,6 +113,51 @@ pub enum ConfigFileError {
 /// Initialisation submission, readback, readiness and deadline failures.
 #[derive(Debug, Clone, PartialEq, Error)]
 pub enum InitialisationError {
+    #[error("invalid flight-path setup: {reason}")]
+    InvalidFlightPath { reason: &'static str },
+    #[error(
+        "crossed playback pressure altitude {target} ft at {current} ft before flight conditions stabilised (vertical speed target {vertical_speed} ft/min)"
+    )]
+    MissedPlaybackAltitude {
+        target: f64,
+        current: f64,
+        vertical_speed: f64,
+    },
+    #[error(
+        "invalid initialisation {field} {degrees} degrees; must be finite and between {minimum} and {maximum} degrees inclusive"
+    )]
+    InvalidAttitudeTarget {
+        field: &'static str,
+        degrees: f64,
+        minimum: f64,
+        maximum: f64,
+    },
+    #[error("invalid initialisation target {field}: {value}; must be finite and strictly positive")]
+    InvalidFlightConditionTarget { field: &'static str, value: f64 },
+    #[error(
+        "pressure-altitude correction from {plane_altitude} ft geometric and {pressure_altitude} ft pressure altitude to {target} ft produced non-finite demand {value}"
+    )]
+    InvalidAltitudeCorrection {
+        plane_altitude: f64,
+        pressure_altitude: f64,
+        target: f64,
+        value: f64,
+    },
+    #[error(
+        "airspeed correction from demand {previous_demand} kt and readback {observed} kt to target {target} kt produced invalid demand {value} kt; expected a finite, non-negative value"
+    )]
+    InvalidAirspeedCorrection {
+        previous_demand: f64,
+        observed: f64,
+        target: f64,
+        value: f64,
+    },
+    #[error(
+        "initialisation speed {target} kt exceeds the A32NX gear-extended limit of {maximum} kt"
+    )]
+    GearExtendedSpeedLimit { target: f64, maximum: f64 },
+    #[error("cannot represent initialisation readiness budget {seconds} simulator seconds")]
+    InvalidInitialisationDuration { seconds: f64 },
     #[error("invalid flap lever detent {detent}: must be between 0 and 4 inclusive")]
     InvalidFlapsTarget { detent: u8 },
     #[error("required initialisation readback variable {variable} does not exist")]
@@ -131,18 +176,23 @@ pub enum InitialisationError {
     InvalidThsTarget { degrees: f64 },
     #[error("invalid A32NX loading targets {targets:?}: {reason}")]
     InvalidLoadingTargets {
-        targets: crate::config::InitialisationConfig,
+        targets: Box<crate::config::InitialisationConfig>,
         reason: &'static str,
     },
     #[error(
         "A32NX loading targets {targets:?} are unreachable within passenger, cargo and baggage constraints"
     )]
     UnreachableLoading {
-        targets: crate::config::InitialisationConfig,
-    },
-    #[error("aircraft initialisation timed out after 30 simulator seconds; targets: {targets:?}")]
-    Timeout {
         targets: Box<crate::config::InitialisationConfig>,
+    },
+    #[error(
+        "aircraft initialisation timed out after {seconds} simulator seconds; pending parameters at the last check: {pending:?}{details}", seconds = .timeout.as_secs_f64()
+    )]
+    Timeout {
+        timeout: Duration,
+        targets: Box<crate::config::InitialisationConfig>,
+        pending: Vec<&'static str>,
+        details: String,
     },
     #[error("initialisation simulator time moved backwards from {previous:?} to {current:?}")]
     ClockMovedBackwards {
@@ -193,9 +243,18 @@ pub enum InterpolationError {
     },
 }
 
-/// Cleanup attempts telemetry finalisation and arming reset independently.
+/// Cleanup attempts aircraft release, telemetry finalisation and arming reset independently.
 #[derive(Debug, Error)]
 pub enum CleanupError {
+    #[error(
+        "aircraft cleanup failed: {source}; telemetry cleanup failure: {telemetry:?}; arming reset failure: {arming:?}"
+    )]
+    Aircraft {
+        #[source]
+        source: SimulatorError,
+        telemetry: Option<Box<RecordingError>>,
+        arming: Option<SimulatorError>,
+    },
     #[error("telemetry cleanup failed: {0}")]
     Telemetry(#[source] RecordingError),
     #[error("arming reset failed: {0}")]
@@ -231,8 +290,19 @@ pub enum SimulatorError {
     #[error("cannot write non-finite value {value} to `{variable}`")]
     NonFiniteWrite { variable: String, value: f64 },
 
-    #[error("unsupported simulator variable `{variable}`; expected a non-empty K: or L: prefix")]
+    #[error(
+        "unsupported simulator variable `{variable}`; expected a non-empty A:, K: or L: prefix"
+    )]
     UnsupportedVariable { variable: String },
+
+    #[error("A: variable `{variable}` requires a non-empty write unit")]
+    MissingWriteUnit { variable: String },
+
+    #[error("unit is only valid for A: writes, got `{variable}`")]
+    UnexpectedWriteUnit { variable: String },
+
+    #[error("invalid write unit `{unit}` for `{variable}`")]
+    InvalidWriteUnit { variable: String, unit: String },
 
     #[error("failed to build calculator code for `{variable}`: {source}")]
     CalculatorCodeFormatting {

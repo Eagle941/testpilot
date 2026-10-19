@@ -8,7 +8,13 @@ use testpilot_core::config::LandingGear;
 use testpilot_core::error::InitialisationError;
 use testpilot_core::simulator::SimulatorAdapter;
 
-use crate::configuration::{read_native, validate_interface};
+use crate::airspeed::CALIBRATED_AIRSPEED;
+use crate::configuration::{decode_discrete_word, read_native, read_simvar, validate_interface};
+
+/// Simulator contact state; gear-up commands wait for an airborne observation.
+pub(super) const SIM_ON_GROUND: &str = "A:SIM ON GROUND";
+/// SDK Mach readback for the published A32NX gear operating limits.
+pub(super) const AIRSPEED_MACH: &str = "A:AIRSPEED MACH";
 
 /// Packed discrete word 1 from each computer, including gear and door locks.
 pub(super) const GEAR_VARIABLES: [&str; 2] = [
@@ -16,10 +22,6 @@ pub(super) const GEAR_VARIABLES: [&str; 2] = [
     "L:A32NX_LGCIU_2_DISCRETE_WORD_1",
 ];
 
-/// Maximum packed LGCIU value: a 32-bit payload and a two-bit status.
-const MAX_PACKED_LGCIU: f64 = 0x3_ffff_ffff_u64 as f64;
-/// ARINC 429 status that permits physical lock confirmation.
-const NORMAL_OPERATION_STATUS: u64 = 3;
 /// Discrete bit 29: gear selected down.
 const GEAR_SELECTED_DOWN: u32 = 1 << 28;
 /// Discrete bits 17-19: gear doors not closed and locked.
@@ -32,8 +34,10 @@ const GEARS_DOWNLOCKED: u32 = 0b111 << 22;
 /// Validated absolute landing gear event, prepared before any setup writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct A32nxLandingGear {
-    /// Absolute event for the configured landing gear selection.
-    event: &'static str,
+    /// Absolute event, withheld outside operating limits or for gear-up on the ground.
+    event: Option<&'static str>,
+    /// Ground inhibition is separate from the speed gate and physical lock readiness.
+    on_ground: bool,
 }
 
 impl A32nxLandingGear {
@@ -45,9 +49,40 @@ impl A32nxLandingGear {
         for variable in GEAR_VARIABLES {
             validate_interface(simulator, variable)?;
         }
-        Ok(Self {
-            event: gear_event(target),
-        })
+        let on_ground = if target == LandingGear::Up {
+            match read_simvar(simulator, SIM_ON_GROUND, "bool")? {
+                0.0 => false,
+                1.0 => true,
+                value => {
+                    return Err(InitialisationError::InvalidReadback {
+                        variable: SIM_ON_GROUND,
+                        value,
+                        reason: "ground state must be exactly 0 or 1",
+                    });
+                }
+            }
+        } else {
+            false
+        };
+        let airspeed = read_simvar(simulator, CALIBRATED_AIRSPEED, "knots")?;
+        let mach = read_simvar(simulator, AIRSPEED_MACH, "mach")?;
+        for (variable, value) in [(CALIBRATED_AIRSPEED, airspeed), (AIRSPEED_MACH, mach)] {
+            if value < 0.0 {
+                return Err(InitialisationError::InvalidReadback {
+                    variable,
+                    value,
+                    reason: "gear operating speed must be non-negative",
+                });
+            }
+        }
+        // Published A32NX VLO: retraction 220 kt/M0.54, extension 250 kt/M0.60.
+        let (maximum_airspeed, maximum_mach) = match target {
+            LandingGear::Up => (220.0, 0.54),
+            LandingGear::Down => (250.0, 0.60),
+        };
+        let event = (!on_ground && airspeed <= maximum_airspeed && mach <= maximum_mach)
+            .then_some(gear_event(target));
+        Ok(Self { event, on_ground })
     }
 
     /// Submits the prepared absolute landing gear event.
@@ -55,37 +90,33 @@ impl A32nxLandingGear {
         &self,
         simulator: &mut dyn SimulatorAdapter,
     ) -> Result<(), InitialisationError> {
-        simulator
-            .write(self.event, 0.0)
-            .map_err(InitialisationError::Submit)
+        if let Some(event) = self.event {
+            simulator
+                .write(event, 0.0, None)
+                .map_err(InitialisationError::Submit)?;
+        }
+        Ok(())
     }
 
     /// Reads and validates both computer words independently of the requested selection.
     pub(super) fn readback(
         &self,
         simulator: &mut dyn SimulatorAdapter,
-    ) -> Result<[f64; 2], InitialisationError> {
-        let mut lgciu_words = [0.0; 2];
+    ) -> Result<[Option<u32>; 2], InitialisationError> {
+        let mut lgciu_words = [None; 2];
         for (raw_word, variable) in lgciu_words.iter_mut().zip(GEAR_VARIABLES) {
-            let value = read_native(simulator, variable)?;
-            decode_lgciu(variable, value)?;
-            *raw_word = value;
+            *raw_word = decode_discrete_word(variable, read_native(simulator, variable)?)?;
         }
         Ok(lgciu_words)
     }
 
     /// Accepts the requested locks and closed doors confirmed by one valid computer.
-    pub(super) fn is_ready(
-        actual: [f64; 2],
-        target: LandingGear,
-    ) -> Result<bool, InitialisationError> {
-        let mut ready = false;
-        for (value, variable) in actual.into_iter().zip(GEAR_VARIABLES) {
-            if let Some(word) = decode_lgciu(variable, value)? {
-                ready |= locks_ready(word, target);
-            }
-        }
-        Ok(ready)
+    pub(super) fn is_ready(&self, actual: [Option<u32>; 2], target: LandingGear) -> bool {
+        !self.on_ground
+            && actual
+                .into_iter()
+                .flatten()
+                .any(|word| locks_ready(word, target))
     }
 }
 
@@ -95,32 +126,6 @@ const fn gear_event(target: LandingGear) -> &'static str {
         LandingGear::Up => "K:GEAR_UP",
         LandingGear::Down => "K:GEAR_DOWN",
     }
-}
-
-/// Decodes A32NX's numeric packing: f32 payload bits below a two-bit SSM.
-fn decode_lgciu(variable: &'static str, value: f64) -> Result<Option<u32>, InitialisationError> {
-    if !value.is_finite() || !(0.0..=MAX_PACKED_LGCIU).contains(&value) || value.fract() != 0.0 {
-        return Err(InitialisationError::InvalidReadback {
-            variable,
-            value,
-            reason: "packed LGCIU word must be an integer with a two-bit status and 32-bit payload",
-        });
-    }
-    let packed = value as u64;
-    let payload = f64::from(f32::from_bits(packed as u32));
-    if !payload.is_finite()
-        || !(0.0..=f64::from(u32::MAX)).contains(&payload)
-        || payload.fract() != 0.0
-    {
-        return Err(InitialisationError::InvalidReadback {
-            variable,
-            value,
-            reason: "LGCIU payload must encode a finite non-negative u32 integer as f32",
-        });
-    }
-    // Failure warning, no computed data and functional test cannot confirm locks.
-    let status = packed >> u32::BITS;
-    Ok((status == NORMAL_OPERATION_STATUS).then_some(payload as u32))
 }
 
 /// Checks one-based discrete bits against selection, physical locks and doors.
@@ -154,12 +159,12 @@ mod tests {
     fn decoder_reads_numeric_f32_payload_and_checks_status() {
         let word = (1 << 28) | (0b111 << 22) | (1 << 16);
         assert_eq!(
-            decode_lgciu(GEAR_VARIABLES[0], packed(word, 3)).unwrap(),
+            decode_discrete_word(GEAR_VARIABLES[0], packed(word, 3)).unwrap(),
             Some(word)
         );
         for status in 0..3 {
             assert_eq!(
-                decode_lgciu(GEAR_VARIABLES[0], packed(word, status)).unwrap(),
+                decode_discrete_word(GEAR_VARIABLES[0], packed(word, status)).unwrap(),
                 None
             );
         }
@@ -176,7 +181,7 @@ mod tests {
             u64::from(0.5_f32.to_bits()) as f64,
             u64::from(4294967296.0_f32.to_bits()) as f64,
         ] {
-            assert!(matches!(decode_lgciu(GEAR_VARIABLES[0], value),
+            assert!(matches!(decode_discrete_word(GEAR_VARIABLES[0], value),
                 Err(InitialisationError::InvalidReadback { variable, value: actual, .. })
                 if variable == GEAR_VARIABLES[0] && (actual == value || (actual.is_nan() && value.is_nan()))));
         }

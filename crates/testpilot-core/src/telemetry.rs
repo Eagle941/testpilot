@@ -218,7 +218,12 @@ mod tests {
             unreachable!("telemetry receives the current scenario time")
         }
 
-        fn write(&mut self, _variable: &str, _value: f64) -> Result<(), SimulatorError> {
+        fn write(
+            &mut self,
+            _variable: &str,
+            _value: f64,
+            _unit: Option<&str>,
+        ) -> Result<(), SimulatorError> {
             unreachable!("telemetry never injects simulator inputs")
         }
 

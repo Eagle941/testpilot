@@ -15,8 +15,13 @@ pub trait SimulatorAdapter {
     /// Returns the current simulator-clock time.
     fn simulation_time(&self) -> Result<Duration, SimulatorError>;
 
-    /// Writes a value to a prefixed simulator destination.
-    fn write(&mut self, variable: &str, value: f64) -> Result<(), SimulatorError>;
+    /// Writes a value, requiring a unit for `A:` variables and none for `K:` or `L:`.
+    fn write(
+        &mut self,
+        variable: &str,
+        value: f64,
+        unit: Option<&str>,
+    ) -> Result<(), SimulatorError>;
 
     /// Validates that a prefixed simulator source can be read with the given unit.
     fn validate_read(&mut self, variable: &str, unit: Option<&str>) -> Result<(), SimulatorError>;

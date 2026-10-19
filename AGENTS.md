@@ -69,8 +69,11 @@ when reusing code; GPLv3-compatible reuse is accepted.
 
 README covers purpose, setup and public data/behavior contracts. AGENTS covers
 enduring development rules. Code and tests describe implementation details.
-Update documentation only when those contracts, setup commands or rules change;
-internal refactors and renames require no Markdown updates. Do not add inventories
-of private types, fields, methods or per-change implementation history.
+Keep README files brief and avoid duplicating aircraft-specific documentation.
+Update them only when users need new instructions for setup, configuration or
+file contracts. Routine fixes, refactors, renames and controller tuning require
+no Markdown updates. Keep algorithm and diagnostic details in code and tests;
+report validation in task results. Do not add private API inventories or
+per-change histories.
 
 @RTK.md

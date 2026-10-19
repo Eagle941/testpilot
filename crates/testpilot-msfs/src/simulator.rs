@@ -1,4 +1,4 @@
-//! MSFS simulator-variable writes through legacy calculator code.
+//! MSFS simulator-variable access through the legacy Gauge API.
 
 use std::fmt::Write;
 #[cfg(target_arch = "wasm32")]
@@ -12,7 +12,7 @@ use testpilot_core::error::SimulatorError;
 #[cfg(target_arch = "wasm32")]
 const SIMULATION_TIME_CODE: &str = "(E:SIMULATION TIME, seconds)";
 
-/// MSFS implementation backed by legacy calculator code.
+/// MSFS implementation backed by the legacy Gauge API.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MsfsSimulator {
     /// Reusable calculator-code scratch buffer for write/read commands.
@@ -73,8 +73,20 @@ impl SimulatorAdapter for MsfsSimulator {
             .map_err(|_| SimulatorError::InvalidSimulationTime { value })
     }
 
-    fn write(&mut self, variable: &str, value: f64) -> Result<(), SimulatorError> {
-        build_calculator_code(&mut self.calculator_code_buffer, variable, value)?;
+    fn write(
+        &mut self,
+        variable: &str,
+        value: f64,
+        unit: Option<&str>,
+    ) -> Result<(), SimulatorError> {
+        build_calculator_code(&mut self.calculator_code_buffer, variable, value, unit)?;
+        if let Some(name) = variable.strip_prefix("L:") {
+            // Keep large values such as passenger seat masks as FLOAT64, without
+            // passing an integer-looking literal through the calculator parser.
+            // The validation above also excludes NULs from NamedVariable's name.
+            msfs::legacy::NamedVariable::from(name).set_value(value);
+            return Ok(());
+        }
         msfs::legacy::execute_calculator_code::<()>(&self.calculator_code_buffer).ok_or_else(|| {
             SimulatorError::CalculatorCodeWriteFailed {
                 variable: variable.to_owned(),
@@ -127,7 +139,7 @@ fn decode_string_read(
         })
 }
 
-/// Formats one finite value write for a prefixed `K:` event or `L:` variable.
+/// Formats one finite write to an `A:` variable, `K:` event or `L:` variable.
 ///
 /// The output buffer is cleared and reused. Invalid destinations and non-finite
 /// values are rejected before any calculator code is produced.
@@ -135,6 +147,7 @@ fn build_calculator_code(
     output: &mut String,
     variable: &str,
     value: f64,
+    unit: Option<&str>,
 ) -> Result<(), SimulatorError> {
     if !value.is_finite() {
         return Err(SimulatorError::NonFiniteWrite {
@@ -143,25 +156,44 @@ fn build_calculator_code(
         });
     }
     match variable.as_bytes() {
-        [b'K' | b'L', b':', _, ..] => {}
+        [b'A' | b'K' | b'L', b':', _, ..] => {}
         _ => {
             return Err(SimulatorError::UnsupportedVariable {
                 variable: variable.to_owned(),
             });
         }
     }
-    if variable.as_bytes().contains(&0) {
+    if variable[2..].trim().is_empty() || variable.contains(['\0', '(', ')', ',']) {
         return Err(SimulatorError::UnsupportedVariable {
             variable: variable.to_owned(),
         });
     }
 
     output.clear();
-    write!(output, "{value} (>{variable})").map_err(|source| {
-        SimulatorError::CalculatorCodeFormatting {
-            variable: variable.to_owned(),
-            source,
+    let result = if variable.starts_with("A:") {
+        let unit = unit.filter(|unit| !unit.trim().is_empty()).ok_or_else(|| {
+            SimulatorError::MissingWriteUnit {
+                variable: variable.to_owned(),
+            }
+        })?;
+        if unit.contains(['\0', '(', ')', ',']) {
+            return Err(SimulatorError::InvalidWriteUnit {
+                variable: variable.to_owned(),
+                unit: unit.to_owned(),
+            });
         }
+        write!(output, "{value} (>{variable}, {unit})")
+    } else {
+        if unit.is_some() {
+            return Err(SimulatorError::UnexpectedWriteUnit {
+                variable: variable.to_owned(),
+            });
+        }
+        write!(output, "{value} (>{variable})")
+    };
+    result.map_err(|source| SimulatorError::CalculatorCodeFormatting {
+        variable: variable.to_owned(),
+        source,
     })
 }
 
@@ -237,7 +269,12 @@ mod tests {
             Ok(self.time)
         }
 
-        fn write(&mut self, variable: &str, value: f64) -> Result<(), SimulatorError> {
+        fn write(
+            &mut self,
+            variable: &str,
+            value: f64,
+            _unit: Option<&str>,
+        ) -> Result<(), SimulatorError> {
             self.writes.push((variable.to_owned(), value));
             Ok(())
         }
@@ -308,7 +345,7 @@ mod tests {
             simulator.simulation_time().unwrap(),
             Duration::from_secs(42)
         );
-        simulator.write("L:TEST", 1.0).unwrap();
+        simulator.write("L:TEST", 1.0, None).unwrap();
         simulator.validate_read("A:TEST", Some("number")).unwrap();
         assert_eq!(simulator.read("A:TEST", Some("number")).unwrap(), 2.5);
         assert_eq!(simulator.writes, vec![("L:TEST".to_owned(), 1.0)]);
@@ -318,10 +355,10 @@ mod tests {
     fn builds_key_event_and_local_variable_writes() {
         let mut output = String::with_capacity(64);
 
-        build_calculator_code(&mut output, "K:AXIS_ELEVATOR_SET", -8192.5).unwrap();
+        build_calculator_code(&mut output, "K:AXIS_ELEVATOR_SET", -8192.5, None).unwrap();
         assert_eq!(output, "-8192.5 (>K:AXIS_ELEVATOR_SET)");
 
-        build_calculator_code(&mut output, "L:A32NX_EXAMPLE", 1.0).unwrap();
+        build_calculator_code(&mut output, "L:A32NX_EXAMPLE", 1.0, None).unwrap();
         assert_eq!(output, "1 (>L:A32NX_EXAMPLE)");
     }
 
@@ -365,9 +402,10 @@ mod tests {
             &mut simulator.calculator_code_buffer,
             "K:AXIS_AILERONS_SET",
             16384.0,
+            None,
         )
         .unwrap();
-        build_calculator_code(&mut simulator.calculator_code_buffer, "L:X", 0.0).unwrap();
+        build_calculator_code(&mut simulator.calculator_code_buffer, "L:X", 0.0, None).unwrap();
 
         assert_eq!(simulator.calculator_code_buffer, "0 (>L:X)");
         assert_eq!(simulator.calculator_code_buffer.capacity(), capacity);
@@ -377,23 +415,68 @@ mod tests {
     fn rejects_invalid_destinations_and_values() {
         let mut output = String::new();
 
-        for variable in [
-            "AXIS_ELEVATOR_SET",
-            "K:",
-            "A:ELEVATOR POSITION",
-            "L:BAD\0NAME",
-        ] {
+        for variable in ["AXIS_ELEVATOR_SET", "K:", "A:", "L:BAD\0NAME"] {
             assert_eq!(
-                build_calculator_code(&mut output, variable, 0.0),
+                build_calculator_code(&mut output, variable, 0.0, None),
                 Err(SimulatorError::UnsupportedVariable {
                     variable: variable.to_owned(),
                 })
             );
         }
-        match build_calculator_code(&mut output, "L:TEST", f64::NAN) {
+        match build_calculator_code(&mut output, "L:TEST", f64::NAN, None) {
             Err(SimulatorError::NonFiniteWrite { variable, value })
                 if variable == "L:TEST" && value.is_nan() => {}
             unexpected => panic!("expected non-finite write error, got: {unexpected:?}"),
+        }
+    }
+
+    #[test]
+    fn builds_aircraft_writes_with_explicit_units_and_reuses_the_buffer() {
+        let mut output = String::with_capacity(128);
+        let capacity = output.capacity();
+        build_calculator_code(&mut output, "A:PLANE ALTITUDE", 10000.0, Some("feet")).unwrap();
+        assert_eq!(output, "10000 (>A:PLANE ALTITUDE, feet)");
+        build_calculator_code(&mut output, "A:AIRSPEED INDICATED", 250.0, Some("knots")).unwrap();
+        assert_eq!(output, "250 (>A:AIRSPEED INDICATED, knots)");
+        build_calculator_code(&mut output, "L:X", 0.0, None).unwrap();
+        assert_eq!(output, "0 (>L:X)");
+        assert_eq!(output.capacity(), capacity);
+    }
+
+    #[test]
+    fn rejects_missing_inappropriate_and_malformed_write_units() {
+        let mut output = String::new();
+        for unit in [None, Some(""), Some(" ")] {
+            assert!(matches!(
+                build_calculator_code(&mut output, "A:PLANE ALTITUDE", 10000.0, unit),
+                Err(SimulatorError::MissingWriteUnit { .. })
+            ));
+        }
+        for variable in ["K:FLAPS_UP", "L:TEST"] {
+            for unit in ["number", ""] {
+                assert!(matches!(
+                    build_calculator_code(&mut output, variable, 0.0, Some(unit)),
+                    Err(SimulatorError::UnexpectedWriteUnit { .. })
+                ));
+            }
+        }
+        for unit in ["feet\0", "feet)", "(feet", "feet,number"] {
+            assert!(matches!(
+                build_calculator_code(&mut output, "A:PLANE ALTITUDE", 10000.0, Some(unit)),
+                Err(SimulatorError::InvalidWriteUnit { .. })
+            ));
+        }
+        for variable in ["A: ", "A:PLANE ALTITUDE, feet)", "A:PLANE ALTITUDE\0"] {
+            assert!(matches!(
+                build_calculator_code(&mut output, variable, 10000.0, Some("feet")),
+                Err(SimulatorError::UnsupportedVariable { .. })
+            ));
+        }
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(matches!(
+                build_calculator_code(&mut output, "A:AIRSPEED INDICATED", value, Some("knots")),
+                Err(SimulatorError::NonFiniteWrite { .. })
+            ));
         }
     }
 }

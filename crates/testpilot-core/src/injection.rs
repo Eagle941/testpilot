@@ -36,12 +36,12 @@ impl InputInjector {
                     source,
                 }
             })?;
-            simulator.write(input.variable, value).map_err(|source| {
-                InjectionError::InjectSignal {
+            simulator
+                .write(input.variable, value, None)
+                .map_err(|source| InjectionError::InjectSignal {
                     signal: input.signal.to_owned(),
                     source,
-                }
-            })?;
+                })?;
             *slot = value;
         }
         Ok(())
@@ -82,7 +82,12 @@ mod tests {
             unreachable!("injection receives inputs already evaluated at scenario time")
         }
 
-        fn write(&mut self, variable: &str, value: f64) -> Result<(), SimulatorError> {
+        fn write(
+            &mut self,
+            variable: &str,
+            value: f64,
+            _unit: Option<&str>,
+        ) -> Result<(), SimulatorError> {
             self.writes.push((variable.to_owned(), value));
             if self.fail_on == Some(variable) {
                 return Err(SimulatorError::CalculatorCodeWriteFailed {
